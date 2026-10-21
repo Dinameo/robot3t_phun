@@ -1,0 +1,7 @@
+dataset/*
+*.bat
+__pycache__/
+dobot_cr10a/Library
+dobot_cr10a/obj
+dobot_cr10a/Logs
+dobot_cr10a/Temp
