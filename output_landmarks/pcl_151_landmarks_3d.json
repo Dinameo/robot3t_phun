@@ -1,0 +1,263 @@
+{
+  "file": "pcl_151.ply",
+  "camera": "Zivid 2 M70",
+  "plane_equation": {
+    "a": 0.04065058007836342,
+    "b": -0.005809100344777107,
+    "c": 1661.0711669921875,
+    "normal": [
+      -0.04061634838581085,
+      0.0058042085729539394,
+      0.9991579055786133
+    ]
+  },
+  "landmarks_count": 12,
+  "landmarks": {
+    "waist_left": {
+      "pixel_u": 1187,
+      "pixel_v": 220,
+      "coord_3d_mm": [
+        211.3300018310547,
+        -315.1000061035156,
+        1680.2900390625
+      ],
+      "height_above_table_mm": -8.8,
+      "normal_vector": [
+        0.9639856815338135,
+        -0.12125343829393387,
+        -0.23670493066310883
+      ]
+    },
+    "waist_center": {
+      "pixel_u": 1174,
+      "pixel_v": 416,
+      "coord_3d_mm": [
+        196.00999450683594,
+        -128.5399932861328,
+        1669.3599853515625
+      ],
+      "height_above_table_mm": 0.43,
+      "normal_vector": [
+        0.010136526077985764,
+        -0.0051604206673800945,
+        -0.9999353289604187
+      ]
+    },
+    "waist_right": {
+      "pixel_u": 1162,
+      "pixel_v": 611,
+      "coord_3d_mm": [
+        185.6999969482422,
+        54.36000061035156,
+        1668.1500244140625
+      ],
+      "height_above_table_mm": 0.15,
+      "normal_vector": [
+        0.40695902705192566,
+        0.8937056064605713,
+        -0.18887731432914734
+      ]
+    },
+    "crotch": {
+      "pixel_u": 821,
+      "pixel_v": 397,
+      "coord_3d_mm": [
+        -132.10000610351562,
+        -143.1999969482422,
+        1631.97998046875
+      ],
+      "height_above_table_mm": 24.56,
+      "normal_vector": [
+        -0.8869636654853821,
+        0.4208224415779114,
+        -0.19027341902256012
+      ]
+    },
+    "thigh_left": {
+      "pixel_u": 675,
+      "pixel_v": 217,
+      "coord_3d_mm": [
+        -253.0,
+        -293.45001220703125,
+        1546.760009765625
+      ],
+      "height_above_table_mm": 105.73,
+      "normal_vector": [
+        -0.043636754155159,
+        0.15023431181907654,
+        -0.9876869320869446
+      ]
+    },
+    "thigh_right": {
+      "pixel_u": 658,
+      "pixel_v": 544,
+      "coord_3d_mm": [
+        -268.6000061035156,
+        -8.029999732971191,
+        1552.1500244140625
+      ],
+      "height_above_table_mm": 98.04,
+      "normal_vector": [
+        0.019308453425765038,
+        -0.07765375822782516,
+        -0.9967933893203735
+      ]
+    },
+    "knee_left": {
+      "pixel_u": 482,
+      "pixel_v": 174,
+      "coord_3d_mm": [
+        -423.1300048828125,
+        -332.489990234375,
+        1545.6099853515625
+      ],
+      "height_above_table_mm": 100.19,
+      "normal_vector": [
+        -0.05670567601919174,
+        0.14326101541519165,
+        -0.9880591034889221
+      ]
+    },
+    "knee_right": {
+      "pixel_u": 468,
+      "pixel_v": 556,
+      "coord_3d_mm": [
+        -437.1199951171875,
+        2.3299999237060547,
+        1553.43994140625
+      ],
+      "height_above_table_mm": 89.85,
+      "normal_vector": [
+        0.12337499856948853,
+        -0.12602472305297852,
+        -0.9843253493309021
+      ]
+    },
+    "cuff_left_outer": {
+      "pixel_u": 152,
+      "pixel_v": 73,
+      "coord_3d_mm": [
+        -761.4600219726562,
+        -451.239990234375,
+        1633.8599853515625
+      ],
+      "height_above_table_mm": -1.12,
+      "normal_vector": [
+        -0.2251403033733368,
+        -0.868209958076477,
+        -0.44218018651008606
+      ]
+    },
+    "cuff_left_inner": {
+      "pixel_u": 150,
+      "pixel_v": 178,
+      "coord_3d_mm": [
+        -759.6799926757812,
+        -349.92999267578125,
+        1628.93994140625
+      ],
+      "height_above_table_mm": 3.28,
+      "normal_vector": [
+        -0.3847437798976898,
+        0.9159597158432007,
+        -0.11397376656532288
+      ]
+    },
+    "cuff_right_inner": {
+      "pixel_u": 154,
+      "pixel_v": 524,
+      "coord_3d_mm": [
+        -757.77001953125,
+        -28.68000030517578,
+        1635.5999755859375
+      ],
+      "height_above_table_mm": -5.16,
+      "normal_vector": [
+        -0.10525498539209366,
+        -0.9741548299789429,
+        -0.1998593509197235
+      ]
+    },
+    "cuff_right_outer": {
+      "pixel_u": 146,
+      "pixel_v": 636,
+      "coord_3d_mm": [
+        -758.7899780273438,
+        76.2699966430664,
+        1620.199951171875
+      ],
+      "height_above_table_mm": 9.59,
+      "normal_vector": [
+        -0.6640648245811462,
+        0.46080535650253296,
+        -0.5887922644615173
+      ]
+    }
+  },
+  "skeleton_edges": [
+    [
+      "waist_left",
+      "waist_center"
+    ],
+    [
+      "waist_center",
+      "waist_right"
+    ],
+    [
+      "waist_left",
+      "crotch"
+    ],
+    [
+      "waist_right",
+      "crotch"
+    ],
+    [
+      "crotch",
+      "thigh_left"
+    ],
+    [
+      "crotch",
+      "thigh_right"
+    ],
+    [
+      "thigh_left",
+      "knee_left"
+    ],
+    [
+      "thigh_right",
+      "knee_right"
+    ],
+    [
+      "knee_left",
+      "cuff_left_outer"
+    ],
+    [
+      "knee_left",
+      "cuff_left_inner"
+    ],
+    [
+      "knee_right",
+      "cuff_right_outer"
+    ],
+    [
+      "knee_right",
+      "cuff_right_inner"
+    ],
+    [
+      "cuff_left_outer",
+      "cuff_left_inner"
+    ],
+    [
+      "cuff_right_inner",
+      "cuff_right_outer"
+    ],
+    [
+      "waist_left",
+      "thigh_left"
+    ],
+    [
+      "waist_right",
+      "thigh_right"
+    ]
+  ]
+}
