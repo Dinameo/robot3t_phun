@@ -1,7 +1,8 @@
-function T06 = forward_kinematics(theta)
-%FORWARD_KINEMATICS Tinh ma tran dong hoc thuan T06 theo bang DH.
-%   T06 = forward_kinematics(theta) nhan theta = [q1 ... q6] (radian)
-%   va tra ve ma tran bien doi dong nhat 4x4. Don vi vi tri la mm.
+function T = forward_kinematics(theta, T6tcp)
+%FORWARD_KINEMATICS FK theo bang DH CR10A, co ho tro TCP tuy chon.
+%   T = forward_kinematics(theta) tra T06 toi flange (vi tri mm).
+%   T = forward_kinematics(theta,T6tcp) nhan them bien doi TCP trong frame 6.
+%   theta = [q1 ... q6] (radian). T6tcp vi tri tinh bang mm.
 %
 %   Su dung quy uoc DH chuan:
 %   A_i = Rz(theta_i) * Tz(d_i) * Tx(a_i) * Rx(alpha_i)
@@ -20,7 +21,7 @@ function T06 = forward_kinematics(theta)
           0, -pi/2,  125.0,       0;
           0,      0,  111.3,       0];
 
-    T06 = eye(4);
+    T = eye(4);
     for i = 1:6
         a = dh(i, 1);
         alpha = dh(i, 2);
@@ -37,6 +38,12 @@ function T06 = forward_kinematics(theta)
               0,     sa,     ca,    d; ...
               0,      0,      0,    1];
 
-        T06 = T06 * A;
+        T = T * A;
+    end
+
+    if nargin >= 2 && ~isempty(T6tcp)
+        validateattributes(T6tcp, {'numeric'}, ...
+            {'real', 'finite', 'size', [4 4]}, mfilename, 'T6tcp');
+        T = T * double(T6tcp);
     end
 end

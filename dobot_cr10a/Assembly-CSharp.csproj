@@ -54,6 +54,7 @@
     <Compile Include="Assets\src\PLYDirectLoader.cs" />
     <Compile Include="Assets\TutorialInfo\Scripts\Readme.cs" />
     <Compile Include="Assets\src\RobotCameraController.cs" />
+    <Compile Include="Assets\src\DobotCR10AKinematics.cs" />
     <Compile Include="Assets\src\DobotCR10AIKController.cs" />
   </ItemGroup>
   <ItemGroup>
