@@ -65,9 +65,12 @@ public class DobotCR10AIKController : MonoBehaviour
     public float playbackSpeed = 0.5f; // Hệ số nhân tốc độ khớp
     [Range(1f, 10f)]
     public float maxJointSpeedDegPerSecond = 10f;
+    [Range(1f, 50f)]
+    public float maxJointAccelerationDegPerSecond2 = 12f;
 
-    [Header("5. Hiển thị đường vẽ mực (Trail)")]
-    public bool drawInkTrail = true;
+    [Header("5. Phun sơn (vệt màu đỏ)")]
+    [FormerlySerializedAs("drawInkTrail")]
+    public bool sprayPaintEnabled = true;
     public Color inkColor = Color.red;
 
     // Danh sách waypoint đã nạp
@@ -75,6 +78,10 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private LineRenderer lineRenderer;
     private readonly List<Vector3> actualTcpTrail = new List<Vector3>();
+    private bool paintingStarted;
+    private bool isMovingToManualTarget;
+    private readonly float[] manualTargetAnglesRad = new float[6];
+    private readonly float[] jointVelocitiesRadPerSecond = new float[6];
 
     private void Awake()
     {
@@ -155,6 +162,8 @@ public class DobotCR10AIKController : MonoBehaviour
 
         waypoints.Clear();
         actualTcpTrail.Clear();
+        paintingStarted = false;
+        isMovingToManualTarget = false;
 
         try
         {
@@ -221,12 +230,20 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void Update()
     {
-        if (waypoints.Count == 0) return;
+        if (waypoints.Count == 0 && !isMovingToManualTarget) return;
 
-        if (isPlaying && Application.isPlaying)
+        if (isMovingToManualTarget && Application.isPlaying)
+        {
+            if (MoveTowardJointAngles(manualTargetAnglesRad, Time.deltaTime, false))
+                isMovingToManualTarget = false;
+        }
+        else if (isPlaying && Application.isPlaying && waypoints.Count > 0)
         {
             if (MoveTowardWaypoint(currentWaypointIndex, Time.deltaTime))
             {
+                // Start spraying only after reaching the first selected waypoint;
+                // the travel from the robot's current pose stays unpainted.
+                paintingStarted = true;
                 currentWaypointIndex = (currentWaypointIndex + 1) % waypoints.Count;
             }
         }
@@ -237,10 +254,26 @@ public class DobotCR10AIKController : MonoBehaviour
     /// <summary>
     /// Áp dụng nghiệm động học của waypoint được chọn vào các khớp robot
     /// </summary>
+    private void MoveToWaypointGradually(int index)
+    {
+        if (index < 0 || index >= waypoints.Count) return;
+
+        WaypointData waypoint = waypoints[index];
+        if (!waypoint.isSolved || waypoint.jointAngles_rad == null || waypoint.jointAngles_rad.Length < 6)
+            return;
+
+        currentWaypointIndex = index;
+        paintingStarted = false;
+        for (int joint = 0; joint < manualTargetAnglesRad.Length; joint++)
+            manualTargetAnglesRad[joint] = waypoint.jointAngles_rad[joint];
+        isMovingToManualTarget = true;
+    }
+
     public void ApplyWaypoint(int index)
     {
         if (index < 0 || index >= waypoints.Count) return;
         currentWaypointIndex = index;
+        paintingStarted = false;
 
         WaypointData wp = waypoints[index];
 
@@ -255,8 +288,6 @@ public class DobotCR10AIKController : MonoBehaviour
             robotManual.axis5 = wp.jointAngles_rad[5];
 
             robotManual.ApplyRotations();
-            if (tcpTransform != null)
-                actualTcpTrail.Add(tcpTransform.position);
         }
     }
 
@@ -273,9 +304,20 @@ public class DobotCR10AIKController : MonoBehaviour
         if (!waypoint.isSolved || waypoint.jointAngles_rad == null || waypoint.jointAngles_rad.Length < 6)
             return true;
 
+        return MoveTowardJointAngles(waypoint.jointAngles_rad, deltaTime, true);
+    }
+
+    private bool MoveTowardJointAngles(float[] targetAnglesRad, float deltaTime, bool allowSpraying)
+    {
+        if (robotManual == null || targetAnglesRad == null || targetAnglesRad.Length < 6)
+            return false;
+
         float speedScale = Mathf.Clamp(playbackSpeed, 0.1f, 1f);
         float speedLimit = Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 10f);
-        float maxStepRad = speedLimit * speedScale * Mathf.Deg2Rad * Mathf.Max(0f, deltaTime);
+        float maxVelocityRad = speedLimit * speedScale * Mathf.Deg2Rad;
+        float maxAccelerationRad = Mathf.Clamp(maxJointAccelerationDegPerSecond2, 1f, 50f) *
+            speedScale * Mathf.Deg2Rad;
+        float frameTime = Mathf.Max(0f, deltaTime);
         float[] current =
         {
             robotManual.axis0, robotManual.axis1, robotManual.axis2,
@@ -286,11 +328,34 @@ public class DobotCR10AIKController : MonoBehaviour
         for (int joint = 0; joint < 6; joint++)
         {
             float deltaDeg = Mathf.DeltaAngle(current[joint] * Mathf.Rad2Deg,
-                waypoint.jointAngles_rad[joint] * Mathf.Rad2Deg);
+                targetAnglesRad[joint] * Mathf.Rad2Deg);
             float deltaRad = deltaDeg * Mathf.Deg2Rad;
-            if (Mathf.Abs(deltaDeg) > 0.05f)
-                arrived = false;
-            current[joint] += Mathf.Clamp(deltaRad, -maxStepRad, maxStepRad);
+            if (Mathf.Abs(deltaDeg) <= 0.05f)
+            {
+                current[joint] += deltaRad;
+                jointVelocitiesRadPerSecond[joint] = 0f;
+                continue;
+            }
+
+            arrived = false;
+            // Limit speed by the remaining stopping distance so each joint
+            // accelerates smoothly and brakes before reaching its target.
+            float stoppingSpeed = Mathf.Sqrt(2f * maxAccelerationRad * Mathf.Abs(deltaRad));
+            float desiredSpeed = Mathf.Sign(deltaRad) * Mathf.Min(maxVelocityRad, stoppingSpeed);
+            jointVelocitiesRadPerSecond[joint] = Mathf.MoveTowards(
+                jointVelocitiesRadPerSecond[joint], desiredSpeed, maxAccelerationRad * frameTime);
+            float stepRad = jointVelocitiesRadPerSecond[joint] * frameTime;
+
+            if (Mathf.Sign(stepRad) == Mathf.Sign(deltaRad) &&
+                Mathf.Abs(stepRad) >= Mathf.Abs(deltaRad))
+            {
+                current[joint] += deltaRad;
+                jointVelocitiesRadPerSecond[joint] = 0f;
+            }
+            else
+            {
+                current[joint] += stepRad;
+            }
         }
 
         robotManual.axis0 = current[0];
@@ -301,7 +366,7 @@ public class DobotCR10AIKController : MonoBehaviour
         robotManual.axis5 = current[5];
         robotManual.ApplyRotations();
 
-        if (tcpTransform != null && (actualTcpTrail.Count == 0 ||
+        if (allowSpraying && sprayPaintEnabled && paintingStarted && tcpTransform != null && (actualTcpTrail.Count == 0 ||
             Vector3.Distance(actualTcpTrail[actualTcpTrail.Count - 1], tcpTransform.position) >= 0.001f))
         {
             actualTcpTrail.Add(tcpTransform.position);
@@ -315,7 +380,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void UpdateInkTrail()
     {
-        if (!drawInkTrail || lineRenderer == null || waypoints.Count == 0) return;
+        if (lineRenderer == null) return;
 
         int count = actualTcpTrail.Count;
         lineRenderer.positionCount = count;
@@ -333,7 +398,7 @@ public class DobotCR10AIKController : MonoBehaviour
     private void OnGUI()
     {
         int panelWidth = 360;
-        int panelHeight = 440;
+        int panelHeight = 460;
         Rect panelRect = new Rect(Screen.width - panelWidth - 20, 20, panelWidth, panelHeight);
 
         GUI.Box(panelRect, "");
@@ -366,16 +431,19 @@ public class DobotCR10AIKController : MonoBehaviour
 
         if (GUILayout.Button("<< ĐIỂM ĐẦU", GUILayout.Height(30)))
         {
-            ApplyWaypoint(0);
+            isPlaying = false;
+            MoveToWaypointGradually(0);
         }
 
         if (GUILayout.Button("RESET", GUILayout.Height(30)))
         {
             isPlaying = false;
             actualTcpTrail.Clear();
+            paintingStarted = false;
             currentWaypointIndex = 0;
-            if (robotManual != null)
-                robotManual.ResetAllSlidersToZero();
+            for (int joint = 0; joint < manualTargetAnglesRad.Length; joint++)
+                manualTargetAnglesRad[joint] = 0f;
+            isMovingToManualTarget = true;
             if (lineRenderer != null) lineRenderer.positionCount = 0;
         }
         GUILayout.EndHorizontal();
@@ -397,6 +465,7 @@ public class DobotCR10AIKController : MonoBehaviour
         playbackSpeed = GUILayout.HorizontalSlider(playbackSpeed, 0.1f, 1.0f);
         GUILayout.EndHorizontal();
         GUILayout.Label($"Giới hạn mỗi khớp: {Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 10f):F0}°/s");
+        GUILayout.Label($"Gia tốc tối đa: {Mathf.Clamp(maxJointAccelerationDegPerSecond2, 1f, 50f):F0}°/s²");
 
         GUILayout.Space(8);
 
@@ -440,7 +509,8 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndVertical();
 
         GUILayout.Space(5);
-        drawInkTrail = GUILayout.Toggle(drawInkTrail, " Hiển thị đường vẽ mực đỏ trên quần");
+        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled,
+            sprayPaintEnabled ? " Phun sơn đỏ: BẬT" : " Phun sơn đỏ: TẮT");
 
         GUILayout.EndArea();
     }
