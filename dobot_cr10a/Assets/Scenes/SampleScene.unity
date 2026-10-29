@@ -2475,7 +2475,15 @@ MonoBehaviour:
   isPlaying: 0
   currentWaypointIndex: 0
   playbackSpeed: 0.5
-  maxJointSpeedDegPerSecond: 10
+  maxJointSpeedDegPerSecond: 223
+  maxJointAccelerationDegPerSecond2: 12
+  jointSpeedDegPerSecond:
+  - 10
+  - 10
+  - 10
+  - 10
+  - 10
+  - 10
   sprayPaintEnabled: 1
   inkColor: {r: 1, g: 0, b: 0, a: 1}
   waypoints:

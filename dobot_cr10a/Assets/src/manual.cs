@@ -3,53 +3,67 @@ using System;
 using System.Globalization;
 using System.Collections.Generic;
 
+/// <summary>
+/// BẢNG ĐIỀU KHIỂN ĐỘNG HỌC ROBOT DOBOT CR10A (MANUAL FK / IK CONTROLLER)
+/// Tích hợp trực tiếp thuật toán Thuần Giải Tích (Closed-Form Analytical IK) từ Báo Cáo Kỹ Thuật Dobot CR5.
+/// </summary>
 [ExecuteAlways]
 public class manual : MonoBehaviour
 {
-    [Header("Joint Sliders: Axis 0 -> 5 (Range: -2π -> 2π rad)")]
+    [Header("1. Joint Sliders: Axis 0 -> 5 (Khớp q1 -> q6, Radian & Độ)")]
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 0 (radian)")]
+    [Tooltip("Góc xoay khớp 1 / Axis 0 (radian)")]
     public float axis0 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 1 (radian)")]
+    [Tooltip("Góc xoay khớp 2 / Axis 1 (radian)")]
     public float axis1 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 2 (radian)")]
+    [Tooltip("Góc xoay khớp 3 / Axis 2 (radian)")]
     public float axis2 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 3 (radian)")]
+    [Tooltip("Góc xoay khớp 4 / Axis 3 (radian)")]
     public float axis3 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 4 (radian)")]
+    [Tooltip("Góc xoay khớp 5 / Axis 4 (radian)")]
     public float axis4 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay trục Z của Axis 5 (radian)")]
+    [Tooltip("Góc xoay khớp 6 / Axis 5 (radian)")]
     public float axis5 = 0f;
 
-    [Header("Axis Transforms (Khớp 0 -> 5)")]
-    [Tooltip("Kéo thả 6 khớp vào đây (axis0 -> axis5 hoặc Link1 -> Link6)")]
+    [Header("2. Liên kết Transforms 6 khớp (Axis0 -> Axis5)")]
+    [Tooltip("Mảng chứa 6 Transform của các khớp")]
     public Transform[] axisTransforms = new Transform[6];
 
-    [Header("Offset ban đầu (Đã lưu để về 0)")]
+    [Header("3. Offset góc ban đầu để bảo toàn cấu hình prefab khi slider = 0")]
     [SerializeField]
     private Quaternion[] initialRotations = new Quaternion[6];
 
     [SerializeField]
     private bool isInitialized = false;
 
-    private readonly float[] targetPose = new float[6]; // Robot Global XYZ (mm), ZYX RPY (deg)
+    [Header("4. Cấu hình quy tắc chiều xoay")]
+    [Tooltip("Đảo ngược chiều xoay để chuẩn theo quy tắc bàn tay phải (Robotics chuẩn)")]
+    public bool invertDirection = true;
+
+    [Header("5. Cấu hình công cụ TCP")]
+    [Tooltip("Chiều dài công cụ TCP kẹp dọc theo trục Z mặt bích (mm)")]
+    public float toolLengthMm = 100.0f;
+
+    [Tooltip("Bật tính năng góc tiếp cận thích ứng (Adaptive Approach Angle) khi với xa")]
+    public bool useAdaptiveTilt = false;
+
+    // Các biến nội bộ cho Giao diện OnGUI
+    private readonly float[] targetPose = new float[6]; // X, Y, Z (mm), Roll, Pitch, Yaw (deg)
     private readonly string[] targetText = new string[6];
-    private bool targetInitialized;
-    private string ikStatus = "Nhập pose đích để giải IK.";
-    private float[] lastIkSolution = new float[6];
-    private bool hasIkSolution;
+    private bool targetInitialized = false;
+    private string ikStatus = "Nhập tọa độ mục tiêu hoặc bấm 'Lấy Pose FK Hiện Tại'.";
     private readonly List<DobotCR10AKinematics.IKSolution> ikSolutions = new List<DobotCR10AKinematics.IKSolution>();
-    private Vector2 solutionScroll;
+    private Vector2 solutionScroll = Vector2.zero;
     private Transform globalReference;
     private Transform tcpTransform;
 
@@ -64,8 +78,22 @@ public class manual : MonoBehaviour
         InitializeTargetFromCurrentPose();
     }
 
+    private void Update()
+    {
+        ApplyRotations();
+    }
+
+    private void OnValidate()
+    {
+        if (!isInitialized)
+        {
+            EnsureOffsetsInitialized();
+        }
+        ApplyRotations();
+    }
+
     /// <summary>
-    /// Giữ nguyên offset đã lưu trong Scene. Chỉ chụp từ Transform khi chưa có offset.
+    /// Đảm bảo offset ban đầu được lưu đúng để khi slider = 0 thì robot ở tư thế gốc chuẩn
     /// </summary>
     private void EnsureOffsetsInitialized()
     {
@@ -76,9 +104,6 @@ public class manual : MonoBehaviour
         InitializeOffsets();
     }
 
-    /// <summary>
-    /// Ghi nhớ rotation ban đầu của từng khớp để khi slider = 0 thì góc quay về đúng vị trí ban đầu.
-    /// </summary>
     [ContextMenu("Ghi nhớ góc ban đầu (Capture Zero Offset)")]
     public void InitializeOffsets()
     {
@@ -87,7 +112,6 @@ public class manual : MonoBehaviour
             axisTransforms = new Transform[6];
         }
 
-        // Tự động tìm kiếm trong hierarchy nếu chưa gán
         AutoAssignTransforms();
 
         if (initialRotations == null || initialRotations.Length != 6)
@@ -107,7 +131,7 @@ public class manual : MonoBehaviour
     }
 
     /// <summary>
-    /// Tự động tìm kiếm các Transform theo tên axis0..5 hoặc Link1..6 nếu chưa kéo thả
+    /// Tự động tìm kiếm các Transform theo tên axis0..5 hoặc Link1..6 nếu chưa được gán
     /// </summary>
     private void AutoAssignTransforms()
     {
@@ -115,7 +139,6 @@ public class manual : MonoBehaviour
         {
             if (axisTransforms[i] == null)
             {
-                // Thử tìm trong con cháu hoặc theo tên
                 string[] possibleNames = new string[] {
                     $"axis{i}", $"Axis{i}", $"axis_{i}",
                     $"Link{i + 1}", $"link{i + 1}", $"L{i + 1}",
@@ -144,7 +167,7 @@ public class manual : MonoBehaviour
     private Transform FindDeepChild(Transform parent, string childName)
     {
         if (parent == null) return null;
-        if (parent.name.Equals(childName, System.StringComparison.OrdinalIgnoreCase)) return parent;
+        if (parent.name.Equals(childName, StringComparison.OrdinalIgnoreCase)) return parent;
 
         foreach (Transform child in parent)
         {
@@ -152,125 +175,6 @@ public class manual : MonoBehaviour
             if (result != null) return result;
         }
         return null;
-    }
-
-    private void Update()
-    {
-        ApplyRotations();
-    }
-
-    /// <summary>
-    /// Cập nhật ngay lập tức khi kéo slider trong Inspector (kể cả lúc chưa bấm Play)
-    /// </summary>
-    private void OnValidate()
-    {
-        if (!isInitialized)
-        {
-            EnsureOffsetsInitialized();
-        }
-        ApplyRotations();
-    }
-
-    // Runtime FK/IK panel in the Unity Game view.
-    private void OnGUI()
-    {
-        if (axisTransforms == null || axisTransforms.Length != 6) return;
-        if (!targetInitialized) InitializeTargetFromCurrentPose();
-        ResolveKinematicsReferences();
-
-        const float width = 410f;
-        float height = Mathf.Min(Screen.height - 24f, 700f);
-        Rect panel = new Rect(12f, 12f, width, height);
-        GUI.Box(panel, GUIContent.none);
-        GUILayout.BeginArea(new Rect(panel.x + 10f, panel.y + 8f, width - 20f, height - 16f));
-        GUILayout.BeginVertical();
-        GUILayout.Label("DOBOT CR10A — FK / IK", PanelTitleStyle());
-        GUILayout.Label("Joint q1…q6 (degrees, −360° to 360°)");
-
-        for (int i = 0; i < 6; i++)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"q{i + 1}: {GetJoint(i) * Mathf.Rad2Deg,7:F1}°", GUILayout.Width(108f));
-            float value = GUILayout.HorizontalSlider(GetJoint(i), -2f * Mathf.PI, 2f * Mathf.PI);
-            if (Mathf.Abs(value - GetJoint(i)) > 1e-5f)
-            {
-                SetJoint(i, value);
-                ApplyRotations();
-            }
-            GUILayout.EndHorizontal();
-        }
-
-        Vector3 position;
-        Quaternion rotation;
-        GetForwardPose(GetJointVector(), out position, out rotation, null, null);
-        Vector3 rpy = RotationToRpy(rotation);
-        GUILayout.Space(4f);
-        GUILayout.Label("FK hiện tại — Global robot (mm / độ)", PanelHeaderStyle());
-        GUILayout.Label($"X {position.x * 1000f:F2}   Y {position.y * 1000f:F2}   Z {position.z * 1000f:F2} mm");
-        GUILayout.Label($"Roll {rpy.x:F2}   Pitch {rpy.y:F2}   Yaw {rpy.z:F2}°");
-
-        GUILayout.Label("Vị trí TCP (GameObject tcp) — Global robot (mm)", PanelHeaderStyle());
-        Vector3 axis6GlobalPosition;
-        if (TryGetAxis6PositionGlobal(out axis6GlobalPosition))
-        {
-            GUILayout.Label($"X {axis6GlobalPosition.x:F2}   Y {axis6GlobalPosition.y:F2}   Z {axis6GlobalPosition.z:F2} mm");
-            Transform baseFrame = axisTransforms[0] != null ? axisTransforms[0].parent : null;
-            if (baseFrame != null && globalReference != null)
-            {
-                Vector3 predictedGlobal = globalReference.InverseTransformPoint(baseFrame.TransformPoint(position));
-                // predictedGlobal is in metres; the displayed axis6 value is in millimetres.
-                float errorMm = Vector3.Distance(predictedGlobal * 1000f, axis6GlobalPosition);
-                GUILayout.Label($"Sai số FK ↔ TCP: {errorMm:F3} mm");
-            }
-            else
-            {
-                GUILayout.Label("Không xác định được base frame để so sánh FK.");
-            }
-        }
-        else
-        {
-            GUILayout.Label("Chưa tìm thấy Global hoặc GameObject tcp.");
-        }
-
-        GUILayout.Space(6f);
-        GUILayout.Label("Pose đích — XYZ mm, RPY ZYX độ", PanelHeaderStyle());
-        DrawPoseRow(0, 1, 2);
-        DrawPoseRow(3, 4, 5);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Lấy pose FK hiện tại", GUILayout.Height(26f)))
-            CopyCurrentPoseToTarget();
-        if (GUILayout.Button("Tìm nghiệm IK", GUILayout.Height(26f)))
-            SolveAndApplyIk();
-        GUILayout.EndHorizontal();
-        if (GUILayout.Button("Mặt bích hướng xuống + chọn nghiệm gần nhất", GUILayout.Height(26f)))
-            SetFlangeDownTargetAndApplyIk();
-        GUILayout.Label(ikStatus, PanelStatusStyle());
-
-        if (hasIkSolution)
-        {
-            GUILayout.Label($"Nghiệm IK tìm được: {ikSolutions.Count}", PanelHeaderStyle());
-            GUILayout.Label(string.Format(CultureInfo.InvariantCulture,
-                "q1 {0:F2}   q2 {1:F2}   q3 {2:F2}",
-                lastIkSolution[0] * Mathf.Rad2Deg, lastIkSolution[1] * Mathf.Rad2Deg,
-                lastIkSolution[2] * Mathf.Rad2Deg));
-            GUILayout.Label(string.Format(CultureInfo.InvariantCulture,
-                "q4 {0:F2}   q5 {1:F2}   q6 {2:F2}",
-                lastIkSolution[3] * Mathf.Rad2Deg, lastIkSolution[4] * Mathf.Rad2Deg,
-                lastIkSolution[5] * Mathf.Rad2Deg));
-            solutionScroll = GUILayout.BeginScrollView(solutionScroll, GUILayout.Height(Mathf.Min(150f, 26f * ikSolutions.Count)));
-            for (int i = 0; i < ikSolutions.Count; i++)
-            {
-                double[] q = ikSolutions[i].jointsRad;
-                string label = string.Format(CultureInfo.InvariantCulture,
-                    "Áp dụng #{0}: {1:F1}, {2:F1}, {3:F1}, {4:F1}, {5:F1}, {6:F1}°",
-                    i + 1, q[0] * Mathf.Rad2Deg, q[1] * Mathf.Rad2Deg, q[2] * Mathf.Rad2Deg,
-                    q[3] * Mathf.Rad2Deg, q[4] * Mathf.Rad2Deg, q[5] * Mathf.Rad2Deg);
-                if (GUILayout.Button(label, GUILayout.Height(23f))) ApplySolution(i);
-            }
-            GUILayout.EndScrollView();
-        }
-        GUILayout.EndVertical();
-        GUILayout.EndArea();
     }
 
     private void ResolveKinematicsReferences()
@@ -285,66 +189,184 @@ public class manual : MonoBehaviour
                 globalReference = globalObject.transform;
         }
 
-        if (tcpTransform == null && axisTransforms != null && axisTransforms.Length >= 6)
+        if (tcpTransform == null && axisTransforms != null && axisTransforms.Length >= 6 && axisTransforms[5] != null)
             tcpTransform = FindDeepChild(axisTransforms[5], "tcp");
     }
 
-    private bool TryGetAxis6PositionGlobal(out Vector3 position)
+    /// <summary>
+    /// Áp dụng xoay quanh trục Z cục bộ kết hợp với offset góc ban đầu
+    /// </summary>
+    public void ApplyRotations()
     {
-        ResolveKinematicsReferences();
-        if (globalReference == null || tcpTransform == null)
+        if (axisTransforms == null || axisTransforms.Length != 6) return;
+        if (initialRotations == null || initialRotations.Length != 6) return;
+
+        float[] sliders = new float[6] { axis0, axis1, axis2, axis3, axis4, axis5 };
+        float dirMultiplier = invertDirection ? -1f : 1f;
+
+        for (int i = 0; i < 6; i++)
         {
-            position = Vector3.zero;
-            return false;
+            if (axisTransforms[i] != null)
+            {
+                float angleDeg = dirMultiplier * sliders[i] * Mathf.Rad2Deg;
+                axisTransforms[i].localRotation = initialRotations[i] * Quaternion.Euler(0f, 0f, angleDeg);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reset tất cả các slider về 0
+    /// </summary>
+    [ContextMenu("Reset All Sliders To 0")]
+    public void ResetAllSlidersToZero()
+    {
+        axis0 = 0f;
+        axis1 = 0f;
+        axis2 = 0f;
+        axis3 = 0f;
+        axis4 = 0f;
+        axis5 = 0f;
+        ApplyRotations();
+        ikStatus = "Đã đưa toàn bộ 6 khớp về cấu hình Home (0°).";
+    }
+
+    // =========================================================================
+    // GIAO DIỆN TRỰC QUAN KIỂM THỬ TRÊN MÀN HÌNH GAME (Runtime OnGUI Panel)
+    // =========================================================================
+    private void OnGUI()
+    {
+        if (axisTransforms == null || axisTransforms.Length != 6) return;
+        if (!targetInitialized) InitializeTargetFromCurrentPose();
+        ResolveKinematicsReferences();
+
+        const float panelWidth = 430f;
+        float panelHeight = Mathf.Min(Screen.height - 24f, 740f);
+        Rect panelRect = new Rect(12f, 12f, panelWidth, panelHeight);
+
+        GUI.Box(panelRect, GUIContent.none);
+        GUILayout.BeginArea(new Rect(panelRect.x + 10f, panelRect.y + 8f, panelWidth - 20f, panelHeight - 16f));
+        GUILayout.BeginVertical();
+
+        // 1. Tiêu đề
+        GUILayout.Label("DOBOT CR10A — KINEMATICS ENGINE", PanelTitleStyle());
+        GUILayout.Label("Thuần Giải Tích (Closed-Form Analytical IK) • 8 Nghiệm", SubtitleStyle());
+        GUILayout.Space(4f);
+
+        // 2. 6 Sliders khớp góc
+        GUILayout.Label("Điều khiển 6 khớp q1…q6 (Độ & Radian):", PanelHeaderStyle());
+        for (int i = 0; i < 6; i++)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"q{i + 1}: {GetJoint(i) * Mathf.Rad2Deg,6:F1}°", GUILayout.Width(80f));
+            float val = GUILayout.HorizontalSlider(GetJoint(i), -2f * Mathf.PI, 2f * Mathf.PI);
+            if (Mathf.Abs(val - GetJoint(i)) > 1e-5f)
+            {
+                SetJoint(i, val);
+                ApplyRotations();
+            }
+            if (GUILayout.Button("0", GUILayout.Width(22f), GUILayout.Height(18f)))
+            {
+                SetJoint(i, 0f);
+                ApplyRotations();
+            }
+            GUILayout.EndHorizontal();
         }
 
-        // TransformPoint returns metres in Unity; convert to millimetres for display.
-        position = globalReference.InverseTransformPoint(tcpTransform.position) * 1000f;
-        return true;
-    }
+        GUILayout.Space(6f);
 
-    private GUIStyle PanelTitleStyle()
-    {
-        return new GUIStyle(GUI.skin.label)
-        {
-            fontSize = 16,
-            fontStyle = FontStyle.Bold,
-            normal = { textColor = Color.cyan }
-        };
-    }
+        // 3. Động học thuận FK hiện tại
+        Vector3 currentTcpPosMm;
+        Vector3 currentRpyDeg;
+        GetForwardPoseValues(out currentTcpPosMm, out currentRpyDeg);
 
-    private GUIStyle PanelHeaderStyle()
-    {
-        return new GUIStyle(GUI.skin.label)
-        {
-            fontStyle = FontStyle.Bold,
-            normal = { textColor = Color.yellow }
-        };
-    }
+        GUILayout.Label("Động học thuận FK hiện tại (TCP):", PanelHeaderStyle());
+        GUILayout.Label($"Vị trí (mm): X {currentTcpPosMm.x,7:F1}   Y {currentTcpPosMm.y,7:F1}   Z {currentTcpPosMm.z,7:F1}");
+        GUILayout.Label($"Góc RPY (°): Roll {currentRpyDeg.x,6:F1}°  Pitch {currentRpyDeg.y,6:F1}°  Yaw {currentRpyDeg.z,6:F1}°");
 
-    private GUIStyle PanelStatusStyle()
-    {
-        return new GUIStyle(GUI.skin.label)
+        // Kiểm tra sai số thực tế giữa FK tính toán và GameObject tcp trong Scene
+        Vector3 actualSceneTcpPosMm;
+        if (TryGetActualSceneTcpPos(out actualSceneTcpPosMm))
         {
-            wordWrap = true,
-            normal = { textColor = ikStatus.StartsWith("IK OK") ? Color.green : Color.white }
-        };
+            float errorMm = Vector3.Distance(currentTcpPosMm, actualSceneTcpPosMm);
+            GUILayout.Label($"Sai số toán học FK ↔ Mesh Scene: {errorMm:F4} mm", ErrorStyle(errorMm));
+        }
+
+        GUILayout.Space(6f);
+
+        // 4. Nhập Pose mục tiêu cho IK
+        GUILayout.Label("Pose mục tiêu (XYZ: mm • RPY: độ ZYX):", PanelHeaderStyle());
+        DrawPoseRow(0, 1, 2);
+        DrawPoseRow(3, 4, 5);
+
+        GUILayout.BeginHorizontal();
+        useAdaptiveTilt = GUILayout.Toggle(useAdaptiveTilt, " Adaptive Tilt (Gắp xa)");
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Lấy Pose FK Hiện Tại", GUILayout.Height(26f)))
+        {
+            CopyCurrentPoseToTarget();
+        }
+        if (GUILayout.Button("Giải IK (8 Cấu Hình)", GUILayout.Height(26f)))
+        {
+            SolveAndApplyIk();
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Mặt bích hướng xuống (Flange Down)", GUILayout.Height(24f)))
+        {
+            SetFlangeDownTargetAndApplyIk();
+        }
+        if (GUILayout.Button("Reset về Home (0°)", GUILayout.Height(24f)))
+        {
+            ResetAllSlidersToZero();
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label(ikStatus, PanelStatusStyle());
+
+        // 5. Hiển thị danh sách 8 nghiệm giải tích
+        if (ikSolutions.Count > 0)
+        {
+            GUILayout.Label($"Danh sách nghiệm giải tích tìm được ({ikSolutions.Count} cấu hình):", PanelHeaderStyle());
+            solutionScroll = GUILayout.BeginScrollView(solutionScroll, GUILayout.Height(Mathf.Min(140f, 28f * ikSolutions.Count)));
+            for (int i = 0; i < ikSolutions.Count; i++)
+            {
+                DobotCR10AKinematics.IKSolution sol = ikSolutions[i];
+                string prefTag = i == 0 ? "★ [TỐI ƯU Q*] " : $"#{i + 1} ";
+                string label = $"{prefTag}{sol.branchName} (Sai số: {sol.positionErrorMm:F4}mm)";
+                
+                GUI.color = i == 0 ? Color.green : Color.white;
+                if (GUILayout.Button(label, GUILayout.Height(22f)))
+                {
+                    ApplySolution(i);
+                }
+                GUI.color = Color.white;
+            }
+            GUILayout.EndScrollView();
+        }
+
+        GUILayout.EndVertical();
+        GUILayout.EndArea();
     }
 
     private void DrawPoseRow(int a, int b, int c)
     {
-        string[] labels = { "X", "Y", "Z", "R", "P", "Y" };
+        string[] labels = { "X", "Y", "Z", "Roll", "Pitch", "Yaw" };
         int[] indices = { a, b, c };
         GUILayout.BeginHorizontal();
         for (int k = 0; k < 3; k++)
         {
             int i = indices[k];
-            GUILayout.Label(labels[i], GUILayout.Width(18f));
-            targetText[i] = GUILayout.TextField(targetText[i] ?? "0", GUILayout.Width(95f));
+            GUILayout.Label(labels[i], GUILayout.Width(36f));
+            targetText[i] = GUILayout.TextField(targetText[i] ?? "0", GUILayout.Width(85f));
             float parsed;
-            if (float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.CurrentCulture, out parsed) ||
-                float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+            if (float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) ||
+                float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.CurrentCulture, out parsed))
+            {
                 targetPose[i] = parsed;
+            }
         }
         GUILayout.EndHorizontal();
     }
@@ -358,17 +380,107 @@ public class manual : MonoBehaviour
 
     private void CopyCurrentPoseToTarget()
     {
-        Vector3 p;
-        Quaternion r;
-        GetForwardPose(GetJointVector(), out p, out r, null, null);
-        Vector3 rpy = RotationToRpy(r);
-        float[] current = { p.x * 1000f, p.y * 1000f, p.z * 1000f, rpy.x, rpy.y, rpy.z };
+        Vector3 posMm;
+        Vector3 rpyDeg;
+        GetForwardPoseValues(out posMm, out rpyDeg);
+
+        targetPose[0] = posMm.x;
+        targetPose[1] = posMm.y;
+        targetPose[2] = posMm.z;
+        targetPose[3] = rpyDeg.x;
+        targetPose[4] = rpyDeg.y;
+        targetPose[5] = rpyDeg.z;
+
         for (int i = 0; i < 6; i++)
         {
-            targetPose[i] = current[i];
-            targetText[i] = current[i].ToString("F2", CultureInfo.InvariantCulture);
+            targetText[i] = targetPose[i].ToString("F1", CultureInfo.InvariantCulture);
         }
-        ikStatus = "Đã lấy pose đích từ FK hiện tại.";
+        ikStatus = "Đã sao chép Pose FK hiện tại vào mục tiêu.";
+    }
+
+    private void GetForwardPoseValues(out Vector3 posMm, out Vector3 rpyDeg)
+    {
+        float[] q = GetJointVector();
+        Matrix4x4 T = DobotCR10AKinematics.ForwardTcp(q, tcpTransform, toolLengthMm);
+        posMm = new Vector3(T[0, 3] * 1000f, T[1, 3] * 1000f, T[2, 3] * 1000f);
+        rpyDeg = DobotCR10AKinematics.UnityRotationToRpy(T.rotation);
+    }
+
+    private bool TryGetActualSceneTcpPos(out Vector3 posMm)
+    {
+        ResolveKinematicsReferences();
+        if (globalReference == null || tcpTransform == null)
+        {
+            posMm = Vector3.zero;
+            return false;
+        }
+
+        // Tọa độ của tcpTransform quy về hệ quy chiếu robot base (Global)
+        Vector3 localPosM = globalReference.InverseTransformPoint(tcpTransform.position);
+        posMm = localPosM * 1000f;
+        return true;
+    }
+
+    private void SolveAndApplyIk()
+    {
+        Vector3 targetPos = new Vector3(targetPose[0], targetPose[1], targetPose[2]);
+        Quaternion targetRot = DobotCR10AKinematics.RpyToUnityRotation(targetPose[3], targetPose[4], targetPose[5]);
+
+        float[] currentQ = GetJointVector();
+
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        ikSolutions.Clear();
+        List<DobotCR10AKinematics.IKSolution> sols = DobotCR10AKinematics.SolveTcpPose(
+            targetPos,
+            targetRot,
+            currentQ,
+            toolLengthMm,
+            useAdaptiveTilt
+        );
+        sw.Stop();
+
+        if (sols == null || sols.Count == 0)
+        {
+            ikStatus = "IK: Không tìm thấy nghiệm thực (Mục tiêu nằm ngoài vùng với hoặc trong vùng chết vai).";
+            return;
+        }
+
+        ikSolutions.AddRange(sols);
+
+        // Tự động áp dụng nghiệm tối ưu Q* (ở vị trí đầu tiên sols[0])
+        ApplySolution(0);
+
+        ikStatus = string.Format(CultureInfo.InvariantCulture,
+            "IK THÀNH CÔNG: Tìm thấy {0} cấu hình giải tích trong {1:F3} ms. Đã áp dụng nghiệm tối ưu Q* ({2}). Sai số vị trí: {3:E2} mm.",
+            sols.Count, sw.Elapsed.TotalMilliseconds, sols[0].branchName, sols[0].positionErrorMm);
+    }
+
+    private void SetFlangeDownTargetAndApplyIk()
+    {
+        // Giữ nguyên vị trí X, Y, Z hiện tại và Yaw hiện tại, ép Roll = 180°, Pitch = 0° để mặt bích kẹp cắm thẳng đứng xuống sàn
+        targetPose[3] = 180f; // Roll
+        targetPose[4] = 0f;   // Pitch
+        targetText[3] = "180.0";
+        targetText[4] = "0.0";
+
+        SolveAndApplyIk();
+    }
+
+    private void ApplySolution(int index)
+    {
+        if (index < 0 || index >= ikSolutions.Count) return;
+        DobotCR10AKinematics.IKSolution sol = ikSolutions[index];
+
+        for (int i = 0; i < 6; i++)
+        {
+            SetJoint(i, (float)sol.jointsRad[i]);
+        }
+
+        ApplyRotations();
+
+        ikStatus = string.Format(CultureInfo.InvariantCulture,
+            "Đã áp dụng nghiệm #{0} [{1}]. Sai số FK: {2:F4} mm.",
+            index + 1, sol.branchName, sol.positionErrorMm);
     }
 
     private float GetJoint(int i)
@@ -400,223 +512,55 @@ public class manual : MonoBehaviour
 
     private float[] GetJointVector()
     {
-        return new[] { axis0, axis1, axis2, axis3, axis4, axis5 };
+        return new float[] { axis0, axis1, axis2, axis3, axis4, axis5 };
     }
 
-    /// <summary>FK from the ml_sim DH model, returned in Unity Global coordinates and metres.</summary>
-    private void GetForwardPose(float[] q, out Vector3 position, out Quaternion rotation,
-        Vector3[] origins, Vector3[] axes)
+    // Styles cho OnGUI
+    private GUIStyle PanelTitleStyle()
     {
-        if (tcpTransform == null) ResolveKinematicsReferences();
-        Matrix4x4 T = DobotCR10AKinematics.ForwardTcp(q, tcpTransform);
-        position = new Vector3(T[0, 3], T[1, 3], T[2, 3]) * 0.001f;
-        rotation = T.rotation;
+        return new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 15,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = new Color(0.2f, 0.9f, 1f) }
+        };
     }
 
-    private Quaternion RpyToRotation(float rollDeg, float pitchDeg, float yawDeg)
+    private GUIStyle SubtitleStyle()
     {
-        return Quaternion.AngleAxis(yawDeg, Vector3.forward)
-             * Quaternion.AngleAxis(pitchDeg, Vector3.up)
-             * Quaternion.AngleAxis(rollDeg, Vector3.right);
+        return new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 11,
+            normal = { textColor = new Color(0.8f, 0.8f, 0.8f) }
+        };
     }
 
-    private Vector3 RotationToRpy(Quaternion rotation)
+    private GUIStyle PanelHeaderStyle()
     {
-        Matrix4x4 R = Matrix4x4.Rotate(rotation);
-        float pitch = Mathf.Asin(Mathf.Clamp(-R[2, 0], -1f, 1f));
-        float roll;
-        float yaw;
-        if (Mathf.Abs(Mathf.Cos(pitch)) > 1e-6f)
+        return new GUIStyle(GUI.skin.label)
         {
-            roll = Mathf.Atan2(R[2, 1], R[2, 2]);
-            yaw = Mathf.Atan2(R[1, 0], R[0, 0]);
-        }
-        else
-        {
-            roll = Mathf.Atan2(-R[1, 2], R[1, 1]);
-            yaw = 0f;
-        }
-        return new Vector3(roll, pitch, yaw) * Mathf.Rad2Deg;
+            fontSize = 12,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = Color.yellow }
+        };
     }
 
-    private void SolveAndApplyIk()
+    private GUIStyle PanelStatusStyle()
     {
-        ResolveKinematicsReferences();
-        if (axisTransforms == null || axisTransforms.Length != 6 || tcpTransform == null)
+        return new GUIStyle(GUI.skin.label)
         {
-            ikStatus = "IK lỗi: cần gán đủ 6 khớp và GameObject tcp.";
-            return;
-        }
-        for (int i = 0; i < 6; i++)
-        {
-            if (axisTransforms[i] == null)
-            {
-                ikStatus = $"IK lỗi: thiếu Transform khớp {i + 1}.";
-                return;
-            }
-        }
-
-        Quaternion targetR = RpyToRotation(targetPose[3], targetPose[4], targetPose[5]);
-        ikSolutions.Clear();
-        ikSolutions.AddRange(DobotCR10AKinematics.SolveTcp(
-            new Vector3(targetPose[0], targetPose[1], targetPose[2]), targetR,
-            tcpTransform.localPosition, tcpTransform.localRotation));
-        if (ikSolutions.Count == 0)
-        {
-            hasIkSolution = false;
-            ikStatus = "IK không tìm thấy nghiệm hội tụ cho pose này.";
-            return;
-        }
-
-        hasIkSolution = true;
-        for (int i = 0; i < 6; i++) lastIkSolution[i] = (float)ikSolutions[0].jointsRad[i];
-        float bestPositionError = float.MaxValue;
-        float bestOrientationError = float.MaxValue;
-        for (int i = 0; i < ikSolutions.Count; i++)
-        {
-            if (ikSolutions[i].positionErrorMm < bestPositionError)
-            {
-                bestPositionError = (float)ikSolutions[i].positionErrorMm;
-                bestOrientationError = (float)ikSolutions[i].orientationErrorRad;
-            }
-        }
-        ikStatus = $"Tạo {ikSolutions.Count} nhánh theo phương pháp ma trận. Sai số tốt nhất: {bestPositionError:F2} mm, {bestOrientationError * Mathf.Rad2Deg:F2}°. Chọn nghiệm để áp dụng.";
+            wordWrap = true,
+            fontSize = 11,
+            normal = { textColor = ikStatus.Contains("THÀNH CÔNG") ? Color.green : (ikStatus.Contains("Không tìm thấy") ? Color.red : Color.white) }
+        };
     }
 
-    private void SetFlangeDownTargetAndApplyIk()
+    private GUIStyle ErrorStyle(float errorMm)
     {
-        ResolveKinematicsReferences();
-        if (tcpTransform == null)
+        return new GUIStyle(GUI.skin.label)
         {
-            ikStatus = "IK lỗi: không tìm thấy GameObject tcp dưới axis6.";
-            return;
-        }
-
-        // Keep the current flange yaw, set flange roll/pitch so its +Z axis
-        // points along robot-frame -Z (down), then restore the TCP's local pose.
-        Quaternion targetTcpRotation = RpyToRotation(targetPose[3], targetPose[4], targetPose[5]);
-        Quaternion targetFlangeRotation = targetTcpRotation * Quaternion.Inverse(tcpTransform.localRotation);
-        float flangeYaw = RotationToRpy(targetFlangeRotation).z;
-        Quaternion downwardFlange = RpyToRotation(180f, 0f, flangeYaw);
-        Quaternion downwardTcp = downwardFlange * tcpTransform.localRotation;
-        Vector3 tcpRpy = RotationToRpy(downwardTcp);
-        targetPose[3] = tcpRpy.x;
-        targetPose[4] = tcpRpy.y;
-        targetPose[5] = tcpRpy.z;
-        for (int i = 3; i < 6; i++)
-            targetText[i] = targetPose[i].ToString("F3", CultureInfo.InvariantCulture);
-
-        SolveAndApplyIk();
-        if (!hasIkSolution || ikSolutions.Count == 0) return;
-
-        // All branches now have the same requested flange orientation. Among
-        // numerically equivalent solutions, prefer the one requiring the
-        // smallest wrapped joint motion from the robot's current pose.
-        double bestPosition = double.MaxValue;
-        double bestOrientation = double.MaxValue;
-        for (int i = 0; i < ikSolutions.Count; i++)
-        {
-            bestPosition = Math.Min(bestPosition, ikSolutions[i].positionErrorMm);
-            bestOrientation = Math.Min(bestOrientation, ikSolutions[i].orientationErrorRad);
-        }
-        int preferredIndex = -1;
-        double preferredTravel = double.MaxValue;
-        for (int i = 0; i < ikSolutions.Count; i++)
-        {
-            DobotCR10AKinematics.IKSolution candidate = ikSolutions[i];
-            if (!IsFlangeZPointingDown(candidate.jointsRad, 1f))
-                continue;
-            if (candidate.positionErrorMm > bestPosition + 0.05 ||
-                candidate.orientationErrorRad > bestOrientation + 0.1 * Mathf.Deg2Rad)
-                continue;
-            double travel = 0.0;
-            for (int joint = 0; joint < 6; joint++)
-            {
-                double delta = Math.Atan2(Math.Sin(candidate.jointsRad[joint] - GetJoint(joint)),
-                    Math.Cos(candidate.jointsRad[joint] - GetJoint(joint)));
-                travel += delta * delta;
-            }
-            if (travel < preferredTravel)
-            {
-                preferredTravel = travel;
-                preferredIndex = i;
-            }
-        }
-        if (preferredIndex < 0)
-        {
-            ikStatus = "Không có nghiệm IK đạt điều kiện trục Z mặt bích hướng xuống trong sai số 1°. Robot giữ nguyên tư thế.";
-            return;
-        }
-        if (preferredIndex > 0)
-        {
-            DobotCR10AKinematics.IKSolution preferred = ikSolutions[preferredIndex];
-            ikSolutions.RemoveAt(preferredIndex);
-            ikSolutions.Insert(0, preferred);
-        }
-        ApplySolution(0);
-        ikStatus = $"Đã đặt mặt bích hướng xuống (roll 180°, pitch 0°, giữ yaw hiện tại) và áp dụng nhánh gần nhất. Sai số: {ikSolutions[0].positionErrorMm:F2} mm, {ikSolutions[0].orientationErrorRad * Mathf.Rad2Deg:F2}°. ";
-    }
-
-    private bool IsFlangeZPointingDown(double[] jointsRad, float toleranceDeg)
-    {
-        float[] q = new float[6];
-        for (int i = 0; i < 6; i++) q[i] = (float)jointsRad[i];
-        Matrix4x4 tcpPose = DobotCR10AKinematics.ForwardTcp(q, tcpTransform);
-        Quaternion flangeRotation = tcpPose.rotation * Quaternion.Inverse(tcpTransform.localRotation);
-        Vector3 flangeZ = flangeRotation * Vector3.forward;
-        return Vector3.Dot(flangeZ.normalized, Vector3.back) >= Mathf.Cos(toleranceDeg * Mathf.Deg2Rad);
-    }
-
-    private void ApplySolution(int solutionIndex)
-    {
-        if (solutionIndex < 0 || solutionIndex >= ikSolutions.Count) return;
-        double[] q = ikSolutions[solutionIndex].jointsRad;
-        for (int i = 0; i < 6; i++) SetJoint(i, (float)q[i]);
-        for (int i = 0; i < 6; i++) lastIkSolution[i] = (float)q[i];
-        ApplyRotations();
-        ikStatus = $"Đã áp dụng nhánh #{solutionIndex + 1}; sai số FK vị trí {ikSolutions[solutionIndex].positionErrorMm:F2} mm, hướng {ikSolutions[solutionIndex].orientationErrorRad * Mathf.Rad2Deg:F2}°. ";
-    }
-
-    [Header("Cấu hình chiều xoay")]
-    [Tooltip("Đảo ngược chiều xoay để chuẩn theo quy tắc bàn tay phải (ROS/Robot chuẩn) thay vì quy tắc bàn tay trái của Unity")]
-    public bool invertDirection = true;
-
-    /// <summary>
-    /// Áp dụng xoay quanh trục Z cục bộ kết hợp với offset góc ban đầu
-    /// </summary>
-    public void ApplyRotations()
-    {
-        if (axisTransforms == null || axisTransforms.Length != 6) return;
-        if (initialRotations == null || initialRotations.Length != 6) return;
-
-        float[] sliders = new float[6] { axis0, axis1, axis2, axis3, axis4, axis5 };
-        float dirMultiplier = invertDirection ? -1f : 1f;
-
-        for (int i = 0; i < 6; i++)
-        {
-            if (axisTransforms[i] != null)
-            {
-                // Chuyển đổi từ radian sang độ và áp dụng chiều xoay ngược lại
-                float angleDeg = dirMultiplier * sliders[i] * Mathf.Rad2Deg;
-                // Rotate around local Z, preserving the original bind rotation.
-                axisTransforms[i].localRotation = initialRotations[i]
-                    * Quaternion.Euler(0f, 0f, angleDeg);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Reset tất cả các slider về 0
-    /// </summary>
-    [ContextMenu("Reset All Sliders To 0")]
-    public void ResetAllSlidersToZero()
-    {
-        axis0 = 0f;
-        axis1 = 0f;
-        axis2 = 0f;
-        axis3 = 0f;
-        axis4 = 0f;
-        axis5 = 0f;
-        ApplyRotations();
+            fontSize = 11,
+            normal = { textColor = errorMm < 0.01f ? Color.green : Color.yellow }
+        };
     }
 }

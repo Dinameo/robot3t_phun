@@ -8,5 +8,11 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/SampleScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
+  - enabled: 1
+    path: Assets/Scenes/CR10A_Manual_Kinematics.unity
+    guid: b5c1b2f16d0d4076a2b83fb43e577921
+  - enabled: 1
+    path: Assets/Scenes/Robot_FK_IK.unity
+    guid: 6049ec69345d48ae943a75931c257aaf
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}

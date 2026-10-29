@@ -63,10 +63,12 @@ public class DobotCR10AIKController : MonoBehaviour
     public int currentWaypointIndex = 0;
     [Range(0.1f, 1.0f)]
     public float playbackSpeed = 0.5f; // Hệ số nhân tốc độ khớp
-    [Range(1f, 10f)]
-    public float maxJointSpeedDegPerSecond = 10f;
-    [Range(1f, 50f)]
+    [Range(1f, 223f)]
+    public float maxJointSpeedDegPerSecond = 223f;
+    [Range(1f, 1000f)]
     public float maxJointAccelerationDegPerSecond2 = 12f;
+    [Tooltip("Giới hạn tốc độ riêng cho J1-J6, đơn vị độ/giây")]
+    public float[] jointSpeedDegPerSecond = { 10f, 10f, 10f, 10f, 10f, 10f };
 
     [Header("5. Phun sơn (vệt màu đỏ)")]
     [FormerlySerializedAs("drawInkTrail")]
@@ -80,6 +82,11 @@ public class DobotCR10AIKController : MonoBehaviour
     private readonly List<Vector3> actualTcpTrail = new List<Vector3>();
     private bool paintingStarted;
     private bool isMovingToManualTarget;
+    private bool showJointSpeedControls;
+    private int interfaceTab;
+    private Vector2 interfaceScrollPosition;
+    private string accelerationInputText = "12";
+    private readonly string[] jointSpeedInputTexts = { "10", "10", "10", "10", "10", "10" };
     private readonly float[] manualTargetAnglesRad = new float[6];
     private readonly float[] jointVelocitiesRadPerSecond = new float[6];
 
@@ -96,6 +103,8 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void EnsureComponents()
     {
+        EnsureJointSpeedSettings();
+
         if (robotManual == null)
         {
             robotManual = GetComponent<manual>() ?? FindAnyObjectByType<manual>();
@@ -133,6 +142,23 @@ public class DobotCR10AIKController : MonoBehaviour
             lineRenderer.material.color = inkColor;
             lineRenderer.useWorldSpace = true;
         }
+    }
+
+    private void EnsureJointSpeedSettings()
+    {
+        if (jointSpeedDegPerSecond == null || jointSpeedDegPerSecond.Length != 6)
+        {
+            float[] speeds = new float[6];
+            for (int joint = 0; joint < speeds.Length; joint++)
+                speeds[joint] = jointSpeedDegPerSecond != null && joint < jointSpeedDegPerSecond.Length
+                    ? jointSpeedDegPerSecond[joint]
+                    : maxJointSpeedDegPerSecond;
+            jointSpeedDegPerSecond = speeds;
+        }
+
+        float[] hardwareLimits = { 150f, 150f, 180f, 223f, 223f, 223f };
+        for (int joint = 0; joint < jointSpeedDegPerSecond.Length; joint++)
+            jointSpeedDegPerSecond[joint] = Mathf.Clamp(jointSpeedDegPerSecond[joint], 1f, hardwareLimits[joint]);
     }
 
     /// <summary>
@@ -213,11 +239,29 @@ public class DobotCR10AIKController : MonoBehaviour
                     }
                     wp.isSolved = true;
                 }
+                else
+                {
+                    // Tự động giải nghịch bằng thuật toán Thuần Giải Tích (Closed-Form Analytical IK)
+                    Quaternion rot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+                    float[] prevAngles = waypoints.Count > 0 ? waypoints[waypoints.Count - 1].jointAngles_rad : null;
+                    var sols = DobotCR10AKinematics.SolveTcpPose(wp.targetPosGlobal_mm, rot, prevAngles, toolLength, useAdaptiveTilt: true);
+                    if (sols != null && sols.Count > 0)
+                    {
+                        var best = sols[0];
+                        for (int j = 0; j < 6; j++)
+                        {
+                            wp.jointAngles_rad[j] = (float)best.jointsRad[j];
+                            wp.jointAngles_deg[j] = (float)best.jointsDeg[j];
+                        }
+                        wp.isSolved = true;
+                        wp.posError_mm = (float)best.positionErrorMm;
+                    }
+                }
 
                 waypoints.Add(wp);
             }
 
-            Debug.Log($"[CR10A IK] Đã nạp thành công {waypoints.Count} waypoint cho quỹ đạo viền quần.");
+            Debug.Log($"[CR10A IK] Đã nạp thành công {waypoints.Count} waypoint từ {trajectoryCsvPath}.");
             // Loading trajectory data must not move the robot. Apply a waypoint
             // only after an explicit selection/reset or when playback advances.
             currentWaypointIndex = Mathf.Clamp(currentWaypointIndex, 0, waypoints.Count - 1);
@@ -226,6 +270,56 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             Debug.LogError($"[CR10A IK] Lỗi khi đọc file CSV: {ex.Message}");
         }
+    }
+
+    private void LoadNamedTrajectory(string relativePath)
+    {
+        isPlaying = false;
+        isMovingToManualTarget = false;
+        trajectoryCsvPath = relativePath;
+        LoadTrajectoryFile();
+    }
+
+    public void LoadPantsOutlineTrajectory()
+    {
+        LoadNamedTrajectory("output_drawing/pants_outline_cr10a.csv");
+    }
+
+    public void LoadTriangleTestTrajectory()
+    {
+        LoadNamedTrajectory("output_drawing/triangle_test_cr10a.csv");
+    }
+
+    /// <summary>
+    /// Giải lại toàn bộ IK cho tất cả các điểm waypoint bằng Thuật toán Thuần Giải Tích (Closed-Form Analytical IK)
+    /// </summary>
+    [ContextMenu("Tính lại toàn bộ waypoint bằng Thuần Giải Tích")]
+    public void RecomputeAllWaypointsAnalyticalIK()
+    {
+        if (waypoints == null || waypoints.Count == 0) return;
+        int solvedCount = 0;
+        float[] lastAngles = null;
+
+        for (int i = 0; i < waypoints.Count; i++)
+        {
+            WaypointData wp = waypoints[i];
+            Quaternion rot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+            var sols = DobotCR10AKinematics.SolveTcpPose(wp.targetPosGlobal_mm, rot, lastAngles, toolLength, useAdaptiveTilt: true);
+            if (sols != null && sols.Count > 0)
+            {
+                var best = sols[0];
+                for (int j = 0; j < 6; j++)
+                {
+                    wp.jointAngles_rad[j] = (float)best.jointsRad[j];
+                    wp.jointAngles_deg[j] = (float)best.jointsDeg[j];
+                }
+                wp.isSolved = true;
+                wp.posError_mm = (float)best.positionErrorMm;
+                lastAngles = wp.jointAngles_rad;
+                solvedCount++;
+            }
+        }
+        Debug.Log($"[CR10A IK] Đã giải tích thành công {solvedCount}/{waypoints.Count} waypoint bằng Closed-Form Analytical IK.");
     }
 
     private void Update()
@@ -313,9 +407,8 @@ public class DobotCR10AIKController : MonoBehaviour
             return false;
 
         float speedScale = Mathf.Clamp(playbackSpeed, 0.1f, 1f);
-        float speedLimit = Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 10f);
-        float maxVelocityRad = speedLimit * speedScale * Mathf.Deg2Rad;
-        float maxAccelerationRad = Mathf.Clamp(maxJointAccelerationDegPerSecond2, 1f, 50f) *
+        float globalSpeedLimit = Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 223f);
+        float maxAccelerationRad = Mathf.Clamp(maxJointAccelerationDegPerSecond2, 1f, 1000f) *
             speedScale * Mathf.Deg2Rad;
         float frameTime = Mathf.Max(0f, deltaTime);
         float[] current =
@@ -340,6 +433,9 @@ public class DobotCR10AIKController : MonoBehaviour
             arrived = false;
             // Limit speed by the remaining stopping distance so each joint
             // accelerates smoothly and brakes before reaching its target.
+            float jointSpeedLimit = Mathf.Clamp(jointSpeedDegPerSecond[joint], 1f,
+                Mathf.Min(globalSpeedLimit, GetHardwareJointSpeedLimit(joint)));
+            float maxVelocityRad = jointSpeedLimit * speedScale * Mathf.Deg2Rad;
             float stoppingSpeed = Mathf.Sqrt(2f * maxAccelerationRad * Mathf.Abs(deltaRad));
             float desiredSpeed = Mathf.Sign(deltaRad) * Mathf.Min(maxVelocityRad, stoppingSpeed);
             jointVelocitiesRadPerSecond[joint] = Mathf.MoveTowards(
@@ -378,6 +474,17 @@ public class DobotCR10AIKController : MonoBehaviour
         return arrived;
     }
 
+    private static float GetHardwareJointSpeedLimit(int joint)
+    {
+        switch (joint)
+        {
+            case 0:
+            case 1: return 150f;
+            case 2: return 180f;
+            default: return 223f;
+        }
+    }
+
     private void UpdateInkTrail()
     {
         if (lineRenderer == null) return;
@@ -397,45 +504,67 @@ public class DobotCR10AIKController : MonoBehaviour
     // =========================================================================
     private void OnGUI()
     {
-        int panelWidth = 360;
-        int panelHeight = 460;
+        int panelWidth = 460;
+        int panelHeight = Mathf.Min(820, Mathf.Max(360, Screen.height - 40));
         Rect panelRect = new Rect(Screen.width - panelWidth - 20, 20, panelWidth, panelHeight);
 
         GUI.Box(panelRect, "");
-        GUILayout.BeginArea(new Rect(panelRect.x + 10, panelRect.y + 10, panelWidth - 20, panelHeight - 20));
+        GUILayout.BeginArea(new Rect(panelRect.x + 12, panelRect.y + 10, panelWidth - 24, panelHeight - 20));
 
-        // Tiêu đề
-        GUIStyle titleStyle = new GUIStyle(GUI.skin.label);
-        titleStyle.fontSize = 14;
-        titleStyle.fontStyle = FontStyle.Bold;
-        titleStyle.normal.textColor = Color.yellow;
-        GUILayout.Label("DOBOT CR10A - KIỂM THỬ ĐỘNG HỌC NGHỊCH", titleStyle);
-
-        GUILayout.Space(5);
-
-        // Nút điều khiển Playback
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(isPlaying ? "❚❚ TẠM DỪNG" : "▶ CHẠY TỰ ĐỘNG", GUILayout.Height(30)))
+        GUIStyle titleStyle = new GUIStyle(GUI.skin.label)
         {
-            if (isPlaying)
-            {
-                isPlaying = false;
-            }
-            else
-            {
-                // Start from the currently selected waypoint. Otherwise playback
-                // eases toward it instead of jumping directly to its joint angles.
-                isPlaying = true;
-            }
-        }
+            fontSize = 16,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = Color.white }
+        };
+        GUILayout.Label("TRẠM PHUN TỰ ĐỘNG  |  DOBOT CR10A", titleStyle);
+        GUILayout.Label("Mô phỏng quỹ đạo và trạng thái quy trình", GUI.skin.label);
+        GUILayout.Space(8);
 
-        if (GUILayout.Button("<< ĐIỂM ĐẦU", GUILayout.Height(30)))
+        GUILayout.BeginHorizontal();
+        DrawInterfaceTabButton(0, "ĐIỀU KHIỂN");
+        DrawInterfaceTabButton(1, "PIPELINE 3D / AI");
+        DrawInterfaceTabButton(2, "CHỈ TIÊU");
+        GUILayout.EndHorizontal();
+        GUILayout.Space(6);
+
+        interfaceScrollPosition = GUILayout.BeginScrollView(interfaceScrollPosition,
+            GUILayout.Width(panelWidth - 28), GUILayout.Height(panelHeight - 88));
+        if (interfaceTab == 0)
+            DrawRobotControlPanel();
+        else if (interfaceTab == 1)
+            DrawPipelinePanel();
+        else
+            DrawEvaluationPanel();
+        GUILayout.EndScrollView();
+
+        GUILayout.EndArea();
+    }
+
+    private void DrawInterfaceTabButton(int tab, string label)
+    {
+        GUIStyle style = new GUIStyle(GUI.skin.button)
+        {
+            fontStyle = interfaceTab == tab ? FontStyle.Bold : FontStyle.Normal
+        };
+        if (interfaceTab == tab)
+            style.normal.textColor = Color.white;
+        if (GUILayout.Button(label, style, GUILayout.Height(32)))
+            interfaceTab = tab;
+    }
+
+    private void DrawRobotControlPanel()
+    {
+        GUILayout.Label("CHẠY QUỸ ĐẠO MÔ PHỎNG", GUI.skin.box);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button(isPlaying ? "❚❚ TẠM DỪNG" : "▶ CHẠY TỰ ĐỘNG", GUILayout.Height(32)))
+            isPlaying = !isPlaying;
+        if (GUILayout.Button("VỀ ĐIỂM ĐẦU", GUILayout.Height(32)))
         {
             isPlaying = false;
             MoveToWaypointGradually(0);
         }
-
-        if (GUILayout.Button("RESET", GUILayout.Height(30)))
+        if (GUILayout.Button("RESET", GUILayout.Height(32)))
         {
             isPlaying = false;
             actualTcpTrail.Clear();
@@ -448,71 +577,182 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        GUILayout.Space(5);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("NẠP QUỸ ĐẠO QUẦN", GUILayout.Height(28)))
+            LoadPantsOutlineTrajectory();
+        if (GUILayout.Button("NẠP TAM GIÁC THỬ", GUILayout.Height(28)))
+            LoadTriangleTestTrajectory();
+        GUILayout.EndHorizontal();
 
-        // Thanh trượt chọn Waypoint
-        GUILayout.Label($"Tiến trình vẽ: Điểm {currentWaypointIndex} / {Mathf.Max(0, waypoints.Count - 1)} ({(waypoints.Count > 0 ? waypoints[currentWaypointIndex].distance_mm : 0):F1} mm)");
-        int newIdx = Mathf.RoundToInt(GUILayout.HorizontalSlider(currentWaypointIndex, 0, Mathf.Max(0, waypoints.Count - 1)));
+        int waypoint = waypoints.Count > 0 ? Mathf.Clamp(currentWaypointIndex, 0, waypoints.Count - 1) : 0;
+        float distance = waypoints.Count > 0 ? waypoints[waypoint].distance_mm : 0f;
+        GUILayout.Label($"Waypoint: {waypoint} / {Mathf.Max(0, waypoints.Count - 1)}    Quãng đường: {distance:F1} mm");
+        int newIdx = Mathf.RoundToInt(GUILayout.HorizontalSlider(waypoint, 0, Mathf.Max(0, waypoints.Count - 1)));
         if (newIdx != currentWaypointIndex)
         {
             isPlaying = false;
             ApplyWaypoint(newIdx);
         }
 
-        // Tốc độ vẽ
+        GUILayout.Space(4);
+        GUILayout.Label("TỐC ĐỘ VÀ CHUYỂN ĐỘNG", GUI.skin.box);
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Tốc độ: {playbackSpeed:F1}x", GUILayout.Width(90));
+        GUILayout.Label($"Tốc độ tổng: {playbackSpeed:F1}×", GUILayout.Width(130));
         playbackSpeed = GUILayout.HorizontalSlider(playbackSpeed, 0.1f, 1.0f);
         GUILayout.EndHorizontal();
-        GUILayout.Label($"Giới hạn mỗi khớp: {Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 10f):F0}°/s");
-        GUILayout.Label($"Gia tốc tối đa: {Mathf.Clamp(maxJointAccelerationDegPerSecond2, 1f, 50f):F0}°/s²");
+        GUILayout.Label($"Trần chung: {Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 223f):F0}°/s");
+        DrawAccelerationInput();
+
+        showJointSpeedControls = GUILayout.Toggle(showJointSpeedControls, " Chỉnh tốc độ riêng từng khớp");
+        if (showJointSpeedControls)
+            DrawJointSpeedInputs();
+
+        GUILayout.Space(4);
+        DrawCurrentWaypointStatus();
+
+        GUILayout.Space(4);
+        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled,
+            sprayPaintEnabled ? " PHUN SƠN ĐỎ: BẬT" : " PHUN SƠN ĐỎ: TẮT");
+    }
+
+    private void DrawAccelerationInput()
+    {
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Gia tốc giới hạn:", GUILayout.Width(130));
+        const string controlName = "JointAccelerationInput";
+        GUI.SetNextControlName(controlName);
+        if (GUI.GetNameOfFocusedControl() != controlName)
+            accelerationInputText = maxJointAccelerationDegPerSecond2.ToString("F1", CultureInfo.InvariantCulture);
+        accelerationInputText = GUILayout.TextField(accelerationInputText, GUILayout.Width(70));
+        if (float.TryParse(accelerationInputText, NumberStyles.Float, CultureInfo.InvariantCulture,
+            out float enteredAcceleration))
+            maxJointAccelerationDegPerSecond2 = Mathf.Clamp(enteredAcceleration, 1f, 1000f);
+        GUILayout.Label("°/s²");
+        GUILayout.EndHorizontal();
+    }
+
+    private void DrawJointSpeedInputs()
+    {
+        EnsureJointSpeedSettings();
+        for (int joint = 0; joint < jointSpeedDegPerSecond.Length; joint++)
+        {
+            float jointLimit = Mathf.Min(Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 223f),
+                GetHardwareJointSpeedLimit(joint));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"J{joint + 1}", GUILayout.Width(34));
+            float previousSpeed = jointSpeedDegPerSecond[joint];
+            float sliderSpeed = GUILayout.HorizontalSlider(previousSpeed, 1f, jointLimit);
+            if (!Mathf.Approximately(sliderSpeed, previousSpeed))
+            {
+                jointSpeedDegPerSecond[joint] = sliderSpeed;
+                jointSpeedInputTexts[joint] = sliderSpeed.ToString("F1", CultureInfo.InvariantCulture);
+                GUI.FocusControl(null);
+            }
+
+            string controlName = $"Joint{joint + 1}SpeedInput";
+            GUI.SetNextControlName(controlName);
+            if (GUI.GetNameOfFocusedControl() != controlName)
+                jointSpeedInputTexts[joint] = jointSpeedDegPerSecond[joint].ToString("F1", CultureInfo.InvariantCulture);
+            jointSpeedInputTexts[joint] = GUILayout.TextField(jointSpeedInputTexts[joint], GUILayout.Width(66));
+            if (float.TryParse(jointSpeedInputTexts[joint], NumberStyles.Float, CultureInfo.InvariantCulture,
+                out float enteredSpeed))
+                jointSpeedDegPerSecond[joint] = Mathf.Clamp(enteredSpeed, 1f, jointLimit);
+            GUILayout.Label("°/s", GUILayout.Width(32));
+            GUILayout.EndHorizontal();
+        }
+    }
+
+    private void DrawCurrentWaypointStatus()
+    {
+        GUILayout.Label("TRẠNG THÁI ROBOT", GUI.skin.box);
+        if (waypoints.Count == 0)
+        {
+            GUILayout.Label("Chưa nạp quỹ đạo mô phỏng.");
+            return;
+        }
+
+        WaypointData wp = waypoints[Mathf.Clamp(currentWaypointIndex, 0, waypoints.Count - 1)];
+        GUIStyle statusStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = wp.isSolved ? Color.green : Color.red }
+        };
+        GUILayout.Label(wp.isSolved ? "IK: CÓ NGHIỆM TRONG DỮ LIỆU QUỸ ĐẠO" : "IK: KHÔNG CÓ NGHIỆM", statusStyle);
+        GUILayout.Label($"TCP mục tiêu (mm): X {wp.targetPosGlobal_mm.x:F1}   Y {wp.targetPosGlobal_mm.y:F1}   Z {wp.targetPosGlobal_mm.z:F1}");
+        GUILayout.Label($"Góc TCP RPY (°): {wp.roll_deg:F1}, {wp.pitch_deg:F1}, {wp.yaw_deg:F1}");
+        GUILayout.Label($"Góc khớp (°): {wp.jointAngles_deg[0]:F1}, {wp.jointAngles_deg[1]:F1}, {wp.jointAngles_deg[2]:F1}");
+        GUILayout.Label($"                 {wp.jointAngles_deg[3]:F1}, {wp.jointAngles_deg[4]:F1}, {wp.jointAngles_deg[5]:F1}");
+    }
+
+    private void DrawPipelinePanel()
+    {
+        GUILayout.Label("PIPELINE ĐỀ XUẤT TRONG BÁO CÁO", GUI.skin.box);
+        DrawBlankPipelineSection("01  THU NHẬN DỮ LIỆU", "Ảnh RGB  |  Point cloud XYZ  |  Zivid .ZDF / .PLY", 72);
+        DrawBlankPipelineSection("02  PHÂN VÙNG VÀ MỐC AI", "Mask quần  |  vùng phun  |  mốc hình học", 72);
+        DrawBlankPipelineSection("03  BỀ MẶT 2.5D / 3D", "Lọc điểm  |  mặt bàn/khuôn  |  pháp tuyến", 72);
+        DrawBlankPipelineSection("04  THAM SỐ SÚNG", "Khoảng cách d  |  vệt w, σ  |  lưu lượng Q  |  tốc độ v  |  θmax  |  biên e", 64);
+        DrawBlankPipelineSection("05  SINH QUỸ ĐẠO", "P1 Zigzag  |  P3 theo mốc  |  P4 đăng ký ICP / CPD / TPS", 82);
+        DrawBlankPipelineSection("06  KIỂM TRA VÀ XUẤT LỆNH", "Trong vùng  |  tầm với / IK  |  kỳ dị  |  va chạm  |  tốc độ TCP  |  ROS 2 / Gazebo", 72);
+    }
+
+    private void DrawBlankPipelineSection(string title, string fieldLabels, float height)
+    {
+        GUILayout.BeginVertical(GUI.skin.box);
+        GUILayout.Label(title);
+        GUILayout.Label(fieldLabels, GUI.skin.label);
+        GUILayout.Box(GUIContent.none, GUILayout.ExpandWidth(true), GUILayout.Height(height));
+        GUILayout.EndVertical();
+    }
+
+    private void DrawEvaluationPanel()
+    {
+        GUILayout.Label("KẾT QUẢ ĐÁNH GIÁ", GUI.skin.box);
+        DrawBlankMetricRow("E_geo", "Sai số hình học", "mm · TB / P95 / Hausdorff");
+        DrawBlankMetricRow("E_d", "Sai số khoảng cách súng", "mm");
+        DrawBlankMetricRow("E_θ", "Sai số góc so với pháp tuyến", "°");
+        DrawBlankMetricRow("E_T", "Sai lệch mật độ phun", "% RMS");
+        DrawBlankMetricRow("R_drop", "Độ phủ / lượng sơn tràn", "%");
+        DrawBlankMetricRow("v_TCP", "Độ đều tốc độ TCP", "% dao động");
+        DrawBlankMetricRow("t", "Thời gian xử lý / chu kỳ", "s");
 
         GUILayout.Space(8);
+        GUILayout.Label("SO SÁNH PHƯƠNG PHÁP TRÊN CÙNG DỮ LIỆU", GUI.skin.box);
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Chỉ tiêu", GUILayout.Width(120));
+        GUILayout.Label("P1 Zigzag", GUILayout.Width(82));
+        GUILayout.Label("P3 Mốc", GUILayout.Width(72));
+        GUILayout.Label("P4 ICP/CPD", GUILayout.Width(88));
+        GUILayout.EndHorizontal();
+        DrawBlankComparisonRow("E_geo");
+        DrawBlankComparisonRow("E_d");
+        DrawBlankComparisonRow("E_θ");
+        DrawBlankComparisonRow("E_T");
+        DrawBlankComparisonRow("R_drop");
+        DrawBlankComparisonRow("v_TCP");
+        DrawBlankComparisonRow("Tạo (s)");
+        DrawBlankComparisonRow("Khả thi (%)");
+    }
 
-        // BẢNG THÔNG SỐ ĐỘNG HỌC (KINEMATICS DASHBOARD)
-        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.alignment = TextAnchor.UpperLeft;
-        GUILayout.BeginVertical(boxStyle);
-
-        if (waypoints.Count > 0 && currentWaypointIndex < waypoints.Count)
-        {
-            WaypointData wp = waypoints[currentWaypointIndex];
-
-            // Trạng thái IK
-            GUIStyle statusStyle = new GUIStyle(GUI.skin.label);
-            statusStyle.fontStyle = FontStyle.Bold;
-            statusStyle.normal.textColor = wp.isSolved ? Color.green : Color.red;
-            GUILayout.Label(wp.isSolved ? "● TRẠNG THÁI: IK SOLVED (HỘI TỤ CHÍNH XÁC)" : "● TRẠNG THÁI: NGOÀI TẦM VỚI", statusStyle);
-
-            GUILayout.Space(3);
-            GUILayout.Label($"<b>Tọa độ TCP mục tiêu:</b>");
-            GUILayout.Label($" Global robot: X = {wp.targetPosGlobal_mm.x:F2} | Y = {wp.targetPosGlobal_mm.y:F2} | Z = {wp.targetPosGlobal_mm.z:F2} mm");
-
-            GUILayout.Space(3);
-            GUILayout.Label($"<b>Tư thế TCP (Roll, Pitch, Yaw):</b>");
-            GUILayout.Label($" Roll = {wp.roll_deg:F1}° | Pitch = {wp.pitch_deg:F1}° | Yaw = {wp.yaw_deg:F1}°");
-
-            GUILayout.Space(5);
-            GUILayout.Label($"<b>Góc quay 6 khớp (Joint Angles):</b>");
-            GUILayout.Label($" J1: {wp.jointAngles_deg[0],6:F1}°   J2: {wp.jointAngles_deg[1],6:F1}°   J3: {wp.jointAngles_deg[2],6:F1}°");
-            GUILayout.Label($" J4: {wp.jointAngles_deg[3],6:F1}°   J5: {wp.jointAngles_deg[4],6:F1}°   J6: {wp.jointAngles_deg[5],6:F1}°");
-        }
-        else
-        {
-            GUILayout.Label("Chưa nạp dữ liệu quỹ đạo.");
-            if (GUILayout.Button("Nạp file quỹ đạo"))
-            {
-                LoadTrajectoryFile();
-            }
-        }
-
+    private void DrawBlankMetricRow(string code, string title, string unit)
+    {
+        GUILayout.BeginVertical(GUI.skin.box);
+        GUILayout.BeginHorizontal();
+        GUILayout.Label(code, GUILayout.Width(58));
+        GUILayout.Label(title, GUILayout.ExpandWidth(true));
+        GUILayout.Label(unit, GUILayout.Width(130));
+        GUILayout.EndHorizontal();
+        GUILayout.Box(GUIContent.none, GUILayout.ExpandWidth(true), GUILayout.Height(24));
         GUILayout.EndVertical();
+    }
 
-        GUILayout.Space(5);
-        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled,
-            sprayPaintEnabled ? " Phun sơn đỏ: BẬT" : " Phun sơn đỏ: TẮT");
-
-        GUILayout.EndArea();
+    private void DrawBlankComparisonRow(string metric)
+    {
+        GUILayout.BeginHorizontal();
+        GUILayout.Label(metric, GUILayout.Width(120));
+        GUILayout.Box(GUIContent.none, GUILayout.Width(82), GUILayout.Height(22));
+        GUILayout.Box(GUIContent.none, GUILayout.Width(72), GUILayout.Height(22));
+        GUILayout.Box(GUIContent.none, GUILayout.Width(88), GUILayout.Height(22));
+        GUILayout.EndHorizontal();
     }
 
     private void OnDrawGizmos()
