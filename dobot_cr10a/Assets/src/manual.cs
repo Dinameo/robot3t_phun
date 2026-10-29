@@ -5,71 +5,109 @@ using System.Collections.Generic;
 
 /// <summary>
 /// BẢNG ĐIỀU KHIỂN ĐỘNG HỌC ROBOT DOBOT CR10A (MANUAL FK / IK CONTROLLER)
-/// Tích hợp trực tiếp thuật toán Thuần Giải Tích (Closed-Form Analytical IK) từ Báo Cáo Kỹ Thuật Dobot CR5.
+/// Giao diện phong cách Windows Desktop App với dải ruy băng (Ribbon Tabs).
+/// Các bảng điều khiển (Panels) có thể được bật/tắt linh hoạt trong Tab VIEW.
 /// </summary>
 [ExecuteAlways]
 public class manual : MonoBehaviour
 {
     [Header("1. Joint Sliders: Axis 0 -> 5 (Khớp q1 -> q6, Radian & Độ)")]
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 1 / Axis 0 (radian)")]
     public float axis0 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 2 / Axis 1 (radian)")]
     public float axis1 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 3 / Axis 2 (radian)")]
     public float axis2 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 4 / Axis 3 (radian)")]
     public float axis3 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 5 / Axis 4 (radian)")]
     public float axis4 = 0f;
 
     [Range(-2f * Mathf.PI, 2f * Mathf.PI)]
-    [Tooltip("Góc xoay khớp 6 / Axis 5 (radian)")]
     public float axis5 = 0f;
 
     [Header("2. Liên kết Transforms 6 khớp (Axis0 -> Axis5)")]
-    [Tooltip("Mảng chứa 6 Transform của các khớp")]
     public Transform[] axisTransforms = new Transform[6];
 
     [Header("3. Offset góc ban đầu để bảo toàn cấu hình prefab khi slider = 0")]
     [SerializeField]
-    private Quaternion[] initialRotations = new Quaternion[6];
+    public Quaternion[] initialRotations = new Quaternion[6];
 
     [SerializeField]
-    private bool isInitialized = false;
+    public bool isInitialized = false;
 
     [Header("4. Cấu hình quy tắc chiều xoay")]
-    [Tooltip("Đảo ngược chiều xoay để chuẩn theo quy tắc bàn tay phải (Robotics chuẩn)")]
     public bool invertDirection = true;
 
     [Header("5. Cấu hình công cụ TCP")]
-    [Tooltip("Chiều dài công cụ TCP kẹp dọc theo trục Z mặt bích (mm)")]
     public float toolLengthMm = 100.0f;
-
-    [Tooltip("Bật tính năng góc tiếp cận thích ứng (Adaptive Approach Angle) khi với xa")]
     public bool useAdaptiveTilt = false;
 
     // Các biến nội bộ cho Giao diện OnGUI
-    private readonly float[] targetPose = new float[6]; // X, Y, Z (mm), Roll, Pitch, Yaw (deg)
-    private readonly string[] targetText = new string[6];
-    private bool targetInitialized = false;
-    private string ikStatus = "Nhập tọa độ mục tiêu hoặc bấm 'Lấy Pose FK Hiện Tại'.";
-    private readonly List<DobotCR10AKinematics.IKSolution> ikSolutions = new List<DobotCR10AKinematics.IKSolution>();
-    private Vector2 solutionScroll = Vector2.zero;
-    private Transform globalReference;
-    private Transform tcpTransform;
+    public readonly float[] targetPose = new float[6]; // X, Y, Z (mm), Roll, Pitch, Yaw (deg)
+    public readonly string[] targetText = new string[6];
+    public bool targetInitialized = false;
+    public string ikStatus = "Nhập tọa độ mục tiêu hoặc bấm 'Lấy Pose FK Hiện Tại'.";
+    public readonly List<DobotCR10AKinematics.IKSolution> ikSolutions = new List<DobotCR10AKinematics.IKSolution>();
+    public Vector2 solutionScroll = Vector2.zero;
+    public Vector2 inspectorScroll = Vector2.zero;
+    public Transform globalReference;
+    public Transform tcpTransform;
+
+    // Các cờ BẬT / TẮT Panel trong Tab View
+    [Header("6. Quản lý hiển thị Panels (Tab View)")]
+    public bool showJointsPanel = true;
+    public bool showFkMonitorPanel = true;
+    public bool showIkTargetPanel = true;
+
+    // Quản lý Ribbon khi chạy standalone
+    public int ribbonTab = 0; // 0: Trang chủ, 1: Động học, 2: Xem (View)
+    public bool ribbonExpanded = true;
+    private DobotCR10AIKController ikController;
 
     private void Awake()
     {
         EnsureOffsetsInitialized();
+        ikController = GetComponent<DobotCR10AIKController>();
+        LoadSettings();
+    }
+
+    private void OnDisable()
+    {
+        SaveSettings();
+    }
+
+    private void OnDestroy()
+    {
+        SaveSettings();
+    }
+
+    public void SaveSettings()
+    {
+        PlayerPrefs.SetInt("Manual_ShowJoints", showJointsPanel ? 1 : 0);
+        PlayerPrefs.SetInt("Manual_ShowFk", showFkMonitorPanel ? 1 : 0);
+        PlayerPrefs.SetInt("Manual_ShowIk", showIkTargetPanel ? 1 : 0);
+        PlayerPrefs.SetInt("Manual_RibbonExpanded", ribbonExpanded ? 1 : 0);
+        PlayerPrefs.SetInt("Manual_RibbonTab", ribbonTab);
+        PlayerPrefs.SetInt("Manual_AdaptiveTilt", useAdaptiveTilt ? 1 : 0);
+        PlayerPrefs.Save();
+    }
+
+    public void LoadSettings()
+    {
+        if (PlayerPrefs.HasKey("Manual_ShowJoints"))
+        {
+            showJointsPanel = PlayerPrefs.GetInt("Manual_ShowJoints", 1) == 1;
+            showFkMonitorPanel = PlayerPrefs.GetInt("Manual_ShowFk", 1) == 1;
+            showIkTargetPanel = PlayerPrefs.GetInt("Manual_ShowIk", 1) == 1;
+            ribbonExpanded = PlayerPrefs.GetInt("Manual_RibbonExpanded", 1) == 1;
+            ribbonTab = PlayerPrefs.GetInt("Manual_RibbonTab", 0);
+            useAdaptiveTilt = PlayerPrefs.GetInt("Manual_AdaptiveTilt", 0) == 1;
+        }
     }
 
     private void Start()
@@ -92,10 +130,7 @@ public class manual : MonoBehaviour
         ApplyRotations();
     }
 
-    /// <summary>
-    /// Đảm bảo offset ban đầu được lưu đúng để khi slider = 0 thì robot ở tư thế gốc chuẩn
-    /// </summary>
-    private void EnsureOffsetsInitialized()
+    public void EnsureOffsetsInitialized()
     {
         AutoAssignTransforms();
         if (isInitialized && initialRotations != null && initialRotations.Length == 6)
@@ -130,9 +165,6 @@ public class manual : MonoBehaviour
         isInitialized = true;
     }
 
-    /// <summary>
-    /// Tự động tìm kiếm các Transform theo tên axis0..5 hoặc Link1..6 nếu chưa được gán
-    /// </summary>
     private void AutoAssignTransforms()
     {
         for (int i = 0; i < 6; i++)
@@ -177,7 +209,7 @@ public class manual : MonoBehaviour
         return null;
     }
 
-    private void ResolveKinematicsReferences()
+    public void ResolveKinematicsReferences()
     {
         if (globalReference == null && axisTransforms != null && axisTransforms.Length > 0 && axisTransforms[0] != null)
             globalReference = axisTransforms[0].parent;
@@ -193,9 +225,6 @@ public class manual : MonoBehaviour
             tcpTransform = FindDeepChild(axisTransforms[5], "tcp");
     }
 
-    /// <summary>
-    /// Áp dụng xoay quanh trục Z cục bộ kết hợp với offset góc ban đầu
-    /// </summary>
     public void ApplyRotations()
     {
         if (axisTransforms == null || axisTransforms.Length != 6) return;
@@ -214,9 +243,6 @@ public class manual : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Reset tất cả các slider về 0
-    /// </summary>
     [ContextMenu("Reset All Sliders To 0")]
     public void ResetAllSlidersToZero()
     {
@@ -231,40 +257,62 @@ public class manual : MonoBehaviour
     }
 
     // =========================================================================
-    // GIAO DIỆN TRỰC QUAN KIỂM THỬ TRÊN MÀN HÌNH GAME (Runtime OnGUI Panel)
+    // CÁC HÀM VẼ TỪNG BẢNG CHI TIẾT (PANEL CARDS) ĐỘC LẬP
     // =========================================================================
-    private void OnGUI()
+
+    /// <summary>
+    /// Bảng 1: Điều khiển 6 khớp góc (Sliders + Vi chỉnh)
+    /// </summary>
+    public void DrawJointsControlCard(float width, Action onClose = null)
     {
-        if (axisTransforms == null || axisTransforms.Length != 6) return;
-        if (!targetInitialized) InitializeTargetFromCurrentPose();
-        ResolveKinematicsReferences();
+        AntigravityUITheme.EnsureInitialized();
+        GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("ĐIỀU KHIỂN 6 KHỚP (SLIDERS)", AntigravityUITheme.StyleCardHeader);
+        GUILayout.FlexibleSpace();
+        if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18)))
+        {
+            onClose();
+        }
+        GUILayout.EndHorizontal();
 
-        const float panelWidth = 430f;
-        float panelHeight = Mathf.Min(Screen.height - 24f, 740f);
-        Rect panelRect = new Rect(12f, 12f, panelWidth, panelHeight);
-
-        GUI.Box(panelRect, GUIContent.none);
-        GUILayout.BeginArea(new Rect(panelRect.x + 10f, panelRect.y + 8f, panelWidth - 20f, panelHeight - 16f));
-        GUILayout.BeginVertical();
-
-        // 1. Tiêu đề
-        GUILayout.Label("DOBOT CR10A — KINEMATICS ENGINE", PanelTitleStyle());
-        GUILayout.Label("Thuần Giải Tích (Closed-Form Analytical IK) • 8 Nghiệm", SubtitleStyle());
-        GUILayout.Space(4f);
-
-        // 2. 6 Sliders khớp góc
-        GUILayout.Label("Điều khiển 6 khớp q1…q6 (Độ & Radian):", PanelHeaderStyle());
         for (int i = 0; i < 6; i++)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"q{i + 1}: {GetJoint(i) * Mathf.Rad2Deg,6:F1}°", GUILayout.Width(80f));
-            float val = GUILayout.HorizontalSlider(GetJoint(i), -2f * Mathf.PI, 2f * Mathf.PI);
-            if (Mathf.Abs(val - GetJoint(i)) > 1e-5f)
+            GUILayout.Label($"q{i + 1}", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(24));
+
+            float degVal = GetJoint(i) * Mathf.Rad2Deg;
+            GUILayout.Label($"{degVal,6:F1}°", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(58));
+
+            if (GUILayout.Button("-5°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20)))
             {
-                SetJoint(i, val);
+                SetJoint(i, (degVal - 5f) * Mathf.Deg2Rad);
                 ApplyRotations();
             }
-            if (GUILayout.Button("0", GUILayout.Width(22f), GUILayout.Height(18f)))
+            if (GUILayout.Button("-1°", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(20)))
+            {
+                SetJoint(i, (degVal - 1f) * Mathf.Deg2Rad);
+                ApplyRotations();
+            }
+
+            float sliderVal = GUILayout.HorizontalSlider(GetJoint(i), -2f * Mathf.PI, 2f * Mathf.PI);
+            if (Mathf.Abs(sliderVal - GetJoint(i)) > 1e-5f)
+            {
+                SetJoint(i, sliderVal);
+                ApplyRotations();
+            }
+
+            if (GUILayout.Button("+1°", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(20)))
+            {
+                SetJoint(i, (degVal + 1f) * Mathf.Deg2Rad);
+                ApplyRotations();
+            }
+            if (GUILayout.Button("+5°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20)))
+            {
+                SetJoint(i, (degVal + 5f) * Mathf.Deg2Rad);
+                ApplyRotations();
+            }
+            if (GUILayout.Button("0", AntigravityUITheme.StyleButton, GUILayout.Width(22), GUILayout.Height(20)))
             {
                 SetJoint(i, 0f);
                 ApplyRotations();
@@ -272,83 +320,97 @@ public class manual : MonoBehaviour
             GUILayout.EndHorizontal();
         }
 
-        GUILayout.Space(6f);
+        GUILayout.EndVertical();
+    }
 
-        // 3. Động học thuận FK hiện tại
+    /// <summary>
+    /// Bảng 2: Giám sát FK và sai số thực tế thời gian thực
+    /// </summary>
+    public void DrawFkMonitorCard(float width, Action onClose = null)
+    {
+        AntigravityUITheme.EnsureInitialized();
         Vector3 currentTcpPosMm;
         Vector3 currentRpyDeg;
         GetForwardPoseValues(out currentTcpPosMm, out currentRpyDeg);
 
-        GUILayout.Label("Động học thuận FK hiện tại (TCP):", PanelHeaderStyle());
-        GUILayout.Label($"Vị trí (mm): X {currentTcpPosMm.x,7:F1}   Y {currentTcpPosMm.y,7:F1}   Z {currentTcpPosMm.z,7:F1}");
-        GUILayout.Label($"Góc RPY (°): Roll {currentRpyDeg.x,6:F1}°  Pitch {currentRpyDeg.y,6:F1}°  Yaw {currentRpyDeg.z,6:F1}°");
+        GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("GIÁM SÁT FK TCP THỜI GIAN THỰC", AntigravityUITheme.StyleCardHeader);
+        GUILayout.FlexibleSpace();
+        if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18)))
+        {
+            onClose();
+        }
+        GUILayout.EndHorizontal();
 
-        // Kiểm tra sai số thực tế giữa FK tính toán và GameObject tcp trong Scene
+        GUILayout.Label($"Vị trí (mm):   X: {currentTcpPosMm.x,7:F1}   Y: {currentTcpPosMm.y,7:F1}   Z: {currentTcpPosMm.z,7:F1}", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.Label($"Góc RPY (°):   Roll: {currentRpyDeg.x,6:F1}°  Pitch: {currentRpyDeg.y,6:F1}°  Yaw: {currentRpyDeg.z,6:F1}°", AntigravityUITheme.StyleLabelMuted);
+
         Vector3 actualSceneTcpPosMm;
         if (TryGetActualSceneTcpPos(out actualSceneTcpPosMm))
         {
             float errorMm = Vector3.Distance(currentTcpPosMm, actualSceneTcpPosMm);
-            GUILayout.Label($"Sai số toán học FK ↔ Mesh Scene: {errorMm:F4} mm", ErrorStyle(errorMm));
+            GUIStyle errStyle = errorMm < 0.1f ? AntigravityUITheme.StyleLabelGreen : (errorMm < 1.0f ? AntigravityUITheme.StyleLabelYellow : AntigravityUITheme.StyleLabelRed);
+            GUILayout.Label($"Sai số toán học FK ↔ Mesh: {errorMm:F4} mm", errStyle);
         }
 
-        GUILayout.Space(6f);
+        GUILayout.EndVertical();
+    }
 
-        // 4. Nhập Pose mục tiêu cho IK
-        GUILayout.Label("Pose mục tiêu (XYZ: mm • RPY: độ ZYX):", PanelHeaderStyle());
+    /// <summary>
+    /// Bảng 3: Nhập Pose mục tiêu và chọn 8 nhánh nghiệm giải tích
+    /// </summary>
+    public void DrawIkTargetCard(float width, Action onClose = null)
+    {
+        AntigravityUITheme.EnsureInitialized();
+        GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("MỤC TIÊU IK & 8 NGHIỆM GIẢI TÍCH", AntigravityUITheme.StyleCardHeader);
+        GUILayout.FlexibleSpace();
+        if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18)))
+        {
+            onClose();
+        }
+        GUILayout.EndHorizontal();
+
         DrawPoseRow(0, 1, 2);
         DrawPoseRow(3, 4, 5);
 
         GUILayout.BeginHorizontal();
-        useAdaptiveTilt = GUILayout.Toggle(useAdaptiveTilt, " Adaptive Tilt (Gắp xa)");
+        useAdaptiveTilt = GUILayout.Toggle(useAdaptiveTilt, " Adaptive Tilt (Tiếp cận thích ứng)", AntigravityUITheme.StyleToggle);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Lấy Pose FK Hiện Tại", GUILayout.Height(26f)))
-        {
-            CopyCurrentPoseToTarget();
-        }
-        if (GUILayout.Button("Giải IK (8 Cấu Hình)", GUILayout.Height(26f)))
-        {
-            SolveAndApplyIk();
-        }
+        if (GUILayout.Button("Lấy Pose FK", AntigravityUITheme.StyleButton, GUILayout.Height(24))) CopyCurrentPoseToTarget();
+        if (GUILayout.Button("Giải IK", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24))) SolveAndApplyIk();
+        if (GUILayout.Button("Bích Cắm Xuống", AntigravityUITheme.StyleButton, GUILayout.Height(24))) SetFlangeDownTargetAndApplyIk();
+        if (GUILayout.Button("Home", AntigravityUITheme.StyleButton, GUILayout.Height(24))) ResetAllSlidersToZero();
         GUILayout.EndHorizontal();
 
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Mặt bích hướng xuống (Flange Down)", GUILayout.Height(24f)))
-        {
-            SetFlangeDownTargetAndApplyIk();
-        }
-        if (GUILayout.Button("Reset về Home (0°)", GUILayout.Height(24f)))
-        {
-            ResetAllSlidersToZero();
-        }
-        GUILayout.EndHorizontal();
+        GUILayout.Label(ikStatus, AntigravityUITheme.StyleLabelCyan);
 
-        GUILayout.Label(ikStatus, PanelStatusStyle());
-
-        // 5. Hiển thị danh sách 8 nghiệm giải tích
+        // Danh sách 8 nghiệm giải tích
         if (ikSolutions.Count > 0)
         {
-            GUILayout.Label($"Danh sách nghiệm giải tích tìm được ({ikSolutions.Count} cấu hình):", PanelHeaderStyle());
+            GUILayout.Space(2f);
+            GUILayout.Label($"Danh sách nghiệm giải tích ({ikSolutions.Count} cấu hình):", AntigravityUITheme.StyleSectionLabel);
             solutionScroll = GUILayout.BeginScrollView(solutionScroll, GUILayout.Height(Mathf.Min(140f, 28f * ikSolutions.Count)));
             for (int i = 0; i < ikSolutions.Count; i++)
             {
                 DobotCR10AKinematics.IKSolution sol = ikSolutions[i];
-                string prefTag = i == 0 ? "★ [TỐI ƯU Q*] " : $"#{i + 1} ";
+                string prefTag = i == 0 ? "[TỐI ƯU Q*] " : $"#{i + 1} ";
                 string label = $"{prefTag}{sol.branchName} (Sai số: {sol.positionErrorMm:F4}mm)";
-                
-                GUI.color = i == 0 ? Color.green : Color.white;
-                if (GUILayout.Button(label, GUILayout.Height(22f)))
+
+                GUIStyle btnSt = i == 0 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                if (GUILayout.Button(label, btnSt, GUILayout.Height(22)))
                 {
                     ApplySolution(i);
                 }
-                GUI.color = Color.white;
             }
             GUILayout.EndScrollView();
         }
 
         GUILayout.EndVertical();
-        GUILayout.EndArea();
     }
 
     private void DrawPoseRow(int a, int b, int c)
@@ -359,8 +421,8 @@ public class manual : MonoBehaviour
         for (int k = 0; k < 3; k++)
         {
             int i = indices[k];
-            GUILayout.Label(labels[i], GUILayout.Width(36f));
-            targetText[i] = GUILayout.TextField(targetText[i] ?? "0", GUILayout.Width(85f));
+            GUILayout.Label(labels[i], AntigravityUITheme.StyleLabelCyan, GUILayout.Width(30f));
+            targetText[i] = GUILayout.TextField(targetText[i] ?? "0", AntigravityUITheme.StyleTextField, GUILayout.Width(92f));
             float parsed;
             if (float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) ||
                 float.TryParse(targetText[i], NumberStyles.Float, CultureInfo.CurrentCulture, out parsed))
@@ -371,14 +433,186 @@ public class manual : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    private void InitializeTargetFromCurrentPose()
+    // =========================================================================
+    // GIAO DIỆN ONGUI (STANDALONE RIBBON NẾU CHẠY MỘT MÌNH)
+    // =========================================================================
+
+    private void OnGUI()
+    {
+        if (axisTransforms == null || axisTransforms.Length != 6) return;
+        if (!targetInitialized) InitializeTargetFromCurrentPose();
+        ResolveKinematicsReferences();
+
+        // Nhường quyền cho DobotCR10AIKController nếu có trên cùng GameObject
+        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>();
+        if (ikController != null && ikController.enabled)
+            return;
+
+        AntigravityUITheme.EnsureInitialized();
+        float screenW = Screen.width;
+        float headerHeight = 38f;
+        float stripHeight = ribbonExpanded ? 76f : 0f;
+        float totalRibbonH = headerHeight + stripHeight;
+
+        // 1. THANH RUY BĂNG TRÊN CÙNG
+        GUI.DrawTexture(new Rect(0, 0, screenW, totalRibbonH), AntigravityUITheme.TexBgHeader);
+        GUI.DrawTexture(new Rect(0, totalRibbonH - 1, screenW, 1), AntigravityUITheme.TexBorder);
+        if (ribbonExpanded)
+        {
+            GUI.DrawTexture(new Rect(0, headerHeight, screenW, stripHeight), AntigravityUITheme.TexBgStrip);
+            GUI.DrawTexture(new Rect(0, headerHeight - 1, screenW, 1), AntigravityUITheme.TexBorder);
+        }
+
+        GUILayout.BeginArea(new Rect(12, 3, screenW - 24, headerHeight));
+        GUILayout.BeginHorizontal();
+
+        GUILayout.Label("DOBOT CR10A WORKBENCH", AntigravityUITheme.StyleHeaderTitle, GUILayout.Width(240));
+
+        // Các Tab Ruy Băng
+        string[] tabs = { "TRANG CHỦ", "ĐỘNG HỌC", "XEM (VIEW)" };
+        for (int t = 0; t < tabs.Length; t++)
+        {
+            bool isCurrent = (ribbonTab == t);
+            if (AntigravityUITheme.RibbonTab(tabs[t], isCurrent, 130f, 30f))
+            {
+                ribbonTab = t;
+            }
+        }
+
+        GUILayout.FlexibleSpace();
+
+        if (GUILayout.Button(ribbonExpanded ? "Thu gọn Dải lệnh" : "Mở rộng Dải lệnh", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            ribbonExpanded = !ribbonExpanded;
+        }
+
+        GUILayout.EndHorizontal();
+        GUILayout.EndArea();
+
+        // 2. DẢI CÔNG CỤ DƯỚI TAB (COMMAND STRIP)
+        if (ribbonExpanded)
+        {
+            GUILayout.BeginArea(new Rect(12, headerHeight + 2, screenW - 24, stripHeight - 4));
+            GUILayout.BeginHorizontal();
+
+            if (ribbonTab == 0 || ribbonTab == 1)
+            {
+                // Nhóm: THAO TÁC CƠ BẢN
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(340));
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Home (0°)", AntigravityUITheme.StyleButton, GUILayout.Height(36))) ResetAllSlidersToZero();
+                if (GUILayout.Button("Bích Cắm Xuống", AntigravityUITheme.StyleButton, GUILayout.Height(36))) SetFlangeDownTargetAndApplyIk();
+                if (GUILayout.Button("Lấy Pose FK", AntigravityUITheme.StyleButton, GUILayout.Height(36))) CopyCurrentPoseToTarget();
+                if (GUILayout.Button("Giải IK", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(36))) SolveAndApplyIk();
+                GUILayout.EndHorizontal();
+                GUILayout.Label("THAO TÁC CƠ BẢN", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.EndVertical();
+
+                // Nhóm: CAMERA
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
+                GUILayout.BeginHorizontal();
+                RobotCameraController rcc = EnsureCameraController();
+                if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetPerspective(); }
+                if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetTopDown(); }
+                if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetFront(); }
+                if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetSide(); }
+                if (GUILayout.Button("Focus Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.FocusGarment(); }
+                GUILayout.EndHorizontal();
+                GUILayout.Label("GÓC NHÌN CAMERA TRÊN ĐỒ", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.EndVertical();
+            }
+            else
+            {
+                // TAB 2: XEM (VIEW) - BẬT TẮT CÁC BẢNG PANEL
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(460));
+                GUILayout.BeginHorizontal();
+                showJointsPanel = GUILayout.Toggle(showJointsPanel, " Bảng Khớp q1-q6", AntigravityUITheme.StyleToggle);
+                showFkMonitorPanel = GUILayout.Toggle(showFkMonitorPanel, " Giám Sát FK TCP", AntigravityUITheme.StyleToggle);
+                showIkTargetPanel = GUILayout.Toggle(showIkTargetPanel, " Mục Tiêu IK", AntigravityUITheme.StyleToggle);
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Hiện Tất Cả Bảng", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(20)))
+                {
+                    showJointsPanel = showFkMonitorPanel = showIkTargetPanel = true;
+                }
+                if (GUILayout.Button("Tắt Hết (Toàn Màn Hình 3D)", AntigravityUITheme.StyleButton, GUILayout.Height(20)))
+                {
+                    showJointsPanel = showFkMonitorPanel = showIkTargetPanel = false;
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Label("BẬT / TẮT CÁC BẢNG ĐIỀU KHIỂN (PANELS)", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.EndVertical();
+
+                // Nhóm: CAMERA
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
+                GUILayout.BeginHorizontal();
+                RobotCameraController rcc = EnsureCameraController();
+                if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetPerspective(); }
+                if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetTopDown(); }
+                if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetFront(); }
+                if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetSide(); }
+                if (GUILayout.Button("Focus Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.FocusGarment(); }
+                GUILayout.EndHorizontal();
+                GUILayout.Label("GÓC NHÌN CAMERA TRÊN ĐỒ", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.EndVertical();
+            }
+
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            GUILayout.EndArea();
+        }
+
+        // 3. DOCK CHỨA CÁC BẢNG ĐƯỢC BẬT (INSPECTOR DOCK)
+        bool anyPanelOpen = showJointsPanel || showFkMonitorPanel || showIkTargetPanel;
+        if (anyPanelOpen)
+        {
+            float dockW = 460f;
+            float dockH = Screen.height - totalRibbonH - 16f;
+            Rect dockRect = new Rect(screenW - dockW - 12f, totalRibbonH + 8f, dockW, dockH);
+
+            GUI.DrawTexture(dockRect, AntigravityUITheme.TexBgDock);
+            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, 1, dockRect.height), AntigravityUITheme.TexBorder);
+            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, dockRect.width, 1), AntigravityUITheme.TexBorder);
+            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y + dockRect.height - 1, dockRect.width, 1), AntigravityUITheme.TexBorder);
+
+            GUILayout.BeginArea(new Rect(dockRect.x + 10f, dockRect.y + 8f, dockW - 20f, dockH - 16f));
+
+            inspectorScroll = GUILayout.BeginScrollView(inspectorScroll, GUILayout.Width(dockW - 20f), GUILayout.Height(dockH - 16f));
+            GUILayout.BeginVertical();
+
+            if (showJointsPanel)
+            {
+                DrawJointsControlCard(dockW - 24f, () => showJointsPanel = false);
+                GUILayout.Space(6f);
+            }
+
+            if (showFkMonitorPanel)
+            {
+                DrawFkMonitorCard(dockW - 24f, () => showFkMonitorPanel = false);
+                GUILayout.Space(6f);
+            }
+
+            if (showIkTargetPanel)
+            {
+                DrawIkTargetCard(dockW - 24f, () => showIkTargetPanel = false);
+                GUILayout.Space(6f);
+            }
+
+            GUILayout.EndVertical();
+            GUILayout.EndScrollView();
+
+            GUILayout.EndArea();
+        }
+    }
+
+    public void InitializeTargetFromCurrentPose()
     {
         if (targetInitialized) return;
         CopyCurrentPoseToTarget();
         targetInitialized = true;
     }
 
-    private void CopyCurrentPoseToTarget()
+    public void CopyCurrentPoseToTarget()
     {
         Vector3 posMm;
         Vector3 rpyDeg;
@@ -398,7 +632,7 @@ public class manual : MonoBehaviour
         ikStatus = "Đã sao chép Pose FK hiện tại vào mục tiêu.";
     }
 
-    private void GetForwardPoseValues(out Vector3 posMm, out Vector3 rpyDeg)
+    public void GetForwardPoseValues(out Vector3 posMm, out Vector3 rpyDeg)
     {
         float[] q = GetJointVector();
         Matrix4x4 T = DobotCR10AKinematics.ForwardTcp(q, tcpTransform, toolLengthMm);
@@ -406,7 +640,7 @@ public class manual : MonoBehaviour
         rpyDeg = DobotCR10AKinematics.UnityRotationToRpy(T.rotation);
     }
 
-    private bool TryGetActualSceneTcpPos(out Vector3 posMm)
+    public bool TryGetActualSceneTcpPos(out Vector3 posMm)
     {
         ResolveKinematicsReferences();
         if (globalReference == null || tcpTransform == null)
@@ -415,13 +649,12 @@ public class manual : MonoBehaviour
             return false;
         }
 
-        // Tọa độ của tcpTransform quy về hệ quy chiếu robot base (Global)
         Vector3 localPosM = globalReference.InverseTransformPoint(tcpTransform.position);
         posMm = localPosM * 1000f;
         return true;
     }
 
-    private void SolveAndApplyIk()
+    public void SolveAndApplyIk()
     {
         Vector3 targetPos = new Vector3(targetPose[0], targetPose[1], targetPose[2]);
         Quaternion targetRot = DobotCR10AKinematics.RpyToUnityRotation(targetPose[3], targetPose[4], targetPose[5]);
@@ -446,18 +679,15 @@ public class manual : MonoBehaviour
         }
 
         ikSolutions.AddRange(sols);
-
-        // Tự động áp dụng nghiệm tối ưu Q* (ở vị trí đầu tiên sols[0])
         ApplySolution(0);
 
         ikStatus = string.Format(CultureInfo.InvariantCulture,
-            "IK THÀNH CÔNG: Tìm thấy {0} cấu hình giải tích trong {1:F3} ms. Đã áp dụng nghiệm tối ưu Q* ({2}). Sai số vị trí: {3:E2} mm.",
+            "IK THÀNH CÔNG: {0} nghiệm trong {1:F3} ms. Áp dụng Q* [{2}]. Sai số: {3:E2} mm.",
             sols.Count, sw.Elapsed.TotalMilliseconds, sols[0].branchName, sols[0].positionErrorMm);
     }
 
-    private void SetFlangeDownTargetAndApplyIk()
+    public void SetFlangeDownTargetAndApplyIk()
     {
-        // Giữ nguyên vị trí X, Y, Z hiện tại và Yaw hiện tại, ép Roll = 180°, Pitch = 0° để mặt bích kẹp cắm thẳng đứng xuống sàn
         targetPose[3] = 180f; // Roll
         targetPose[4] = 0f;   // Pitch
         targetText[3] = "180.0";
@@ -466,7 +696,7 @@ public class manual : MonoBehaviour
         SolveAndApplyIk();
     }
 
-    private void ApplySolution(int index)
+    public void ApplySolution(int index)
     {
         if (index < 0 || index >= ikSolutions.Count) return;
         DobotCR10AKinematics.IKSolution sol = ikSolutions[index];
@@ -483,7 +713,7 @@ public class manual : MonoBehaviour
             index + 1, sol.branchName, sol.positionErrorMm);
     }
 
-    private float GetJoint(int i)
+    public float GetJoint(int i)
     {
         switch (i)
         {
@@ -496,7 +726,7 @@ public class manual : MonoBehaviour
         }
     }
 
-    private void SetJoint(int i, float value)
+    public void SetJoint(int i, float value)
     {
         value = Mathf.Clamp(value, -2f * Mathf.PI, 2f * Mathf.PI);
         switch (i)
@@ -510,36 +740,27 @@ public class manual : MonoBehaviour
         }
     }
 
-    private float[] GetJointVector()
+    public float[] GetJointVector()
     {
         return new float[] { axis0, axis1, axis2, axis3, axis4, axis5 };
     }
 
-    // Styles cho OnGUI
-    private GUIStyle PanelTitleStyle()
-    {
-        return new GUIStyle(GUI.skin.label)
-        {
-            fontSize = 15,
-            fontStyle = FontStyle.Bold,
-            normal = { textColor = new Color(0.2f, 0.9f, 1f) }
-        };
-    }
-
-    private GUIStyle SubtitleStyle()
+    // Styles
+    private GUIStyle CardTitleStyle()
     {
         return new GUIStyle(GUI.skin.label)
         {
             fontSize = 11,
-            normal = { textColor = new Color(0.8f, 0.8f, 0.8f) }
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = new Color(0.3f, 0.85f, 1f) }
         };
     }
 
-    private GUIStyle PanelHeaderStyle()
+    private GUIStyle SubHeaderStyle()
     {
         return new GUIStyle(GUI.skin.label)
         {
-            fontSize = 12,
+            fontSize = 10,
             fontStyle = FontStyle.Bold,
             normal = { textColor = Color.yellow }
         };
@@ -550,7 +771,7 @@ public class manual : MonoBehaviour
         return new GUIStyle(GUI.skin.label)
         {
             wordWrap = true,
-            fontSize = 11,
+            fontSize = 10,
             normal = { textColor = ikStatus.Contains("THÀNH CÔNG") ? Color.green : (ikStatus.Contains("Không tìm thấy") ? Color.red : Color.white) }
         };
     }
@@ -559,8 +780,62 @@ public class manual : MonoBehaviour
     {
         return new GUIStyle(GUI.skin.label)
         {
-            fontSize = 11,
+            fontSize = 10,
             normal = { textColor = errorMm < 0.01f ? Color.green : Color.yellow }
         };
+    }
+
+    private GUIStyle CenteredMiniLabel()
+    {
+        return new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 9,
+            alignment = TextAnchor.MiddleCenter,
+            normal = { textColor = new Color(0.65f, 0.65f, 0.65f) }
+        };
+    }
+
+    private RobotCameraController EnsureCameraController()
+    {
+        RobotCameraController[] allRccs = FindObjectsByType<RobotCameraController>(FindObjectsInactive.Exclude);
+        foreach (var r in allRccs)
+        {
+            if (r != null && r.GetComponent<FixedRigCamera>() == null) return r;
+        }
+
+        Camera targetCam = null;
+        Camera[] allCams = FindObjectsByType<Camera>(FindObjectsInactive.Exclude);
+        foreach (Camera c in allCams)
+        {
+            if (c.GetComponent<FixedRigCamera>() != null)
+            {
+                c.depth = -1;
+                c.tag = "Untagged";
+            }
+            else if (targetCam == null && c.name == "Camera")
+            {
+                targetCam = c;
+            }
+        }
+
+        if (targetCam == null)
+        {
+            foreach (Camera c in allCams)
+            {
+                if (c.GetComponent<FixedRigCamera>() == null) { targetCam = c; break; }
+            }
+        }
+        if (targetCam == null) targetCam = Camera.main;
+
+        if (targetCam != null)
+        {
+            targetCam.depth = 1;
+            targetCam.tag = "MainCamera";
+            var rcc = targetCam.GetComponent<RobotCameraController>();
+            if (rcc == null) rcc = targetCam.gameObject.AddComponent<RobotCameraController>();
+            rcc.InitializeIfNeeded();
+            return rcc;
+        }
+        return null;
     }
 }

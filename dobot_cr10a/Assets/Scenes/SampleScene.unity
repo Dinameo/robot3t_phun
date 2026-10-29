@@ -134,7 +134,7 @@ GameObject:
   - component: {fileID: 53313214}
   m_Layer: 0
   m_Name: Main Camera
-  m_TagString: MainCamera
+  m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
@@ -227,7 +227,7 @@ Camera:
   field of view: 45
   orthographic: 0
   orthographic size: 5
-  m_Depth: 0
+  m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
     m_Bits: 4294967295
@@ -1315,9 +1315,10 @@ GameObject:
   - component: {fileID: 622092740}
   - component: {fileID: 622092739}
   - component: {fileID: 622092738}
+  - component: {fileID: 622092742}
   m_Layer: 0
   m_Name: Camera
-  m_TagString: Untagged
+  m_TagString: MainCamera
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
@@ -1366,6 +1367,32 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
+--- !u!114 &622092742
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 622092737}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b8f521c784de89743a2939f4d699eac2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::RobotCameraController
+  target: {fileID: 0}
+  toolTipTransform: {fileID: 0}
+  followTool: 0
+  distance: 2.2
+  minDistance: 0.2
+  maxDistance: 6
+  rotateSpeed: 120
+  zoomSpeed: 2.5
+  panSpeed: 0.35
+  smoothTime: 0.08
+  minVerticalAngle: -10
+  maxVerticalAngle: 88
+  garmentTransform: {fileID: 0}
+  showDebugOnGui: 0
 --- !u!81 &622092739
 AudioListener:
   m_ObjectHideFlags: 0
@@ -1410,7 +1437,7 @@ Camera:
   field of view: 76
   orthographic: 0
   orthographic size: 5
-  m_Depth: 0
+  m_Depth: 1
   m_CullingMask:
     serializedVersion: 2
     m_Bits: 4294967295
