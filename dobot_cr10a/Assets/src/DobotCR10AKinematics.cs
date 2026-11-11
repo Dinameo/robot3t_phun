@@ -107,32 +107,41 @@ public static class DobotCR10AKinematics
     }
 
     /// <summary>
-    /// Động học thuận tính tới điểm làm việc trung tâm TCP: P_TCP = P_06 + dtool * z6
+    /// Động học thuận tính tới điểm làm việc trung tâm TCP: P_TCP = P_06 + toolOffsetX * x6 + toolOffsetY * y6 + dtool * z6
     /// Trả về Matrix4x4 theo hệ tọa độ Robot trong Unity (mét)
     /// </summary>
-    public static Matrix4x4 ForwardTcp(float[] jointsRad, Transform tcpTransform = null, double dtoolMm = D_TOOL_DEFAULT)
+    public static Matrix4x4 ForwardTcp(
+        float[] jointsRad, 
+        Transform tcpTransform = null, 
+        double dtoolMm = D_TOOL_DEFAULT, 
+        double toolOffsetX = 0.0, 
+        double toolOffsetY = 0.0)
     {
         double[] q = new double[6];
         for (int i = 0; i < 6; i++) q[i] = jointsRad[i];
 
         double[,] T06 = ForwardFlangeDH(q);
 
-        // Vector tiếp cận z6 (cột 3 của ma trận xoay R06)
-        double z6x = T06[0, 2];
-        double z6y = T06[1, 2];
-        double z6z = T06[2, 2];
+        // Vector các trục của khâu 6 (Link 6 / Flange)
+        double x6x = T06[0, 0], x6y = T06[1, 0], x6z = T06[2, 0];
+        double y6x = T06[0, 1], y6y = T06[1, 1], y6z = T06[2, 1];
+        double z6x = T06[0, 2], z6y = T06[1, 2], z6z = T06[2, 2];
 
-        // Nếu có transform tcp cục bộ tùy chỉnh
-        double actualDtool = dtoolMm;
-        if (tcpTransform != null)
+        double offX = toolOffsetX;
+        double offY = toolOffsetY;
+        double offZ = dtoolMm;
+
+        // Nếu người dùng truyền offset âm (chưa xác định) và có tcpTransform trong Unity
+        if (dtoolMm < 0 && tcpTransform != null)
         {
-            actualDtool = tcpTransform.localPosition.z * 1000.0;
-            if (Math.Abs(actualDtool) < 1e-4) actualDtool = dtoolMm;
+            offX = tcpTransform.localPosition.x * 1000.0;
+            offY = tcpTransform.localPosition.y * 1000.0;
+            offZ = tcpTransform.localPosition.z * 1000.0;
         }
 
-        double tcpX_dh = T06[0, 3] + actualDtool * z6x;
-        double tcpY_dh = T06[1, 3] + actualDtool * z6y;
-        double tcpZ_dh = T06[2, 3] + actualDtool * z6z;
+        double tcpX_dh = T06[0, 3] + offX * x6x + offY * y6x + offZ * z6x;
+        double tcpY_dh = T06[1, 3] + offX * x6y + offY * y6y + offZ * z6y;
+        double tcpZ_dh = T06[2, 3] + offX * x6z + offY * y6z + offZ * z6z;
 
         // Chuyển đổi sang hệ quy chiếu Unity: X_unity = -X_dh, Y_unity = Y_dh, Z_unity = Z_dh
         // R_unity = Sx * R_dh * Sx
@@ -163,6 +172,7 @@ public static class DobotCR10AKinematics
 
     /// <summary>
     /// Giải bài toán Động học Nghịch Thuần Giải Tích từ vị trí mục tiêu (mm) và góc định hướng RPY (độ)
+    /// Hỗ trợ bù trừ offset 3D tùy chỉnh [toolOffsetX, toolOffsetY, dtoolMm] từ mặt bích đến TCP.
     /// Trả về danh sách đầy đủ 8 cấu hình nghiệm giải tích, sắp xếp theo nghiệm tối ưu Q*.
     /// </summary>
     public static List<IKSolution> SolveTcpPose(
@@ -171,7 +181,9 @@ public static class DobotCR10AKinematics
         float[] currentJointsRad = null,
         double dtoolMm = D_TOOL_DEFAULT,
         bool useAdaptiveTilt = false,
-        double maxTiltDeg = 32.0)
+        double maxTiltDeg = 32.0,
+        double toolOffsetX = 0.0,
+        double toolOffsetY = 0.0)
     {
         // 1. Chuyển đổi Target Pose từ Unity sang hệ DH Robotics:
         // P_dh = [-x_u, y_u, z_u], R_dh = Sx * R_u * Sx
@@ -209,39 +221,47 @@ public static class DobotCR10AKinematics
                     double z6z = -cosA;
                     RdhTilt[0, 2] = z6x; RdhTilt[1, 2] = z6y; RdhTilt[2, 2] = z6z;
 
-                    List<IKSolution> candidateSols = SolveInternal(PtargetDH, RdhTilt, currentJointsRad, dtoolMm);
+                    List<IKSolution> candidateSols = SolveInternal(PtargetDH, RdhTilt, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
                     if (candidateSols.Count > 0)
                         return candidateSols;
                 }
             }
         }
 
-        return SolveInternal(PtargetDH, Rdh, currentJointsRad, dtoolMm);
+        return SolveInternal(PtargetDH, Rdh, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
     }
 
     /// <summary>
     /// Lõi thuật toán giải tích 8 cấu hình nghiệm theo Báo cáo CR5
+    /// Phân tách tâm cổ tay chính xác với bù trừ offset công cụ 3D [toolOffsetX, toolOffsetY, dtoolMm].
     /// </summary>
-    private static List<IKSolution> SolveInternal(double[] PtargetDH, double[,] Rdh, float[] currentJointsRad, double dtoolMm)
+    private static List<IKSolution> SolveInternal(
+        double[] PtargetDH, 
+        double[,] Rdh, 
+        float[] currentJointsRad, 
+        double dtoolMm, 
+        double toolOffsetX = 0.0, 
+        double toolOffsetY = 0.0)
     {
         var solutions = new List<IKSolution>();
 
-        // Vector tiếp cận z6 (cột 3 của Rdh)
-        double z6x = Rdh[0, 2];
-        double z6y = Rdh[1, 2];
-        double z6z = Rdh[2, 2];
+        // Vector các trục của Link 6:
+        double x6x = Rdh[0, 0], x6y = Rdh[1, 0], x6z = Rdh[2, 0];
+        double y6x = Rdh[0, 1], y6y = Rdh[1, 1], y6z = Rdh[2, 1];
+        double z6x = Rdh[0, 2], z6y = Rdh[1, 2], z6z = Rdh[2, 2];
 
         // 3.1. Bước 1: Phân tách tâm cổ tay (Wrist Center Decoupling)
-        // P06 = Ptarget - dtool * z6
-        // P05 = Ptarget - (d6 + dtool) * z6
+        // P_TCP = P06 + offX * x6 + offY * y6 + offZ * z6
+        // P06 = P_TCP - (offX * x6 + offY * y6 + offZ * z6)
+        // P05 = P06 - D6 * z6 = P_TCP - (offX * x6 + offY * y6 + (D6 + offZ) * z6)
         double totalToolD = D6 + dtoolMm;
-        double X5 = PtargetDH[0] - totalToolD * z6x;
-        double Y5 = PtargetDH[1] - totalToolD * z6y;
-        double Z5 = PtargetDH[2] - totalToolD * z6z;
+        double X5 = PtargetDH[0] - (toolOffsetX * x6x + toolOffsetY * y6x + totalToolD * z6x);
+        double Y5 = PtargetDH[1] - (toolOffsetX * x6y + toolOffsetY * y6y + totalToolD * z6y);
+        double Z5 = PtargetDH[2] - (toolOffsetX * x6z + toolOffsetY * y6z + totalToolD * z6z);
 
-        double P06_x = PtargetDH[0] - dtoolMm * z6x;
-        double P06_y = PtargetDH[1] - dtoolMm * z6y;
-        double P06_z = PtargetDH[2] - dtoolMm * z6z;
+        double P06_x = PtargetDH[0] - (toolOffsetX * x6x + toolOffsetY * y6x + dtoolMm * z6x);
+        double P06_y = PtargetDH[1] - (toolOffsetX * x6y + toolOffsetY * y6y + dtoolMm * z6y);
+        double P06_z = PtargetDH[2] - (toolOffsetX * x6z + toolOffsetY * y6z + dtoolMm * z6z);
 
         double[,] T06 = new double[4, 4]
         {
@@ -357,9 +377,9 @@ public static class DobotCR10AKinematics
 
                     // Kiểm tra sai số FK đối chiếu thực nghiệm
                     double[,] Tcheck = ForwardFlangeDH(qSol);
-                    double checkTcpX = Tcheck[0, 3] + dtoolMm * Tcheck[0, 2];
-                    double checkTcpY = Tcheck[1, 3] + dtoolMm * Tcheck[1, 2];
-                    double checkTcpZ = Tcheck[2, 3] + dtoolMm * Tcheck[2, 2];
+                    double checkTcpX = Tcheck[0, 3] + toolOffsetX * Tcheck[0, 0] + toolOffsetY * Tcheck[0, 1] + dtoolMm * Tcheck[0, 2];
+                    double checkTcpY = Tcheck[1, 3] + toolOffsetX * Tcheck[1, 0] + toolOffsetY * Tcheck[1, 1] + dtoolMm * Tcheck[1, 2];
+                    double checkTcpZ = Tcheck[2, 3] + toolOffsetX * Tcheck[2, 0] + toolOffsetY * Tcheck[2, 1] + dtoolMm * Tcheck[2, 2];
 
                     double dx = PtargetDH[0] - checkTcpX;
                     double dy = PtargetDH[1] - checkTcpY;

@@ -1,4 +1,7 @@
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 /// <summary>
 /// Camera Controller chuyên dụng cho mô phỏng cánh tay robot Dobot CR10A.
@@ -25,28 +28,29 @@ public class RobotCameraController : MonoBehaviour
 
     [Header("Khoảng cách & Góc đặt (Orbit Settings)")]
     [Tooltip("Khoảng cách từ camera tới tâm")]
-    public float distance = 2.2f;
-    public float minDistance = 0.2f;
-    public float maxDistance = 6.0f;
+    public float distance = 2.0f;
+    public float minDistance = 0.35f;
+    public float maxDistance = 5.0f;
 
-    [Tooltip("Tốc độ xoay camera")]
-    public float rotateSpeed = 120.0f;
+    [Tooltip("Độ nhạy xoay camera (Độ/pixel)")]
+    public float rotateSpeed = 0.12f;
 
-    [Tooltip("Tốc độ phóng to thu nhỏ")]
-    public float zoomSpeed = 2.5f;
+    [Tooltip("Tốc độ phóng to thu nhỏ (% mỗi nấc cuộn)")]
+    public float zoomSpeed = 0.05f;
 
-    [Tooltip("Tốc độ trượt (Pan)")]
-    public float panSpeed = 0.35f;
+    [Tooltip("Độ nhạy trượt (Pan)")]
+    public float panSpeed = 0.0009f;
 
-    [Tooltip("Độ mượt mà chuyển động (Damping)")]
-    public float smoothTime = 0.08f;
+    [Tooltip("Hệ số làm mượt chống trôi quán tính (Càng cao càng dừng tức thì)")]
+    public float dampingSharpness = 28.0f;
 
     [Header("Giới hạn góc nghiêng")]
     public float minVerticalAngle = -10.0f;
     public float maxVerticalAngle = 88.0f;
 
-    [Header("Tùy chọn cuộn chuột")]
+    [Header("Tùy chọn di chuyển & cuộn chuột")]
     public bool invertScroll = false;
+    public bool invertPan = false;
 
     private float currentX = 45.0f;
     private float currentY = 25.0f;
@@ -62,8 +66,25 @@ public class RobotCameraController : MonoBehaviour
     private Camera cam;
     private bool isInitialized = false;
 
+    private void OnValidate()
+    {
+        SanitizeLegacyValues();
+    }
+
+    public void SanitizeLegacyValues()
+    {
+        // Khắc phục giá trị cũ bị Unity lưu cứng trong Inspector/Scene
+        if (panSpeed > 0.005f) panSpeed = 0.0009f;
+        if (rotateSpeed > 1.0f) rotateSpeed = 0.12f;
+        if (zoomSpeed > 0.2f) zoomSpeed = 0.05f;
+        if (minDistance < 0.1f) minDistance = 0.35f;
+        if (maxDistance > 8.0f) maxDistance = 5.0f;
+        if (dampingSharpness < 5.0f || dampingSharpness > 100f) dampingSharpness = 28.0f;
+    }
+
     private void Awake()
     {
+        SanitizeLegacyValues();
         InitializeIfNeeded();
     }
 
@@ -91,8 +112,11 @@ public class RobotCameraController : MonoBehaviour
         FindTargets();
 
         invertScroll = PlayerPrefs.GetInt("CR10A_Camera_InvertScroll", 0) == 1;
+        invertPan = PlayerPrefs.GetInt("CR10A_Camera_InvertPan", 0) == 1;
 
-        targetDistance = distance > 0.1f ? distance : 2.0f;
+        targetDistance = Mathf.Clamp(distance, minDistance, maxDistance);
+        if (targetDistance < minDistance || targetDistance > maxDistance || float.IsNaN(targetDistance)) targetDistance = 2.0f;
+        distance = targetDistance;
         currentPivotPosition = GetPivotPosition();
     }
 
@@ -119,9 +143,13 @@ public class RobotCameraController : MonoBehaviour
         }
     }
 
+    private void Update()
+    {
+        HandleKeyboardShortcuts();
+    }
+
     private void LateUpdate()
     {
-        HandleInput();
         UpdateCameraTransform();
     }
 
@@ -138,7 +166,6 @@ public class RobotCameraController : MonoBehaviour
         return targetPivotOffset;
     }
 
-    private bool isDraggingViewport = false;
     private bool isDraggingGui = false;
 
     public bool IsMouseOverUI(Vector2 mouseScreenPos)
@@ -151,9 +178,9 @@ public class RobotCameraController : MonoBehaviour
         var ikCtrl = FindAnyObjectByType<DobotCR10AIKController>(FindObjectsInactive.Exclude);
         if (ikCtrl != null && ikCtrl.enabled)
         {
-            totalRibbonH = ikCtrl.ribbonExpanded ? 114f : 38f;
-            anyDockOpen = ikCtrl.showJointsPanel || ikCtrl.showFkMonitorPanel || ikCtrl.showIkTargetPanel ||
-                          ikCtrl.showTrajectoryPanel || ikCtrl.showPipelinePanel || ikCtrl.showEvaluationPanel;
+            totalRibbonH = ikCtrl.ribbonExpanded ? 134f : 38f;
+            anyDockOpen = ikCtrl.showDockPanel;
+            dockW = 480f;
         }
         else
         {
@@ -173,26 +200,45 @@ public class RobotCameraController : MonoBehaviour
         if (anyDockOpen && mouseScreenPos.x >= (Screen.width - dockW - 16f)) return true;
 
         // 3. Thanh công cụ HUD nổi ở góc dưới bên trái
-        if (mouseScreenPos.x >= 10f && mouseScreenPos.x <= 540f && mouseScreenPos.y >= (Screen.height - 42f)) return true;
+        if (mouseScreenPos.x >= 10f && mouseScreenPos.x <= 630f && mouseScreenPos.y >= (Screen.height - 42f)) return true;
 
         return false;
     }
 
-    public void ZoomIn(float step = 0.20f)
+    public void ZoomIn(float step = 0.12f)
     {
         targetDistance = Mathf.Clamp(targetDistance - step * targetDistance, minDistance, maxDistance);
         UpdateCameraTransform();
     }
 
-    public void ZoomOut(float step = 0.20f)
+    public void ZoomOut(float step = 0.12f)
     {
         targetDistance = Mathf.Clamp(targetDistance + step * targetDistance, minDistance, maxDistance);
         UpdateCameraTransform();
     }
 
-    private void HandleInput()
+    private void HandleKeyboardShortcuts()
     {
-        // Phím tắt góc nhìn nhanh (1, 2, 3, 4, F, Space)
+#if ENABLE_INPUT_SYSTEM
+        Keyboard kb = Keyboard.current;
+        if (kb != null)
+        {
+            if (kb.digit1Key.wasPressedThisFrame || kb.numpad1Key.wasPressedThisFrame) SetPresetPerspective();
+            if (kb.digit2Key.wasPressedThisFrame || kb.numpad2Key.wasPressedThisFrame) SetPresetTopDown();
+            if (kb.digit3Key.wasPressedThisFrame || kb.numpad3Key.wasPressedThisFrame) SetPresetSide();
+            if (kb.digit4Key.wasPressedThisFrame || kb.numpad4Key.wasPressedThisFrame) SetPresetFront();
+            if (kb.fKey.wasPressedThisFrame) ResetFocus();
+            if (kb.spaceKey.wasPressedThisFrame) followTool = !followTool;
+
+            float dt = Application.isPlaying ? Time.deltaTime : 0.02f;
+            if (kb.equalsKey.isPressed || kb.numpadPlusKey.isPressed) ZoomIn(0.02f);
+            if (kb.minusKey.isPressed || kb.numpadMinusKey.isPressed) ZoomOut(0.02f);
+            if (kb.leftArrowKey.isPressed || kb.aKey.isPressed) targetX -= 60f * dt;
+            if (kb.rightArrowKey.isPressed || kb.dKey.isPressed) targetX += 60f * dt;
+            if (kb.upArrowKey.isPressed || kb.wKey.isPressed) targetY = Mathf.Clamp(targetY + 45f * dt, minVerticalAngle, maxVerticalAngle);
+            if (kb.downArrowKey.isPressed || kb.sKey.isPressed) targetY = Mathf.Clamp(targetY - 45f * dt, minVerticalAngle, maxVerticalAngle);
+        }
+#else
         if (Input.GetKeyDown(KeyCode.Alpha1)) SetPresetPerspective();
         if (Input.GetKeyDown(KeyCode.Alpha2)) SetPresetTopDown();
         if (Input.GetKeyDown(KeyCode.Alpha3)) SetPresetSide();
@@ -200,68 +246,21 @@ public class RobotCameraController : MonoBehaviour
         if (Input.GetKeyDown(KeyCode.F)) ResetFocus();
         if (Input.GetKeyDown(KeyCode.Space)) followTool = !followTool;
 
-        Vector2 mouseGuiPos = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-        bool mouseOverUI = IsMouseOverUI(mouseGuiPos);
-
-        if ((Input.GetMouseButtonDown(0) || Input.GetMouseButtonDown(1) || Input.GetMouseButtonDown(2)) && !mouseOverUI)
-        {
-            isDraggingViewport = true;
-        }
-        if (!Input.GetMouseButton(0) && !Input.GetMouseButton(1) && !Input.GetMouseButton(2))
-        {
-            isDraggingViewport = false;
-        }
-
         float dt = Application.isPlaying ? Time.deltaTime : 0.02f;
-
-        // 1. XOAY (ORBIT 360°): Chuột trái HOẶC Chuột phải kéo trong khu vực 3D
-        bool isOrbiting = isDraggingViewport && (Input.GetMouseButton(0) || Input.GetMouseButton(1)) && !Input.GetKey(KeyCode.LeftShift);
-        if (isOrbiting)
-        {
-            float deltaX = Input.GetAxis("Mouse X");
-            float deltaY = Input.GetAxis("Mouse Y");
-            targetX += deltaX * rotateSpeed * dt * 10f;
-            targetY -= deltaY * rotateSpeed * dt * 10f;
-            targetY = Mathf.Clamp(targetY, minVerticalAngle, maxVerticalAngle);
-        }
-
-        // 2. TRƯỢT (PAN): Chuột giữa kéo HOẶC Shift + Chuột trái / Shift + Chuột phải
-        bool isPanning = isDraggingViewport && (Input.GetMouseButton(2) || (Input.GetKey(KeyCode.LeftShift) && (Input.GetMouseButton(0) || Input.GetMouseButton(1))));
-        if (isPanning)
-        {
-            float panX = -Input.GetAxis("Mouse X") * panSpeed * (targetDistance * 0.4f);
-            float panY = -Input.GetAxis("Mouse Y") * panSpeed * (targetDistance * 0.4f);
-
-            Vector3 right = transform.right * panX;
-            Vector3 up = transform.up * panY;
-
-            targetPivotOffset += right + up;
-        }
-
-        // 3. THU / PHÓNG (ZOOM): Con lăn chuột khi con trỏ ở trong khu vực 3D
-        if (!mouseOverUI)
-        {
-            float scroll = Input.GetAxis("Mouse ScrollWheel");
-            if (invertScroll) scroll = -scroll;
-            if (Mathf.Abs(scroll) > 0.0001f)
-            {
-                targetDistance -= scroll * zoomSpeed * targetDistance;
-                targetDistance = Mathf.Clamp(targetDistance, minDistance, maxDistance);
-            }
-        }
-
-        // 4. Phím tắt tương tác trực tiếp
-        if (Input.GetKey(KeyCode.Equals) || Input.GetKey(KeyCode.KeypadPlus)) ZoomIn(0.04f);
-        if (Input.GetKey(KeyCode.Minus) || Input.GetKey(KeyCode.KeypadMinus)) ZoomOut(0.04f);
-        if (Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.A)) targetX -= rotateSpeed * dt * 0.8f;
-        if (Input.GetKey(KeyCode.RightArrow) || Input.GetKey(KeyCode.D)) targetX += rotateSpeed * dt * 0.8f;
-        if (Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.W)) targetY = Mathf.Clamp(targetY + rotateSpeed * dt * 0.5f, minVerticalAngle, maxVerticalAngle);
-        if (Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.S)) targetY = Mathf.Clamp(targetY - rotateSpeed * dt * 0.5f, minVerticalAngle, maxVerticalAngle);
+        if (Input.GetKey(KeyCode.Equals) || Input.GetKey(KeyCode.KeypadPlus)) ZoomIn(0.02f);
+        if (Input.GetKey(KeyCode.Minus) || Input.GetKey(KeyCode.KeypadMinus)) ZoomOut(0.02f);
+        if (Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.A)) targetX -= 60f * dt;
+        if (Input.GetKey(KeyCode.RightArrow) || Input.GetKey(KeyCode.D)) targetX += 60f * dt;
+        if (Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.W)) targetY = Mathf.Clamp(targetY + 45f * dt, minVerticalAngle, maxVerticalAngle);
+        if (Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.S)) targetY = Mathf.Clamp(targetY - 45f * dt, minVerticalAngle, maxVerticalAngle);
+#endif
     }
 
     public void UpdateCameraTransform()
     {
-        float factor = smoothTime > 0.001f ? Mathf.Clamp01(Time.deltaTime / smoothTime) : 1.0f;
+        float dt = Application.isPlaying ? Time.deltaTime : 0.02f;
+        // Damping hàm mũ sắc nét: phản hồi cực nhạy theo tay, dừng tức thì không trôi trượt quán tính
+        float factor = 1f - Mathf.Exp(-dampingSharpness * dt);
 
         // Làm mượt góc quay và khoảng cách
         currentX = Mathf.Lerp(currentX, targetX, factor);
@@ -387,6 +386,7 @@ public class RobotCameraController : MonoBehaviour
     /// <summary>
     /// Đưa tâm quan sát về lại tâm robot
     /// </summary>
+    [ContextMenu("Reset Focus Camera (F)")]
     public void ResetFocus(bool instant = true)
     {
         InitializeIfNeeded();
@@ -416,53 +416,62 @@ public class RobotCameraController : MonoBehaviour
         AntigravityUITheme.EnsureInitialized();
         Event e = Event.current;
 
-        // Xử lý sự kiện chuột trực tiếp trong OnGUI để phản hồi tức thì
+        // Xử lý toàn bộ tương tác chuột 3D (Xoay Orbit, Trượt Pan, Thu phóng Zoom) trực tiếp qua Event OnGUI
         if (e != null)
         {
-            if (e.type == EventType.MouseDown && !IsMouseOverUI(e.mousePosition))
+            if (e.type == EventType.MouseDown)
             {
-                isDraggingGui = true;
-                e.Use();
+                if (!IsMouseOverUI(e.mousePosition) && (e.button == 0 || e.button == 1 || e.button == 2))
+                {
+                    isDraggingGui = true;
+                    e.Use();
+                }
             }
-            else if (e.type == EventType.MouseUp)
+            else if (e.type == EventType.MouseUp || e.rawType == EventType.MouseUp)
             {
                 isDraggingGui = false;
             }
             else if (e.type == EventType.MouseDrag && isDraggingGui)
             {
-                if (e.button == 0 || e.button == 1)
+                float currentPanSpeed = Mathf.Clamp(panSpeed, 0.0002f, 0.0012f);
+                float currentRotateSpeed = Mathf.Clamp(rotateSpeed, 0.04f, 0.20f);
+
+                if (e.button == 0 || e.button == 1) // Chuột trái hoặc phải: Xoay Orbit (hoặc Shift để Pan)
                 {
                     if (e.shift)
                     {
-                        // Pan
-                        float panFactor = targetDistance * 0.0022f;
-                        targetPivotOffset += (-transform.right * e.delta.x + transform.up * e.delta.y) * panFactor;
+                        // Pan trượt
+                        float panSign = invertPan ? -1f : 1f;
+                        float panScale = targetDistance * currentPanSpeed * panSign;
+                        targetPivotOffset += (-transform.right * e.delta.x + transform.up * e.delta.y) * panScale;
                     }
                     else
                     {
-                        // Orbit xoay 360 độ
-                        targetX += e.delta.x * 0.50f;
-                        targetY -= e.delta.y * 0.50f;
+                        // Orbit xoay 360 độ: đầm tay, mượt mà, không giật
+                        targetX += e.delta.x * currentRotateSpeed;
+                        targetY -= e.delta.y * currentRotateSpeed;
                         targetY = Mathf.Clamp(targetY, minVerticalAngle, maxVerticalAngle);
                     }
-                    UpdateCameraTransform();
                     e.Use();
                 }
-                else if (e.button == 2)
+                else if (e.button == 2) // Chuột giữa: Pan trượt
                 {
-                    // Pan bằng chuột giữa
-                    float panFactor = targetDistance * 0.0022f;
-                    targetPivotOffset += (-transform.right * e.delta.x + transform.up * e.delta.y) * panFactor;
-                    UpdateCameraTransform();
+                    float panSign = invertPan ? -1f : 1f;
+                    float panScale = targetDistance * currentPanSpeed * panSign;
+                    targetPivotOffset += (-transform.right * e.delta.x + transform.up * e.delta.y) * panScale;
                     e.Use();
                 }
             }
             else if (e.type == EventType.ScrollWheel && !IsMouseOverUI(e.mousePosition))
             {
-                float scroll = e.delta.y * (invertScroll ? -1f : 1f);
-                targetDistance += scroll * 0.08f * targetDistance;
+                // Thu phóng (Zoom): 1 nấc cuộn thay đổi nhẹ nhàng 5% khoảng cách (tối thiểu 0.04m)
+                float currentZoomSpeed = Mathf.Clamp(zoomSpeed, 0.02f, 0.08f);
+                float notch = Mathf.Clamp(e.delta.y, -3f, 3f);
+                float scrollDir = Mathf.Sign(notch) * (invertScroll ? -1f : 1f);
+                float step = Mathf.Max(0.04f, targetDistance * currentZoomSpeed);
+
+                targetDistance += scrollDir * step;
                 targetDistance = Mathf.Clamp(targetDistance, minDistance, maxDistance);
-                UpdateCameraTransform();
                 e.Use();
             }
         }
@@ -473,7 +482,7 @@ public class RobotCameraController : MonoBehaviour
 
     private void DrawFloatingViewportToolbar()
     {
-        float hudW = 540f;
+        float hudW = 635f;
         float hudH = 34f;
         float hudX = 14f;
         float hudY = Screen.height - hudH - 8f;
@@ -494,6 +503,15 @@ public class RobotCameraController : MonoBehaviour
         if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Width(58), GUILayout.Height(24))) SetPresetTopDown();
         if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Width(62), GUILayout.Height(24))) SetPresetFront();
         if (GUILayout.Button("Reset Focus", AntigravityUITheme.StyleButton, GUILayout.Width(76), GUILayout.Height(24))) ResetFocus();
+
+        // Tùy chọn bật/tắt trượt Pan ngược chuột
+        GUIStyle invertPanBtnStyle = invertPan ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button(invertPan ? "Pan: Ngược" : "Pan: Chuẩn", invertPanBtnStyle, GUILayout.Width(76), GUILayout.Height(24)))
+        {
+            invertPan = !invertPan;
+            PlayerPrefs.SetInt("CR10A_Camera_InvertPan", invertPan ? 1 : 0);
+            PlayerPrefs.Save();
+        }
 
         // Tùy chọn bật/tắt cuộn ngược chuột và lưu setting
         GUIStyle invertBtnStyle = invertScroll ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;

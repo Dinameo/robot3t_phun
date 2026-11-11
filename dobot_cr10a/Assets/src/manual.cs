@@ -44,8 +44,18 @@ public class manual : MonoBehaviour
     public bool invertDirection = true;
 
     [Header("5. Cấu hình công cụ TCP")]
+    [Tooltip("Chiều dài công cụ TCP dọc trục Z mặt bích (mm)")]
     public float toolLengthMm = 100.0f;
+    [Tooltip("Độ lệch tâm công cụ TCP theo trục X mặt bích (mm)")]
+    public float toolOffsetX = 0.0f;
+    [Tooltip("Độ lệch tâm công cụ TCP theo trục Y mặt bích (mm)")]
+    public float toolOffsetY = 0.0f;
     public bool useAdaptiveTilt = false;
+
+    // Chuỗi nhập liệu cho giao diện điều chỉnh Offset TCP
+    public string toolOffsetZText = "100.0";
+    public string toolOffsetXText = "0.0";
+    public string toolOffsetYText = "0.0";
 
     // Các biến nội bộ cho Giao diện OnGUI
     public readonly float[] targetPose = new float[6]; // X, Y, Z (mm), Roll, Pitch, Yaw (deg)
@@ -68,6 +78,8 @@ public class manual : MonoBehaviour
     public int ribbonTab = 0; // 0: Trang chủ, 1: Động học, 2: Xem (View)
     public bool ribbonExpanded = true;
     private DobotCR10AIKController ikController;
+    private bool isHomingStandalone = false;
+    private readonly float[] standaloneVelocities = new float[6];
 
     private void Awake()
     {
@@ -94,6 +106,11 @@ public class manual : MonoBehaviour
         PlayerPrefs.SetInt("Manual_RibbonExpanded", ribbonExpanded ? 1 : 0);
         PlayerPrefs.SetInt("Manual_RibbonTab", ribbonTab);
         PlayerPrefs.SetInt("Manual_AdaptiveTilt", useAdaptiveTilt ? 1 : 0);
+
+        PlayerPrefs.SetFloat("CR10A_ToolOffsetZ", toolLengthMm);
+        PlayerPrefs.SetFloat("CR10A_ToolOffsetX", toolOffsetX);
+        PlayerPrefs.SetFloat("CR10A_ToolOffsetY", toolOffsetY);
+
         PlayerPrefs.Save();
     }
 
@@ -108,6 +125,66 @@ public class manual : MonoBehaviour
             ribbonTab = PlayerPrefs.GetInt("Manual_RibbonTab", 0);
             useAdaptiveTilt = PlayerPrefs.GetInt("Manual_AdaptiveTilt", 0) == 1;
         }
+
+        if (PlayerPrefs.HasKey("CR10A_ToolOffsetZ"))
+        {
+            toolLengthMm = PlayerPrefs.GetFloat("CR10A_ToolOffsetZ", toolLengthMm);
+            toolOffsetX = PlayerPrefs.GetFloat("CR10A_ToolOffsetX", toolOffsetX);
+            toolOffsetY = PlayerPrefs.GetFloat("CR10A_ToolOffsetY", toolOffsetY);
+        }
+
+        toolOffsetZText = toolLengthMm.ToString("F1", CultureInfo.InvariantCulture);
+        toolOffsetXText = toolOffsetX.ToString("F1", CultureInfo.InvariantCulture);
+        toolOffsetYText = toolOffsetY.ToString("F1", CultureInfo.InvariantCulture);
+
+        ApplyToolOffsetToTransforms();
+    }
+
+    public void SetToolOffset(float z_mm, float x_mm = 0f, float y_mm = 0f)
+    {
+        toolLengthMm = Mathf.Max(0f, z_mm);
+        toolOffsetX = x_mm;
+        toolOffsetY = y_mm;
+        toolOffsetZText = toolLengthMm.ToString("F1", CultureInfo.InvariantCulture);
+        toolOffsetXText = toolOffsetX.ToString("F1", CultureInfo.InvariantCulture);
+        toolOffsetYText = toolOffsetY.ToString("F1", CultureInfo.InvariantCulture);
+
+        ApplyToolOffsetToTransforms();
+
+        // Đồng bộ sang DobotCR10AIKController nếu có
+        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>() ?? FindAnyObjectByType<DobotCR10AIKController>();
+        if (ikController != null && ikController.enabled)
+        {
+            if (Mathf.Abs(ikController.toolLength - toolLengthMm) > 0.01f || Mathf.Abs(ikController.toolOffsetX - toolOffsetX) > 0.01f || Mathf.Abs(ikController.toolOffsetY - toolOffsetY) > 0.01f)
+            {
+                ikController.SetToolOffset(toolLengthMm, toolOffsetX, toolOffsetY);
+            }
+        }
+        else if (targetInitialized)
+        {
+            // Chỉ giải lại nghiệm IK mục tiêu thủ công nếu không có IK Controller đang điều khiển quỹ đạo
+            SolveAndApplyIk();
+        }
+
+        SaveSettings();
+    }
+
+    public void ApplyToolOffsetToTransforms()
+    {
+        ResolveKinematicsReferences();
+        if (tcpTransform != null)
+        {
+            tcpTransform.localPosition = new Vector3(toolOffsetX * 0.001f, toolOffsetY * 0.001f, toolLengthMm * 0.001f);
+        }
+    }
+
+    private void OnEnable()
+    {
+        EnsureOffsetsInitialized();
+        if (!Application.isPlaying)
+        {
+            ResetAllSlidersImmediate();
+        }
     }
 
     private void Start()
@@ -118,6 +195,10 @@ public class manual : MonoBehaviour
 
     private void Update()
     {
+        if (isHomingStandalone && Application.isPlaying)
+        {
+            UpdateStandaloneHoming(Time.deltaTime);
+        }
         ApplyRotations();
     }
 
@@ -243,9 +324,86 @@ public class manual : MonoBehaviour
         }
     }
 
+    private void UpdateStandaloneHoming(float deltaTime)
+    {
+        float speedLimitRad = 30f * Mathf.Deg2Rad;
+        float accLimitRad = 30f * Mathf.Deg2Rad;
+        float frameTime = Mathf.Max(0f, deltaTime);
+        float[] current = { axis0, axis1, axis2, axis3, axis4, axis5 };
+        bool arrived = true;
+
+        for (int i = 0; i < 6; i++)
+        {
+            float deltaRad = 0f - current[i];
+            float deltaDeg = deltaRad * Mathf.Rad2Deg;
+
+            if (Mathf.Abs(deltaDeg) <= 0.05f)
+            {
+                current[i] = 0f;
+                standaloneVelocities[i] = 0f;
+                continue;
+            }
+
+            arrived = false;
+            float stoppingSpeed = Mathf.Sqrt(2f * accLimitRad * Mathf.Abs(deltaRad));
+            float desiredSpeed = Mathf.Sign(deltaRad) * Mathf.Min(speedLimitRad, stoppingSpeed);
+            standaloneVelocities[i] = Mathf.MoveTowards(standaloneVelocities[i], desiredSpeed, accLimitRad * frameTime);
+            float stepRad = standaloneVelocities[i] * frameTime;
+
+            if (Mathf.Sign(stepRad) == Mathf.Sign(deltaRad) && Mathf.Abs(stepRad) >= Mathf.Abs(deltaRad))
+            {
+                current[i] = 0f;
+                standaloneVelocities[i] = 0f;
+            }
+            else
+            {
+                current[i] += stepRad;
+            }
+        }
+
+        axis0 = current[0];
+        axis1 = current[1];
+        axis2 = current[2];
+        axis3 = current[3];
+        axis4 = current[4];
+        axis5 = current[5];
+
+        if (arrived)
+        {
+            isHomingStandalone = false;
+            ikStatus = "Đã đưa toàn bộ 6 khớp về cấu hình Home (0°).";
+            InitializeTargetFromCurrentPose();
+        }
+    }
+
     [ContextMenu("Reset All Sliders To 0")]
     public void ResetAllSlidersToZero()
     {
+        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>() ?? FindAnyObjectByType<DobotCR10AIKController>();
+        if (ikController != null && ikController.enabled && Application.isPlaying)
+        {
+            isHomingStandalone = false;
+            ikController.MoveToHomeGradually();
+            return;
+        }
+
+        if (Application.isPlaying)
+        {
+            isHomingStandalone = true;
+            ikStatus = "Đang quay về vị trí Home (0°)...";
+            return;
+        }
+
+        ResetAllSlidersImmediate();
+    }
+
+    [ContextMenu("Reset All Sliders Immediately")]
+    [ContextMenu("Đưa toàn bộ 6 khớp về Home (0°)")]
+    public void ResetAllSlidersImmediate()
+    {
+        isHomingStandalone = false;
+        for (int i = 0; i < 6; i++) standaloneVelocities[i] = 0f;
+
         axis0 = 0f;
         axis1 = 0f;
         axis2 = 0f;
@@ -254,7 +412,35 @@ public class manual : MonoBehaviour
         axis5 = 0f;
         ApplyRotations();
         ikStatus = "Đã đưa toàn bộ 6 khớp về cấu hình Home (0°).";
+#if UNITY_EDITOR
+        UnityEditor.EditorUtility.SetDirty(this);
+        if (axisTransforms != null)
+        {
+            foreach (Transform t in axisTransforms)
+            {
+                if (t != null) UnityEditor.EditorUtility.SetDirty(t);
+            }
+        }
+#endif
     }
+
+#if UNITY_EDITOR
+    [UnityEditor.MenuItem("CR10A/Đưa toàn bộ 6 khớp về Home (0°) &#h")]
+    public static void MenuResetAllAxesToHome()
+    {
+        manual m = FindAnyObjectByType<manual>();
+        if (m != null)
+        {
+            m.ResetAllSlidersImmediate();
+            Debug.Log("[CR10A] Đã đưa toàn bộ 6 khớp axis0 - axis5 về Home (0°).");
+        }
+        DobotCR10AIKController ctrl = FindAnyObjectByType<DobotCR10AIKController>();
+        if (ctrl != null)
+        {
+            ctrl.ResetToHomeImmediate();
+        }
+    }
+#endif
 
     // =========================================================================
     // CÁC HÀM VẼ TỪNG BẢNG CHI TIẾT (PANEL CARDS) ĐỘC LẬP
@@ -387,6 +573,9 @@ public class manual : MonoBehaviour
         if (GUILayout.Button("Home", AntigravityUITheme.StyleButton, GUILayout.Height(24))) ResetAllSlidersToZero();
         GUILayout.EndHorizontal();
 
+        // KHU VỰC ĐIỀU CHỈNH KÍCH THƯỚC OFFSET (MẶT BÍCH -> TCP)
+        DrawToolOffsetUiSection();
+
         GUILayout.Label(ikStatus, AntigravityUITheme.StyleLabelCyan);
 
         // Danh sách 8 nghiệm giải tích
@@ -410,6 +599,95 @@ public class manual : MonoBehaviour
             GUILayout.EndScrollView();
         }
 
+        GUILayout.EndVertical();
+    }
+
+    public void DrawToolOffsetUiSection()
+    {
+        GUILayout.Space(6f);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("KÍCH THƯỚC OFFSET (MẶT BÍCH ➔ TCP):", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.FlexibleSpace();
+        float tcpNorm = Mathf.Sqrt(toolOffsetX * toolOffsetX + toolOffsetY * toolOffsetY + toolLengthMm * toolLengthMm);
+        GUILayout.Label($"Độ dài TCP: {tcpNorm:F1} mm", AntigravityUITheme.StyleLabelCyan);
+        GUILayout.EndHorizontal();
+
+        // 1. Dọc trục Z (Chiều dài công cụ chính từ bích đến TCP)
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Offset Z", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(52));
+        string inZ = GUILayout.TextField(toolOffsetZText, AntigravityUITheme.StyleTextField, GUILayout.Width(54));
+        if (inZ != toolOffsetZText)
+        {
+            toolOffsetZText = inZ;
+            if (float.TryParse(inZ, NumberStyles.Float, CultureInfo.InvariantCulture, out float pZ))
+            {
+                SetToolOffset(pZ, toolOffsetX, toolOffsetY);
+            }
+        }
+        GUILayout.Label("mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(22));
+
+        if (GUILayout.Button("-10", AntigravityUITheme.StyleButton, GUILayout.Width(32), GUILayout.Height(20))) SetToolOffset(toolLengthMm - 10f, toolOffsetX, toolOffsetY);
+        if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) SetToolOffset(toolLengthMm - 1f, toolOffsetX, toolOffsetY);
+
+        float newZ = GUILayout.HorizontalSlider(toolLengthMm, 0f, 300f);
+        if (Mathf.Abs(newZ - toolLengthMm) > 0.05f)
+        {
+            SetToolOffset(Mathf.Round(newZ * 10f) / 10f, toolOffsetX, toolOffsetY);
+        }
+
+        if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 1f, toolOffsetX, toolOffsetY);
+        if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(32), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 10f, toolOffsetX, toolOffsetY);
+        GUILayout.EndHorizontal();
+
+        // 2. Lệch tâm X và Y
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Lệch X", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(46));
+        string inX = GUILayout.TextField(toolOffsetXText, AntigravityUITheme.StyleTextField, GUILayout.Width(44));
+        if (inX != toolOffsetXText)
+        {
+            toolOffsetXText = inX;
+            if (float.TryParse(inX, NumberStyles.Float, CultureInfo.InvariantCulture, out float pX))
+            {
+                SetToolOffset(toolLengthMm, pX, toolOffsetY);
+            }
+        }
+        float newX = GUILayout.HorizontalSlider(toolOffsetX, -100f, 100f, GUILayout.Width(55));
+        if (Mathf.Abs(newX - toolOffsetX) > 0.1f) SetToolOffset(toolLengthMm, Mathf.Round(newX * 10f) / 10f, toolOffsetY);
+
+        GUILayout.Space(6f);
+        GUILayout.Label("Lệch Y", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(46));
+        string inY = GUILayout.TextField(toolOffsetYText, AntigravityUITheme.StyleTextField, GUILayout.Width(44));
+        if (inY != toolOffsetYText)
+        {
+            toolOffsetYText = inY;
+            if (float.TryParse(inY, NumberStyles.Float, CultureInfo.InvariantCulture, out float pY))
+            {
+                SetToolOffset(toolLengthMm, toolOffsetX, pY);
+            }
+        }
+        float newY = GUILayout.HorizontalSlider(toolOffsetY, -100f, 100f, GUILayout.Width(55));
+        if (Mathf.Abs(newY - toolOffsetY) > 0.1f) SetToolOffset(toolLengthMm, toolOffsetX, Mathf.Round(newY * 10f) / 10f);
+        GUILayout.EndHorizontal();
+
+        // 3. Mẫu sẵn (Presets)
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Mẫu sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(52));
+        GUIStyle b0 = Mathf.Abs(toolLengthMm) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        GUIStyle b50 = Mathf.Abs(toolLengthMm - 50f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        GUIStyle b100 = Mathf.Abs(toolLengthMm - 100f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        GUIStyle b150 = Mathf.Abs(toolLengthMm - 150f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        GUIStyle b200 = Mathf.Abs(toolLengthMm - 200f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+
+        if (GUILayout.Button("0 (Bích)", b0, GUILayout.Height(20))) SetToolOffset(0f, 0f, 0f);
+        if (GUILayout.Button("50 (Bút)", b50, GUILayout.Height(20))) SetToolOffset(50f, 0f, 0f);
+        if (GUILayout.Button("100 (Súng)", b100, GUILayout.Height(20))) SetToolOffset(100f, 0f, 0f);
+        if (GUILayout.Button("150 (Kẹp)", b150, GUILayout.Height(20))) SetToolOffset(150f, 0f, 0f);
+        if (GUILayout.Button("200mm", b200, GUILayout.Height(20))) SetToolOffset(200f, 0f, 0f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label("✓ Tự động tính lại Động học Thuận/Nghịch & Cập nhật 3D", AntigravityUITheme.StyleLabelGreen);
         GUILayout.EndVertical();
     }
 
@@ -443,8 +721,8 @@ public class manual : MonoBehaviour
         if (!targetInitialized) InitializeTargetFromCurrentPose();
         ResolveKinematicsReferences();
 
-        // Nhường quyền cho DobotCR10AIKController nếu có trên cùng GameObject
-        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>();
+        // Nhường toàn bộ quyền điều khiển giao diện cho DobotCR10AIKController
+        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>() ?? FindAnyObjectByType<DobotCR10AIKController>();
         if (ikController != null && ikController.enabled)
             return;
 
@@ -506,6 +784,35 @@ public class manual : MonoBehaviour
                 if (GUILayout.Button("Giải IK", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(36))) SolveAndApplyIk();
                 GUILayout.EndHorizontal();
                 GUILayout.Label("THAO TÁC CƠ BẢN", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.EndVertical();
+
+                // Nhóm: KÍCH THƯỚC OFFSET MẶT BÍCH -> TCP
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(350));
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"Offset TCP: Z={toolLengthMm:F1}mm (X={toolOffsetX:F1}, Y={toolOffsetY:F1})", AntigravityUITheme.StyleLabelCyan);
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUIStyle b0 = Mathf.Abs(toolLengthMm) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                GUIStyle b50 = Mathf.Abs(toolLengthMm - 50f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                GUIStyle b100 = Mathf.Abs(toolLengthMm - 100f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                GUIStyle b150 = Mathf.Abs(toolLengthMm - 150f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                GUIStyle b200 = Mathf.Abs(toolLengthMm - 200f) < 0.1f && Mathf.Abs(toolOffsetX) < 0.1f && Mathf.Abs(toolOffsetY) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+
+                if (GUILayout.Button("0 (Bích)", b0, GUILayout.Height(20))) SetToolOffset(0f, 0f, 0f);
+                if (GUILayout.Button("50 (Bút)", b50, GUILayout.Height(20))) SetToolOffset(50f, 0f, 0f);
+                if (GUILayout.Button("100 (Súng)", b100, GUILayout.Height(20))) SetToolOffset(100f, 0f, 0f);
+                if (GUILayout.Button("150 (Kẹp)", b150, GUILayout.Height(20))) SetToolOffset(150f, 0f, 0f);
+                if (GUILayout.Button("200mm", b200, GUILayout.Height(20))) SetToolOffset(200f, 0f, 0f);
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("-10", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(20))) SetToolOffset(toolLengthMm - 10f, toolOffsetX, toolOffsetY);
+                if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(20))) SetToolOffset(toolLengthMm - 1f, toolOffsetX, toolOffsetY);
+                float rZ = GUILayout.HorizontalSlider(toolLengthMm, 0f, 300f);
+                if (Mathf.Abs(rZ - toolLengthMm) > 0.05f) SetToolOffset(Mathf.Round(rZ * 10f) / 10f, toolOffsetX, toolOffsetY);
+                if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 1f, toolOffsetX, toolOffsetY);
+                if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 10f, toolOffsetX, toolOffsetY);
+                GUILayout.EndHorizontal();
+                GUILayout.Label("KÍCH THƯỚC OFFSET (MẶT BÍCH ➔ TCP)", AntigravityUITheme.StyleSectionLabel);
                 GUILayout.EndVertical();
 
                 // Nhóm: CAMERA
@@ -632,10 +939,29 @@ public class manual : MonoBehaviour
         ikStatus = "Đã sao chép Pose FK hiện tại vào mục tiêu.";
     }
 
+    /// <summary>
+    /// Đồng bộ vị trí và góc hướng từ waypoint quỹ đạo sang bảng điều khiển mục tiêu IK
+    /// </summary>
+    public void SyncTargetPoseFromWaypoint(Vector3 posMm, float roll, float pitch, float yaw)
+    {
+        targetPose[0] = posMm.x;
+        targetPose[1] = posMm.y;
+        targetPose[2] = posMm.z;
+        targetPose[3] = roll;
+        targetPose[4] = pitch;
+        targetPose[5] = yaw;
+
+        for (int i = 0; i < 6; i++)
+        {
+            targetText[i] = targetPose[i].ToString("F1", CultureInfo.InvariantCulture);
+        }
+        targetInitialized = true;
+    }
+
     public void GetForwardPoseValues(out Vector3 posMm, out Vector3 rpyDeg)
     {
         float[] q = GetJointVector();
-        Matrix4x4 T = DobotCR10AKinematics.ForwardTcp(q, tcpTransform, toolLengthMm);
+        Matrix4x4 T = DobotCR10AKinematics.ForwardTcp(q, tcpTransform, toolLengthMm, toolOffsetX, toolOffsetY);
         posMm = new Vector3(T[0, 3] * 1000f, T[1, 3] * 1000f, T[2, 3] * 1000f);
         rpyDeg = DobotCR10AKinematics.UnityRotationToRpy(T.rotation);
     }
@@ -668,7 +994,9 @@ public class manual : MonoBehaviour
             targetRot,
             currentQ,
             toolLengthMm,
-            useAdaptiveTilt
+            useAdaptiveTilt,
+            toolOffsetX: toolOffsetX,
+            toolOffsetY: toolOffsetY
         );
         sw.Stop();
 
