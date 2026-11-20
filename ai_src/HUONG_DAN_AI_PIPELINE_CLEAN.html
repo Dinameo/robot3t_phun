@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>HƯỚNG DẪN CHI TIẾT AI PIPELINE - DOBOT CR10A</title>
+<style>
+  @page {
+    size: A4 portrait;
+    margin: 18mm 16mm 20mm 16mm;
+    @bottom-center {
+      content: counter(page);
+      font-size: 9pt;
+      color: #64748b;
+    }
+  }
+
+  body {
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 10pt;
+    line-height: 1.6;
+    color: #1e293b;
+    background-color: #ffffff;
+    margin: 0;
+    padding: 0;
+  }
+
+  h1 {
+    font-size: 16pt;
+    font-weight: 800;
+    color: #0f172a;
+    border-bottom: 2.5px solid #0284c7;
+    padding-bottom: 6px;
+    margin-top: 0;
+    margin-bottom: 12px;
+    page-break-after: avoid;
+  }
+
+  h2 {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #0369a1;
+    border-bottom: 1.5px solid #cbd5e1;
+    padding-bottom: 4px;
+    margin-top: 22px;
+    margin-bottom: 8px;
+    page-break-after: avoid;
+  }
+
+  h3 {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #0f172a;
+    margin-top: 16px;
+    margin-bottom: 6px;
+    page-break-after: avoid;
+  }
+
+  h4 {
+    font-size: 10pt;
+    font-weight: 600;
+    color: #334155;
+    margin-top: 12px;
+    margin-bottom: 4px;
+    page-break-after: avoid;
+  }
+
+  p, li {
+    text-align: justify;
+    margin-bottom: 6px;
+  }
+
+  ul, ol {
+    padding-left: 22px;
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+
+  blockquote {
+    border-left: 4px solid #0284c7;
+    background: #f0f9ff;
+    color: #0369a1;
+    padding: 8px 12px;
+    margin: 10px 0;
+    border-radius: 0 4px 4px 0;
+    page-break-inside: avoid;
+  }
+
+  blockquote p {
+    margin: 0;
+  }
+
+  /* Bảng biểu */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 9pt;
+    page-break-inside: avoid;
+  }
+
+  th, td {
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: middle;
+  }
+
+  th {
+    background-color: #f1f5f9;
+    color: #0f172a;
+    font-weight: 700;
+  }
+
+  tr:nth-child(even) {
+    background-color: #f8fafc;
+  }
+
+  /* Khối code & Sơ đồ ASCII */
+  pre {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 8pt;
+    line-height: 1.35;
+    overflow-x: auto;
+    margin: 10px 0;
+    page-break-inside: avoid;
+  }
+
+  code {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 8.5pt;
+    background-color: #f1f5f9;
+    color: #be185d;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  pre code {
+    background-color: transparent;
+    color: inherit;
+    padding: 0;
+  }
+
+  /* Khối công thức toán học trưng bày */
+  .math-block {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-left: 4px solid #0369a1;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 11pt;
+    font-family: "Cambria Math", "Times New Roman", serif;
+    text-align: center;
+    border-radius: 4px;
+    page-break-inside: avoid;
+  }
+
+  sub, sup {
+    font-size: 75%;
+    line-height: 0;
+    position: relative;
+    vertical-align: baseline;
+  }
+
+  sup {
+    top: -0.5em;
+  }
+
+  sub {
+    bottom: -0.25em;
+  }
+
+  hr {
+    border: none;
+    border-top: 1px solid #e2e8f0;
+    margin: 16px 0;
+  }
+
+  .footer {
+    margin-top: 25px;
+    font-size: 8pt;
+    color: #94a3b8;
+    text-align: center;
+    border-top: 1px dashed #cbd5e1;
+    padding-top: 6px;
+  }
+</style>
+</head>
+<body>
+<h1>HƯỚNG DẪN CHI TIẾT TOÀN DIỆN PIPELINE AI THỊ GIÁC &amp; TỰ ĐỘNG SINH QUỸ ĐẠO PHUN (DOBOT CR10A)</h1>
+<blockquote>
+<p><strong>Tài liệu tham chiếu chuẩn theo góp ý Báo cáo lần 1</strong> (<code>Gop-y-Bao-cao-lan-1-Tu-dong-sinh-chuong-trinh-phun.pdf</code>)<br />
+<strong>Dự án</strong>: Trạm Robot Dobot CR10A tự động hóa phun sơn / hiệu ứng mài bạc trên sản phẩm may mặc (Denim).<br />
+<strong>Phần cứng</strong>: Robot 6 bậc tự do Dobot CR10A, Camera 3D Zivid 2 M70 (Eye-to-Hand / Fixed Rig), Súng phun / bút vẽ TCP.<br />
+<strong>Dữ liệu đầu vào</strong>: Ảnh màu 2D RGB (<code>dataset/_2D/image_*.png</code>) và Đám mây điểm 3D có tổ chức (<code>dataset/_3D/pcl_*.ply</code>, kích thước 1200 × 1944).</p>
+</blockquote>
+<hr />
+<h2>MỤC LỤC</h2>
+<ol>
+<li><a href="#1-bản-chất-bài-toán--nguyên-tắc-cốt-lõi">Bản chất bài toán &amp; Nguyên tắc cốt lõi</a></li>
+<li><a href="#2-hệ-chỉ-tiêu-kỹ-thuật-đánh-giá-bộ-8-chỉ-tiêu-cốt-lõi">Hệ chỉ tiêu kỹ thuật đánh giá (Bộ 8 chỉ tiêu cốt lõi)</a></li>
+<li><a href="#3-chuỗi-hiệu-chuẩn-hệ-thống-calibration-chain">Chuỗi hiệu chuẩn hệ thống (Calibration Chain)</a></li>
+<li><a href="#4-lộ-trình-7-bước-phát-triển-ai-pipeline">Lộ trình 7 bước phát triển AI Pipeline</a><br />
+   - <a href="#bước-1-tiền-xử-lý--tự-sinh-nhãn-từ-3d-auto-labeling">Bước 1: Tiền xử lý &amp; Tự sinh nhãn từ 3D (Auto-labeling)</a><br />
+   - <a href="#41-chuẩn-hóa-bộ-12-mốc-giải-phẫu-quần-áo-garment-landmarks">4.1. Chuẩn hóa Bộ 12 Mốc Giải Phẫu Quần Áo (Garment Landmarks)</a><br />
+   - <a href="#42-thuật-toán-tự-động-đánh-mốc-bất-biến-góc-xoay-invariant-geometry">4.2. Thuật toán Đánh Mốc Bất Biến Góc Xoay (Invariant Geometry)</a><br />
+   - <a href="#bước-2-huấn-luyện-mô-hình-thị-giác-ai-yolo11-seg--yolo11-pose">Bước 2: Huấn luyện mô hình thị giác AI (YOLO11-seg &amp; YOLO11-pose)</a><br />
+   - <a href="#bước-3-chiếu-điểm-2d-sang-3d-2d-to-3d-projection">Bước 3: Chiếu điểm 2D sang 3D (2D-to-3D Projection)</a><br />
+   - <a href="#bước-4-ước-lượng-pháp-tuyến-vi-mô-bề-mặt-3d-surface-normal-estimation">Bước 4: Ước lượng pháp tuyến vi mô bề mặt 3D (Surface Normal Estimation)</a><br />
+   - <a href="#bước-5-so-sánh-các-phương-pháp-sinh-quỹ-đạo-p1-p3-p4">Bước 5: So sánh các phương pháp sinh quỹ đạo (P1, P3, P4)</a><br />
+   - <a href="#bước-6-khóa-an-toàn-hình-học--động-học-safety-interlock">Bước 6: Khóa an toàn hình học &amp; Động học (Safety Interlock)</a><br />
+   - <a href="#bước-7-xuất-lệnh--kết-nối-thời-gian-thực-qua-ai_serverpy">Bước 7: Xuất lệnh &amp; Kết nối thời gian thực qua ai_server.py</a></li>
+<li><a href="#5-kế-hoạch-phân-kỳ-3-đợt-triển-khai">Kế hoạch phân kỳ 3 đợt triển khai</a></li>
+</ol>
+<hr />
+<h2>1. BẢN CHẤT BÀI TOÁN &amp; NGUYÊN TẮC CỐT LÕI</h2>
+<h3>1.1. Tại sao bắt buộc phải dùng AI và 3D?</h3>
+<ul>
+<li><strong>Đặc tính phôi vải mềm (Deformable Object)</strong>: Quần jean / vải dệt không phải vật thể cứng (rigid CAD). Khi công nhân đặt phôi lên bàn gia công, vị trí tâm, góc xoay, nếp nhăn cục bộ, độ xòe ống và kích cỡ (S, M, L) đều thay đổi giữa mỗi chu kỳ.</li>
+<li><strong>Không được thu bài toán về 2D thuần túy</strong>: Phun sơn / mài đồ trong công nghiệp yêu cầu khoảng cách súng tới mặt vải <i>d</i> phải giữ nguyên và hướng đầu phun luôn phải vuông góc với bề mặt vải tại mọi nếp nhăn. Do đó, bài toán bắt buộc phải xử lý trong không gian 3 chiều (X, Y, Z, <b>n̄</b>).</li>
+<li><strong>Nguyên tắc phân quyền an toàn</strong>:<blockquote>
+<p><strong>LƯU Ý QUAN TRỌNG:</strong> &gt; <strong>Mạng nơ-ron AI chỉ làm nhiệm vụ nhận dạng (Perception)</strong>: phát hiện vùng vải (Segmentation) và định vị các mốc giải phẫu (Landmarks). <strong>Không để mạng AI trực tiếp sinh chuỗi lệnh điều khiển động cơ robot.</strong> Quỹ đạo hình học phải được sinh qua các thuật toán giải tích và được giám sát bởi <strong>Khóa an toàn (Safety Interlock)</strong>: kiểm tra tầm với, điểm kỳ dị, nguy cơ va chạm bàn trước khi gửi lệnh sang robot thật.</p>
+</blockquote>
+</li>
+</ul>
+<hr />
+<h2>2. HỆ CHỈ TIÊU KỸ THUẬT ĐÁNH GIÁ (BỘ 8 CHỈ TIÊU CỐT LÕI)</h2>
+<p>Theo yêu cầu từ tài liệu góp ý báo cáo, mọi thuật toán và phương án triển khai phải được lượng hóa bằng số liệu đo lường cụ thể:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;">STT</th>
+<th style="text-align: left;">Chỉ tiêu kỹ thuật</th>
+<th style="text-align: center;">Ký hiệu</th>
+<th style="text-align: center;">Đơn vị</th>
+<th style="text-align: left;">Phương pháp đo lường &amp; Đánh giá</th>
+<th style="text-align: center;">Mục tiêu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>1</strong></td>
+<td style="text-align: left;">Sai số hình học quỹ đạo</td>
+<td style="text-align: center;">E<sub>geo</sub></td>
+<td style="text-align: center;">mm</td>
+<td style="text-align: left;">So sánh vết vẽ/phun thực tế của robot với đường viền thiết kế danh nghĩa (Trung bình, P95, Hausdorff)</td>
+<td style="text-align: center;">≤ 2.0 mm</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>2</strong></td>
+<td style="text-align: left;">Sai số khoảng cách súng</td>
+<td style="text-align: center;">E<sub>d</sub></td>
+<td style="text-align: center;">mm</td>
+<td style="text-align: left;">Khoảng cách từ đầu phun TCP đến mặt vải dọc theo trục súng: E<sub>d</sub> =</td>
+<td style="text-align: center;">d<sub>thực</sub> - d<sub>đặt</sub></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>3</strong></td>
+<td style="text-align: left;">Sai số góc tiếp cận pháp tuyến</td>
+<td style="text-align: center;">E<sub>θ</sub></td>
+<td style="text-align: center;">°</td>
+<td style="text-align: left;">Góc lệch giữa trục phun của súng và vector pháp tuyến cục bộ <b>n̄</b> của mặt vải</td>
+<td style="text-align: center;">≤ 5.0°</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4</strong></td>
+<td style="text-align: left;">Tỷ lệ bao phủ &amp; Tràn biên</td>
+<td style="text-align: center;">E<sub>T</sub>, R<sub>drop</sub></td>
+<td style="text-align: center;">%</td>
+<td style="text-align: left;">Đo lường tỷ lệ diện tích sơn phủ đúng vùng yêu cầu và tỷ lệ sơn bị tràn ra ngoài biên vải</td>
+<td style="text-align: center;">E<sub>T</sub> ≥ 95%, R<sub>drop</sub> ≤ 3%</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>5</strong></td>
+<td style="text-align: left;">Độ đều vận tốc TCP</td>
+<td style="text-align: center;">v<sub>TCP</sub></td>
+<td style="text-align: center;">%</td>
+<td style="text-align: left;">Độ ổn định tốc độ chuyển động của đầu phun (tránh hiện tượng đọng sơn khi đổi hướng khớp)</td>
+<td style="text-align: center;">Dao động ≤ 10%</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>6</strong></td>
+<td style="text-align: left;">Sai số chuỗi hiệu chuẩn</td>
+<td style="text-align: center;">E<sub>calib</sub></td>
+<td style="text-align: center;">mm, °</td>
+<td style="text-align: left;">Chạm điểm mốc bằng đầu nhọn TCP so với tọa độ 3D đo bởi camera Zivid</td>
+<td style="text-align: center;">≤ 1.5 mm</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>7</strong></td>
+<td style="text-align: left;">Thời gian chu kỳ chuỗi (Cycle Time)</td>
+<td style="text-align: center;">t<sub>total</sub></td>
+<td style="text-align: center;">Giây</td>
+<td style="text-align: left;">Đo tổng thời gian từ lúc camera chụp → AI nhận dạng → sinh quỹ đạo → kiểm tra an toàn</td>
+<td style="text-align: center;">≤ 10 s (Mục tiêu tổng thể ≤ 60s)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8</strong></td>
+<td style="text-align: left;">Thời gian đổi mã hàng so với dạy tay</td>
+<td style="text-align: center;">T<sub>setup</sub></td>
+<td style="text-align: center;">Lần</td>
+<td style="text-align: left;">So sánh thời gian lập trình thủ công bằng tay (Teach Pendant) so với tự động sinh quỹ đạo bằng AI</td>
+<td style="text-align: center;">Nhanh hơn ≥ 15 - 20 lần</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>3. CHUỖI HIỆU CHUẨN HỆ THỐNG (CALIBRATION CHAIN)</h2>
+<p>Để ánh xạ chính xác một điểm từ ảnh chụp thành tọa độ điều khiển 6 khớp robot, hệ thống tuân thủ chuỗi biến đổi tọa độ khép kín:</p>
+<div class="math-block"><b>P</b><sub>TCP</sub><sup>Robot</sup> = <b>T</b><sub>Base</sub><sup>World</sup> &middot; <b>T</b><sub>Camera</sub><sup>Base</sup> &middot; <b>P</b><sub>3D</sub><sup>Camera</sup></div>
+
+<ol>
+<li><strong>Hiệu chuẩn Camera – Mặt bàn (Camera-to-Table Plane)</strong>:<br />
+   * Sử dụng thuật toán RANSAC 3D trích xuất trực tiếp phương trình mặt bàn từ đám mây điểm Zivid (Ax + By + Cz + D = 0).</li>
+<li><strong>Hiệu chuẩn Tay – Mắt (Eye-to-Hand Calibration)</strong>:<br />
+   * Camera Zivid đặt cố định nhìn xuống bàn làm việc.<br />
+   * Áp dụng thuật toán Tsai-Lenz hoặc Park-Martin thông qua bàn cờ chuẩn (Chessboard/Charuco) để xác định ma trận biến đổi cố định <b>T</b><sub>Camera</sub><sup>Base</sup>.</li>
+<li><strong>Hiệu chuẩn Đầu công tác TCP (Tool Center Point Calibration)</strong>:<br />
+   * Xác định offset không gian từ tâm mặt bích trục 6 (Axis 6 Flange) đến đầu súng phun / bút vẽ: [X<sub>tool</sub>, Y<sub>tool</sub>, Z<sub>tool</sub>].</li>
+</ol>
+<hr />
+<h2>4. LỘ TRÌNH 7 BƯỚC PHÁT TRIỂN AI PIPELINE</h2>
+<h3>Bước 1: Tiền xử lý &amp; Tự sinh nhãn từ 3D (Auto-labeling)</h3>
+<ul>
+<li><strong>Ý tưởng cốt lõi</strong>: Thay vì tốn nhân công ngồi gán tay 300 ảnh 2D (dễ sai lệch ở các vùng vải tối màu, mép vải nhăn), hệ thống tận dụng dữ liệu 3D Zivid để <strong>sinh nhãn tự động với độ chính xác tuyệt đối</strong>.</li>
+<li><strong>Quy trình thực hiện</strong>:<br />
+  1. Đọc đồng thời cặp dữ liệu <code>image_*.png</code> và <code>pcl_*.ply</code>.<br />
+  2. Dùng RANSAC 3D bóc tách mặt phẳng bàn gia công: Ax + By + Cz + D = 0.<br />
+  3. Lọc vật thể có độ cao nổi H = z<sub>table</sub> - z<sub>point</sub> ≥ 1.8 mm.<br />
+  4. Ứng dụng kỹ thuật <strong>3D-Guided GrabCut</strong>: Dùng lõi độ cao 3D (H ≥ 4.5 mm) làm hạt giống Foreground chắc chắn, mặt sàn phẳng (H ≤ 1.2 mm) làm Background, năng lượng biên cắt tối ưu hóa theo độ tương phản gradient RGB.<br />
+  5. <strong>Bóc tách 12 Mốc Giải Phẫu Bất Biến Góc Xoay (Invariant Geometry)</strong> theo thuật toán Convexity Defects &amp; Centerline Ray-Casting.<br />
+  6. Xuất nhãn:<ul>
+<li>File <code>.txt</code> polygon chuẩn <strong>YOLO11-seg</strong>.</li>
+<li>File <code>.txt</code> và <code>.json</code> chứa 12 điểm mốc <strong>YOLO11-pose</strong> (chuẩn hóa [0.0, 1.0] kèm trạng thái nhìn thấy v=2).<br />
+  7. Lưu ảnh overlay kiểm tra trực quan 35 mẫu để kỹ sư thẩm định trước khi đưa vào huấn luyện.</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h3>4.1. CHUẨN HÓA BỘ 12 MỐC GIẢI PHẪU QUẦN ÁO (GARMENT LANDMARKS)</h3>
+<p>Theo tiêu chuẩn nhân trắc học may mặc công nghiệp và yêu cầu công nghệ của trạm phun sơn/hóa chất tự động Dobot CR10A, hệ thống định nghĩa <strong>12 mốc giải phẫu cốt lõi</strong> chia làm 4 cụm chức năng:</p>
+<pre><code>                [waist_left] ------- [waist_center] ------- [waist_right]   (Cạp / Lưng quần)
+                       \                                   /
+                        \            [crotch]             /                 (Đáy đũng)
+                         \          /        \           /
+                     [thigh_left]  /          \  [thigh_right]              (Vùng đùi - phun râu mèo)
+                          |       /            \      |
+                          |      /              \     |
+                      [knee_left]                [knee_right]               (Đầu gối)
+                          |                           |
+                 [cuff_L_out] [cuff_L_in]    [cuff_R_in] [cuff_R_out]       (4 góc gấu 2 ống)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Cụm mốc</th>
+<th style="text-align: left;">Tên mốc</th>
+<th style="text-align: center;">Số lượng</th>
+<th style="text-align: left;">Ý nghĩa kỹ thuật cho Robot &amp; Quỹ đạo phun</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Cụm Cạp/Lưng (Waist)</strong></td>
+<td style="text-align: left;"><code>waist_left</code>, <code>waist_center</code>, <code>waist_right</code></td>
+<td style="text-align: center;">3</td>
+<td style="text-align: left;">Xác định bề rộng lưng quần, hướng xoay đầu trên và mặt phẳng lưng.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Cụm Đáy Đũng (Crotch)</strong></td>
+<td style="text-align: left;"><code>crotch</code></td>
+<td style="text-align: center;">1</td>
+<td style="text-align: left;"><strong>Mốc then chốt nhất</strong>: Điểm rẽ nhánh phân tách 2 ống quần, làm gốc tọa độ cục bộ cho toàn bộ thân dưới.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Cụm Đùi (Thigh)</strong></td>
+<td style="text-align: left;"><code>thigh_left</code>, <code>thigh_right</code></td>
+<td style="text-align: center;">2</td>
+<td style="text-align: left;">Nằm tại <strong>28% chiều dài ống</strong>: Tâm vùng phun hóa chất PP / phun tạo hiệu ứng cào râu mèo (Whisker effect).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Cụm Đầu Gối (Knee)</strong></td>
+<td style="text-align: left;"><code>knee_left</code>, <code>knee_right</code></td>
+<td style="text-align: center;">2</td>
+<td style="text-align: left;">Nằm tại <strong>55% chiều dài ống</strong>: Phân đoạn quỹ đạo ống trên và ống dưới, tính góc uốn cong của chân quần.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Cụm Gấu Quần (Cuff)</strong></td>
+<td style="text-align: left;"><code>cuff_left_outer</code>, <code>cuff_left_inner</code>, <code>cuff_right_inner</code>, <code>cuff_right_outer</code></td>
+<td style="text-align: center;">4</td>
+<td style="text-align: left;">Định vị 2 miệng ống chân, xác định góc mở ống (Leg spread) và chiều dài thực tế từng ống.</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>16 Cạnh Khung Xương Kết Nối (Skeleton Edges)</strong>:<br />
+<code>waist_left - waist_center</code>, <code>waist_center - waist_right</code>, <code>waist_left - crotch</code>, <code>waist_right - crotch</code>, <code>crotch - thigh_left</code>, <code>crotch - thigh_right</code>, <code>thigh_left - knee_left</code>, <code>thigh_right - knee_right</code>, <code>knee_left - cuff_left_outer</code>, <code>knee_left - cuff_left_inner</code>, <code>knee_right - cuff_right_outer</code>, <code>knee_right - cuff_right_inner</code>, <code>cuff_left_outer - cuff_left_inner</code>, <code>cuff_right_inner - cuff_right_outer</code>, <code>waist_left - thigh_left</code>, <code>waist_right - thigh_right</code>.</li>
+</ul>
+<hr />
+<h3>4.2. THUẬT TOÁN TỰ ĐỘNG ĐÁNH MỐC BẤT BIẾN GÓC XOAY (INVARIANT GEOMETRY)</h3>
+<h4>Nguyên nhân sai lệch ở phương pháp cắt lát pixel cũ</h4>
+<p>Nếu dùng quy tắc cắt lát theo trục dọc Y của ảnh (<code>waist_y = y_min + 5%</code>, <code>crotch_y = y_min + 45%</code>...), khi công nhân đặt quần nằm ngang, chéo hoặc xoay bất kỳ góc nào trên bàn, trục Y của ảnh không còn trùng với trục giải phẫu của quần, dẫn đến các mốc bị dồn cục, lộn xộn và sai lệch hoàn toàn.</p>
+<h4>Quy trình 5 bước xác định mốc chuẩn xác bất chấp tư thế đặt</h4>
+<ol>
+<li><strong>Bước 1: Tìm Đáy Đũng (<code>crotch</code>) bằng Khuyết tật Lồi (Convexity Defects)</strong><br />
+   - Đường viền quần luôn có dạng chữ <strong>Y</strong> hoặc chữ <strong>V</strong> ngược.<br />
+   - Tính bao lồi (Convex Hull) bao quanh Contour viền ngoài, sau đó tính khoảng cách khuyết tật lồi:<br />
+     <div class="math-block"><i>i</i><sub>crotch</sub> = argmax<sub><i>i</i></sub> (defect<sub><i>i</i></sub>.depth)</div><br />
+   - Điểm khuyết sâu nhất luôn là <strong>Đáy Đũng</strong>, bất kể chiếc quần xoay theo góc nào trên mặt bàn.</li>
+<li><strong>Bước 2: Xác định Trục Ống Chân (<b>v̄</b><sub>leg</sub>) và Trục Cạp Quần (<b>v̄</b><sub>waist</sub>)</strong><br />
+   - Hai điểm mút của bao lồi sinh ra khuyết tật này chính là tâm 2 gấu quần (P<sub>cuff1</sub>, P<sub>cuff2</sub>).<br />
+   - Vector từ Đáy Đũng đến trung điểm 2 gấu quần là <strong>Trục Ống Quần</strong>:<br />
+     <div class="math-block"><b>v̄</b><sub>leg</sub> = <sup>(<i>P</i><sub>cuff1</sub> + <i>P</i><sub>cuff2</sub>)/2 &minus; <i>P</i><sub>crotch</sub></sup> &frasl; <sub>&Vert; (<i>P</i><sub>cuff1</sub> + <i>P</i><sub>cuff2</sub>)/2 &minus; <i>P</i><sub>crotch</sub> &Vert;</sub></div><br />
+   - Vector ngược chiều 180° chính là <strong>Trục Cạp Quần</strong>: <b>v̄</b><sub>waist</sub> = -<b>v̄</b><sub>leg</sub>.<br />
+   - Vector trực giao: <b>v̄</b><sub>perp</sub> = (-v<sub>waist, y</sub>,\ v<sub>waist, x</sub>).</li>
+<li><strong>Bước 3: Chiếu tìm Cụm Cạp Quần (Waist)</strong><br />
+   - Chiếu toàn bộ tập điểm viền contour <i>P</i> theo phương <b>v̄</b><sub>waist</sub>: d<sub>proj</sub> = (P - P<sub>crotch</sub>) · <b>v̄</b><sub>waist</sub>.<br />
+   - Lọc nhóm điểm đạt bách phân vị ≥ 97%.<br />
+   - Chiếu nhóm này lên phương trực giao <b>v̄</b><sub>perp</sub> để phân tách 2 góc cạp cực trị:<ul>
+<li>Góc cạp trái: P<sub>waist\<sub>left</sub></sub> = \arg\min ((P - P<sub>crotch</sub>) · <b>v̄</b><sub>perp</sub>).</li>
+<li>Góc cạp phải: P<sub>waist\<sub>right</sub></sub> = \arg\max ((P - P<sub>crotch</sub>) · <b>v̄</b><sub>perp</sub>).</li>
+<li>Tâm cạp: P<sub>waist\<sub>center</sub></sub> = \frac{P<sub>waist\<sub>left</sub></sub> + P<sub>waist\<sub>right</sub></sub>}{2}.</li>
+</ul>
+</li>
+<li><strong>Bước 4: Bắn tia vuông góc tìm Tim Ống Vải (Centerline Ray-Casting) cho Đùi &amp; Gối</strong><br />
+   - Từ Đáy Đũng đo dọc theo từng ống chân theo tỷ lệ nhân trắc may mặc:<ul>
+<li>28% chiều dài ống → Vị trí sơ bộ Đùi (P<sub>thigh</sub><sup>seed</sup>).</li>
+<li>55% chiều dài ống → Vị trí sơ bộ Đầu gối (P<sub>knee</sub><sup>seed</sup>).</li>
+<li>Tại mỗi vị trí seed, bắn một tia quét hai phía vuông góc với trục ống chân (± <b>v̄</b><sub>perp\<sub>leg</sub></sub>).</li>
+<li>Thuật toán loang trên mask nhị phân để tìm 2 mép vải thực tế (P<sub>outer</sub>, P<sub>inner</sub>) và tính trung điểm:<br />
+ <div class="math-block"><i>P</i><sub>centerline</sub> = <sup>(<i>P</i><sub>outer</sub> + <i>P</i><sub>inner</sub>)</sup> &frasl; <sub>2</sub></div></li>
+<li><strong>Ưu điểm vượt trội</strong>: Điểm mốc luôn nằm <strong>chính xác tại tim giữa của ống vải</strong>, tự động điều chỉnh ngay cả khi chân quần bị cong, nhăn, lệch góc hoặc gấp mép.</li>
+</ul>
+</li>
+<li><strong>Bước 5: Trích xuất Độ cao 3D &amp; Vector Pháp Tuyến Súng Phun <b>n̄</b></strong><br />
+   - Tra cứu tọa độ thực (X, Y, Z) trong camera Zivid 2 M70 (có xử lý nội suy nếu rơi vào điểm khuyết depth).<br />
+   - Tính vector pháp tuyến vi mô bề mặt <b>n̄</b> = (n<sub>x</sub>, n<sub>y</sub>, n<sub>z</sub>) bằng SVD/PCA trong lân cận bán kính 15 mm quanh mốc để cung cấp trực tiếp góc xoay định hướng cho đầu súng phun TCP của robot CR10A.</li>
+</ol>
+<hr />
+<h3>Bước 2: Huấn luyện mô hình thị giác AI (YOLO11-seg &amp; YOLO11-pose)</h3>
+<ul>
+<li><strong>Kiến trúc mô hình</strong>:</li>
+<li><strong>YOLO11-seg</strong>: Chuyên biệt phân vùng thân quần (Garment Mask) và các vùng hiệu ứng (mài đùi, túi sau).</li>
+<li><strong>YOLO11-pose</strong>: Chuyên biệt bắt 12 điểm mốc giải phẫu.</li>
+<li><strong>Tăng cường dữ liệu (Data Augmentation)</strong>:</li>
+<li>Xoay góc ± 15°, điều chỉnh độ sáng/tương phản để thích ứng tốt với cả denim sẫm màu và denim sáng màu (theo góp ý thử nghiệm Zivid HDR).</li>
+<li><strong>Đánh giá sau huấn luyện</strong>:</li>
+<li>Đạt mAP<sub>50-95</sub> ≥ 90% trên tập Validation tách biệt theo phiên chụp.</li>
+<li>Thời gian suy luận GPU ≤ 30 ms.</li>
+</ul>
+<h3>Bước 3: Chiếu điểm 2D sang 3D (2D-to-3D Projection)</h3>
+<ul>
+<li>Nhờ cấu trúc <strong>Organized Point Cloud (1200 × 1944)</strong> của Zivid, mỗi điểm pixel (u, v) từ đường dự đoán 2D lập tức có tọa độ 3D (X, Y, Z) tương ứng.</li>
+<li>Điểm khuyết tật quang học hoặc phản xạ (NaN) được làm đầy bằng thuật toán nội suy mặt phẳng lân cận KDTree (r ≤ 5 mm).</li>
+</ul>
+<h3>Bước 4: Ước lượng pháp tuyến vi mô bề mặt 3D (Surface Normal Estimation)</h3>
+<ul>
+<li>Tại mỗi waypoint 3D, thuật toán tìm <i>K</i> điểm lân cận trong bán kính r ≈ 6 mm.</li>
+<li>
+<p>Ma trận hiệp phương sai của cụm điểm được phân tích suy biến SVD/PCA:<br />
+<br />
+<div class="math-block"><b>C</b> = <sup>1</sup>/<sub><i>K</i></sub> &sum;<sub><i>i</i>=1..<i>K</i></sub> (<b>p</b><sub><i>i</i></sub> &minus; <b>p̄</b>)(<b>p</b><sub><i>i</i></sub> &minus; <b>p̄</b>)<sup>T</sup></div></p>
+</li>
+<li>
+<p>Vector riêng ứng với trị riêng nhỏ nhất chính là vector pháp tuyến <b>n̄</b> = (n<sub>x</sub>, n<sub>y</sub>, n<sub>z</sub>).</p>
+</li>
+<li>Hướng đầu súng phun luôn được định hướng ngược chiều pháp tuyến: <b>z̄</b><sub>tool</sub> = -<b>n̄</b>.</li>
+</ul>
+<h3>Bước 5: So sánh các phương pháp sinh quỹ đạo (P1, P3, P4)</h3>
+<p>Theo góp ý của báo cáo, cần so sánh ít nhất 2 đến 3 phương pháp trên cùng bộ dữ liệu:</p>
+<ol>
+<li><strong>Phương pháp P1 (Phủ viền / Zigzag Raster)</strong>:<br />
+   * Sinh đường viền khép kín co mép e = 3 - 5 mm hoặc đường điền đầy zíc-zắc bề mặt.<br />
+   * <em>Ưu điểm</em>: Đơn giản, độ phủ cao. <em>Nhược điểm</em>: Không thích ứng theo hoa văn mỹ thuật.</li>
+<li><strong>Phương pháp P3 (Sinh quỹ đạo theo Mốc hình học - Landmarks)</strong>:<br />
+   * Đường phun nối liền hoặc uốn cong tự nhiên theo các mốc: Đũng quần → Đầu gối → Gấu quần.<br />
+   * <em>Ưu điểm</em>: Bám đúng cấu trúc giải phẫu quần áo.</li>
+<li><strong>Phương pháp P4 (Đăng ký đám mây điểm phi tuyến - Non-rigid Registration / CPD / TPS)</strong>:<br />
+   * Dạy một mẫu hoa văn râu mèo / mài bạc chuẩn trên 1 cỡ mẫu (Template).<br />
+   * Khi gặp cỡ quần mới (S, M, L) hoặc vị trí đặt khác: Áp dụng thuật toán <strong>Coherent Point Drift (CPD)</strong> hoặc <strong>Thin Plate Spline (TPS)</strong> để uốn dẻo quỹ đạo mẫu khớp trọn vẹn vào đám mây điểm thực tế.</li>
+</ol>
+<h3>Bước 6: Khóa an toàn hình học &amp; Động học (Safety Interlock)</h3>
+<p>Trước khi xuất lệnh, bộ kiểm tra an toàn sẽ quét toàn bộ quỹ đạo:<br />
+* <strong>Kiểm tra va chạm bàn</strong>: Loại bỏ điểm có Z &lt; 10 mm.<br />
+* <strong>Kiểm tra tầm với</strong>: Bán kính thao tác R ≤ 1175 mm.<br />
+* <strong>Kiểm tra điểm kỳ dị</strong>: Cận kỳ dị cổ tay (|q<sub>5</sub>| &lt; 3°), cận kỳ dị khuỷu tay (|q<sub>3</sub>| &lt; 3°).<br />
+* <strong>Quyền chặn xuất lệnh</strong>: Nếu vi phạm các điều kiện trên, hệ thống khóa toàn bộ chức năng gửi lệnh, ngăn ngừa nguy cơ va đập cơ khí.</p>
+<h3>Bước 7: Xuất lệnh &amp; Kết nối thời gian thực qua <code>ai_server.py</code></h3>
+<ul>
+<li>Server hỗ trợ <strong>kênh kép (Dual-Channel)</strong>:</li>
+<li><strong>UDP Socket (Cổng 5005 / 5006)</strong>: Tốc độ cao (\sim 1 ms), không trễ, tự động đẩy dữ liệu sang Unity.</li>
+<li><strong>HTTP REST (Cổng 5000)</strong>: Thuận tiện kiểm tra và gỡ lỗi qua API.</li>
+<li>Xuất file điều khiển:</li>
+<li>Script Python Dobot CR10A (<code>dobot_cr10a_trajectory_playback.py</code>).</li>
+<li>File Action Goal ROS 2 (<code>dobot_cr10a_ros2_trajectory.yaml</code>).</li>
+<li>File CSV tọa độ và góc khớp đã cập nhật (<code>pants_outline_cr10a_updated.csv</code>).</li>
+</ul>
+<hr />
+<h2>5. KẾ HOẠCH PHÂN KỲ 3 ĐỢT TRIỂN KHAI</h2>
+<ul>
+<li><strong>Đợt 1 — Khép kín Pipeline 2.5D (Mức A - Đang thực hiện)</strong>:</li>
+<li>Tự sinh nhãn từ dữ liệu 3D cho toàn bộ dataset; xuất kiểm tra trực quan ~35 ảnh.</li>
+<li>Huấn luyện mô hình YOLO11-seg.</li>
+<li>Kết nối mô hình vào <code>ai_server.py</code>, chạy mô phỏng trọn vẹn trên Unity Workbench 6 Tab và xuất lệnh ra robot thật.</li>
+<li>Đo đạc và lập bảng số liệu 8 chỉ tiêu kỹ thuật.</li>
+<li><strong>Đợt 2 — Tự động đổi cỡ quần S/M/L (Mức D)</strong>:</li>
+<li>Cài đặt thuật toán đăng ký CPD/TPS để tự thích ứng đường râu mèo giữa các cỡ.</li>
+<li>Bấm giờ so sánh thời gian dạy tay so với tự động sinh quỹ đạo.</li>
+<li><strong>Đợt 3 — Không gian 3D cong trên khuôn (Mức B/C)</strong>:</li>
+<li>Ứng dụng khi đưa phôi lên ma-nơ-canh / khuôn đứng xoay nhiều góc.</li>
+</ul>
+<div class="footer">
+  Tài liệu kỹ thuật AI Robot Dobot CR10A — Robot 3T / 3C Machinery
+</div>
+</body>
+</html>
