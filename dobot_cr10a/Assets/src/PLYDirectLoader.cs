@@ -97,8 +97,25 @@ public class PLYDirectLoader : MonoBehaviour
         hasLoadedSettings = true;
     }
 
+    private void DisableLegacyRootMeshOnSelf()
+    {
+        // Vô hiệu hóa MeshFilter/MeshRenderer tĩnh gắn trực tiếp trên root Garment_PLY_Model trong SampleScene.unity
+        // (m_Mesh: full_cloud_world), tránh hiện đè mẫu phôi cũ nằm dưới phôi mới!
+        MeshRenderer rootMr = GetComponent<MeshRenderer>();
+        if (rootMr != null) rootMr.enabled = false;
+        MeshFilter rootMf = GetComponent<MeshFilter>();
+        if (rootMf != null) rootMf.sharedMesh = null;
+        MeshCollider rootMc = GetComponent<MeshCollider>();
+        if (rootMc != null)
+        {
+            rootMc.enabled = false;
+            rootMc.sharedMesh = null;
+        }
+    }
+
     private void Awake()
     {
+        DisableLegacyRootMeshOnSelf();
         LoadSettings();
     }
 
@@ -154,6 +171,7 @@ public class PLYDirectLoader : MonoBehaviour
 
     public void ApplyRenderMode()
     {
+        DisableLegacyRootMeshOnSelf();
         if (surfaceMeshObject == null)
         {
             Transform found = transform.Find("WorkpieceSurfaceMesh");
@@ -998,7 +1016,7 @@ public class PLYDirectLoader : MonoBehaviour
         for (int c = 0; c < transform.childCount; c++)
         {
             Transform child = transform.GetChild(c);
-            if (!child.name.StartsWith("CloudChunk_")) continue;
+            if (child == null || !child.gameObject.activeSelf || !child.name.StartsWith("CloudChunk_")) continue;
             MeshFilter mf = child.GetComponent<MeshFilter>();
             if (mf == null || mf.sharedMesh == null) continue;
             Vector3[] verts = mf.sharedMesh.vertices;
@@ -1102,13 +1120,20 @@ public class PLYDirectLoader : MonoBehaviour
         }
         if (elevationGridY == null) return null;
 
-        // Xóa mesh cũ nếu đã có
-        Transform oldMeshChild = transform.Find("WorkpieceSurfaceMesh");
-        if (oldMeshChild != null)
+        // Xóa triệt để mọi mesh cũ nếu đã có (tách khỏi parent ngay để không còn tồn tại trong cùng frame Play Mode)
+        for (int i = transform.childCount - 1; i >= 0; i--)
         {
-            if (Application.isPlaying) Destroy(oldMeshChild.gameObject);
-            else DestroyImmediate(oldMeshChild.gameObject);
+            Transform child = transform.GetChild(i);
+            if (child != null && child.name == "WorkpieceSurfaceMesh")
+            {
+                child.SetParent(null);
+                child.gameObject.SetActive(false);
+                if (Application.isPlaying) Destroy(child.gameObject);
+                else DestroyImmediate(child.gameObject);
+            }
         }
+        surfaceMeshObject = null;
+        surfaceMeshCollider = null;
 
         // Tạo bản sao làm việc để pin-hole fill không phá hỏng cờ valid gốc
         float[,] meshY = (float[,])elevationGridY.Clone();
@@ -1842,12 +1867,19 @@ public class PLYDirectLoader : MonoBehaviour
 
     private void ClearExistingChunks()
     {
-        // Xóa các chunk cũ và 3D surface mesh cũ trong hierarchy
+        DisableLegacyRootMeshOnSelf();
+        // Tách khỏi parent và tắt hiển thị NGAY LẬP TỨC trước khi Destroy để trong Play Mode
+        // các chunk/mesh của phôi cũ không còn nằm trong transform ở cùng frame khi nạp phôi mới!
         for (int i = transform.childCount - 1; i >= 0; i--)
         {
             Transform child = transform.GetChild(i);
-            if (child.name.StartsWith("CloudChunk_") || child.name == "WorkpieceSurfaceMesh")
+            if (child == null) continue;
+            if (child.name.StartsWith("CloudChunk_") ||
+                child.name == "WorkpieceSurfaceMesh" ||
+                child.name == "InpaintedJeansSurface_Mesh")
             {
+                child.SetParent(null);
+                child.gameObject.SetActive(false);
                 if (Application.isPlaying) Destroy(child.gameObject);
                 else DestroyImmediate(child.gameObject);
             }
