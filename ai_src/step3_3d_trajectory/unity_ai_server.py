@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -37,7 +37,7 @@ from pathlib import Path
 import numpy as np
 
 # Thêm đường dẫn tới Step 1 & Step 3
-AI_SRC_DIR = Path("/home/nhan/RB3t_PJ/ai_src")
+AI_SRC_DIR = Path(__file__).resolve().parents[1]
 STEP1_DIR = AI_SRC_DIR / "step1_auto_label"
 STEP3_DIR = AI_SRC_DIR / "step3_3d_trajectory"
 sys.path.insert(0, str(STEP1_DIR))
@@ -118,7 +118,7 @@ class UnityDobotKinematicsBridge:
         x_robot_mm = 765.0 + float(vy_mm)
         y_robot_mm = -float(vx_mm)
         z_surface_mm = 1685.0 - float(vz_mm)
-        z_robot_mm = max(18.0, z_surface_mm + float(z_contact_offset_mm))
+        z_robot_mm = z_surface_mm + float(z_contact_offset_mm)
         return x_robot_mm, y_robot_mm, z_robot_mm
 
     @staticmethod
@@ -299,13 +299,14 @@ class UnityDobotKinematicsBridge:
 class DobotUnityAIServer:
     def __init__(
         self,
-        unity_project_dir="/media/nhan/01DC3601B2514510/RB3t_PJ/dobot_cr10a",
+        unity_project_dir=None,
         udp_port=5005,
         http_port=5000,
         auto_push_port=5006,
     ):
-        self.unity_project_dir = Path(unity_project_dir)
+        self.unity_project_dir = Path(unity_project_dir) if unity_project_dir else AI_SRC_DIR.parent / "dobot_cr10a"
         self.unity_output_dir = self.unity_project_dir / "output_drawing"
+        self.unity_output_dir.mkdir(parents=True, exist_ok=True)
         self.ubuntu_output_dir = STEP3_DIR / "outputs"
         self.ubuntu_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -331,7 +332,7 @@ class DobotUnityAIServer:
         img_path = self.pipeline.core_3d.dataset_2d_dir / f"image_{sample_num}.png"
 
         xyz, bgr_ply, _ = self.pipeline.core_3d.load_organized_ply(ply_path)
-        bgr = cv2.imread(str(img_path)) if img_path.exists() else bgr_ply
+        bgr = bgr_ply
         mask_bin, keypoints_2d, _ = self.pipeline.run_ai_perception(bgr)
         plane_info = self.pipeline.core_3d.fit_table_plane(xyz)
         table_normal = np.array(plane_info["normal"], dtype=np.float64)
@@ -475,10 +476,6 @@ class DobotUnityAIServer:
         with self.lock:
             t0 = time.perf_counter()
             clean_sample = Path(sample_name).stem.strip()
-            if clean_sample == "full_cloud_world":
-                clean_sample = "pcl_25"
-            elif not clean_sample.startswith("pcl_"):
-                clean_sample = f"pcl_{clean_sample}"
 
             ply_path = self.pipeline.core_3d.dataset_3d_dir / f"{clean_sample}.ply"
             if not ply_path.exists():
@@ -550,12 +547,6 @@ class DobotUnityAIServer:
                     )
                     pos_mm = np.array([x_mm, y_mm, z_mm], dtype=np.float64)
 
-                    r_norm = float(np.linalg.norm(pos_mm))
-                    if r_norm > 1150.0:
-                        scale_r = 1140.0 / r_norm
-                        pos_mm[0] *= scale_r
-                        pos_mm[1] *= scale_r
-                        x_mm, y_mm = float(pos_mm[0]), float(pos_mm[1])
 
                     if prev_pos_mm is not None:
                         cum_dist_mm += float(np.linalg.norm(pos_mm - prev_pos_mm))
@@ -572,7 +563,7 @@ class DobotUnityAIServer:
                         yaw_deg=yaw_deg,
                         prev_joints_rad=prev_q_rad,
                         dtool_mm=50.0,
-                        use_adaptive_tilt=True,
+                        use_adaptive_tilt=False,
                     )
                     if ik_sol is None:
                         # Fallback về bích chúc thẳng (180, 0, 0) nếu góc nghiêng vi mô vượt tầm
@@ -584,7 +575,7 @@ class DobotUnityAIServer:
                             yaw_deg=yaw_deg,
                             prev_joints_rad=prev_q_rad,
                             dtool_mm=50.0,
-                            use_adaptive_tilt=True,
+                            use_adaptive_tilt=False,
                         )
 
                     if ik_sol is not None:
@@ -611,7 +602,7 @@ class DobotUnityAIServer:
                         "j_deg": j_deg,
                         "j_rad": j_rad,
                         "err_pos_mm": err_mm,
-                        "spray_enabled": 1 if p_i > 0 else 0,
+                        "spray_enabled": 1 if p_i > 0 and ik_sol is not None else 0,
                         "segment_name": f"CUSTOM3D_STROKE_{s_idx + 1}",
                         "status": status_str,
                         "feedrate_mms": 220.0,
@@ -685,10 +676,6 @@ class DobotUnityAIServer:
         with self.lock:
             t0 = time.perf_counter()
             clean_sample = Path(sample_name).stem.strip()
-            if clean_sample == "full_cloud_world":
-                clean_sample = "pcl_25"
-            elif not clean_sample.startswith("pcl_"):
-                clean_sample = f"pcl_{clean_sample}"
 
             ply_path = self.pipeline.core_3d.dataset_3d_dir / f"{clean_sample}.ply"
             if not ply_path.exists():
@@ -732,14 +719,6 @@ class DobotUnityAIServer:
                 )
                 pos_mm = np.array([x_mm, y_mm, z_mm], dtype=np.float64)
 
-                # Kiểm tra giới hạn bán kính an toàn của Dobot CR10A (R <= 1150 mm)
-                r_norm = float(np.linalg.norm(pos_mm))
-                if r_norm > 1150.0:
-                    scale_r = 1140.0 / r_norm
-                    pos_mm[0] *= scale_r
-                    pos_mm[1] *= scale_r
-                    x_mm, y_mm = float(pos_mm[0]), float(pos_mm[1])
-
                 if prev_pos_mm is not None:
                     cum_dist_mm += float(np.linalg.norm(pos_mm - prev_pos_mm))
                 prev_pos_mm = pos_mm
@@ -753,7 +732,7 @@ class DobotUnityAIServer:
                     yaw_deg=yaw_deg,
                     prev_joints_rad=prev_q_rad,
                     dtool_mm=50.0,
-                    use_adaptive_tilt=True,
+                    use_adaptive_tilt=False,
                 )
 
                 if ik_sol is not None:
@@ -792,7 +771,7 @@ class DobotUnityAIServer:
                     "j_deg": j_deg,
                     "j_rad": j_rad,
                     "err_pos_mm": err_mm,
-                    "spray_enabled": is_spray,
+                    "spray_enabled": is_spray if ik_sol is not None else 0,
                     "segment_name": f"P3_{wp.get('leg', 'left').upper()}_PASS{wp.get('pass_id', 0)}",
                     "status": status_str,
                     "feedrate_mms": wp.get("feedrate_mms", 250.0),

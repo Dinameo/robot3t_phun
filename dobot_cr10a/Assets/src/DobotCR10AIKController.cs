@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Globalization;
@@ -101,8 +101,8 @@ public class DobotCR10AIKController : MonoBehaviour
     private bool isMovingToHome;
     private bool showJointSpeedControls;
     
-    // Quản lý trạng thái 6 Tab Giao diện
-    // 0: SIM, 1: ROBOT, 2: CAM & POINT CLOUD, 3: QUỸ ĐẠO, 4: XUẤT / NHẬP LỆNH, 5: CẢNH BÁO & LỖI
+    // Quản lý trạng thái các cửa sổ nổi Kéo Thả & Kéo Giãn (9 Module)
+    // 0: SIM, 1: ROBOT, 2: NẠP PHÔI & HIỆU CHUẨN, 3: QUỸ ĐẠO, 4: XUẤT/NHẬP, 5: KIỂM TRA, 6: MỐC AI, 7: VÁ LỖ 3D, 8: ĐÁNH GIÁ & PHUN GAUSS
     public int interfaceTab = 0;
     public bool ribbonExpanded = true;
     public bool showDockPanel = true;
@@ -110,13 +110,44 @@ public class DobotCR10AIKController : MonoBehaviour
     public bool showGizmos = true;
     private Vector2 dockScrollPosition;
 
+    // 1 Bảng chi tiết duy nhất — gọn gàng, không mở chồng nhiều cửa sổ; có thể kéo thả & kéo giãn kích thước
+    private DraggableUIManager.PanelState singleMainPanel;
+    private bool floatingPanelsInitialized = false;
+
+    [Header("4B. Nội suy vận tốc TCP đều (Cartesian Constant-Speed) & Telemetry")]
+    public bool useConstantTcpSpeed = true;
+    [Range(20f, 600f)]
+    public float targetTcpSpeedMmPerSec = 220f;
+    public float liveTcpSpeedMmPerSec = 0f;
+    public float measuredCycleTimeSec = 0f;
+    public float measuredTcpSpeedCvPct = 0f;
+    private float cycleTimerSec = 0f;
+    private float cartesianSegProgress = 0f;
+    private Vector3 lastFrameTcpWorldPos;
+    private bool hasLastFrameTcpWorldPos = false;
+    private readonly List<float> recordedSpraySpeedsMmS = new List<float>();
+
+    [Header("4C. Tham số Công Nghệ Phun, Đánh Giá P1/P3/P4 & Khuôn Đứng 3D")]
+    public TrajectoryEvaluationEngine.SprayTechParams sprayTechParams = new TrajectoryEvaluationEngine.SprayTechParams();
+    public List<TrajectoryEvaluationEngine.MethodEvaluationResult> comparisonResults = new List<TrajectoryEvaluationEngine.MethodEvaluationResult>();
+    public bool showDepositionHeatmap3D = false;
+    public bool showKeepOutZones3D = true;
+    public bool showPhysicalWorktable = false;
+    public bool showStandingMold3D = false;
+    public string comparisonStatusMsg = "Bấm 'Chạy So Sánh P1 / P3 / P4' để tính toàn bộ chỉ tiêu theo file góp ý.";
+    public string standingMoldReachSummary = "";
+    private GameObject depositionHeatmapObj;
+    private GameObject standingMoldObj;
+    private GameObject worktableObj;
+    private CalibrationManager calibrationManager;
+
     // Tương thích ngược cho các hệ thống cũ nếu có tham chiếu
     public bool showJointsPanel => showJointsSubPanel;
     public bool showFkMonitorPanel => false;
     public bool showIkTargetPanel => false;
     public bool showTrajectoryPanel => interfaceTab == 3 && showDockPanel;
     public bool showPipelinePanel => false;
-    public bool showEvaluationPanel => false;
+    public bool showEvaluationPanel => interfaceTab == 8 && showDockPanel;
 
     [Header("Mẫu phôi Point Cloud & Quỹ đạo (Sample Dataset)")]
     public string selectedSampleName = "pcl_101";
@@ -247,11 +278,16 @@ public class DobotCR10AIKController : MonoBehaviour
     public bool hasTriggeredSizeAutoSwitch = false;
     public string sizeDetectionSummary = "Mặc định: Mẫu cần phun SIZE S (Khi nhận diện sẽ tự đổi sang Size phù hợp)";
 
-    [Header("7. Bảng Vẽ Quần Jean 2D Tiêu Chuẩn -> Ánh Xạ Lên Bề Mặt 3D")]
+    [Header("7. Bảng Vẽ Trên Ảnh Camera Thực Tế 2D -> Ánh Xạ Lên Bề Mặt 3D")]
     public bool showCanonicalDrawPanel = true;
     public float customDrawZOffsetMm = 2.0f; // Mặc định 2mm (áp sát mặt quần)
-    public string customDrawStatusMsg = "Mẫu cần phun mặc định: SIZE S. Khi nhận diện quần & 12 mốc sẽ tự động đổi sang Size phù hợp (S/M/L)!";
+    public string customDrawStatusMsg = "Vẽ trực tiếp trên ảnh thực tế từ camera hoặc bấm Áp dụng lên 3D.";
     private Texture2D canonicalJeansBgTex;
+    private Texture2D realCameraFileTex;
+    private string realCameraLoadedSample = "";
+    private string explicitRealCameraImagePath = "";
+    private bool canvasUsingRealCamera = false;
+    private Vector2[] strokesReferenceLandmarksUV = null;
     private Texture2D whitePixelTex;
     private readonly List<List<Vector2>> customDrawnStrokes = new List<List<Vector2>>();
     private List<Vector2> currentDrawingStroke = null;
@@ -265,31 +301,38 @@ public class DobotCR10AIKController : MonoBehaviour
     private readonly List<string> availableSprayTemplateFiles = new List<string>();
 
     [Header("9. Thuật Toán Bù Đắp Chỗ Khuất (Occlusion & Blind Spot Compensation)")]
-    public int selectedOcclusionAlgorithm = 0; // 0: TPS RBF, 1: Poisson/Laplace, 2: MLS K-NN, 3: Adaptive Gun Tilt, 4: Bilateral Symmetry
-    public float occlusionSearchRadiusMm = 25.0f;
+    public int selectedOcclusionAlgorithm = 0; // 0: MLS K-NN, 1: TPS RBF, 2: Poisson/Laplace, 3: Adaptive Gun Tilt, 4: Bilateral Symmetry
+    public float occlusionSearchRadiusMm = 30.0f;
     public int occlusionKNeighbors = 16;
     public float maxGunTiltAngleDeg = 25.0f;
     public float occlusionZMarginMm = 12.0f;
     public float laplacianSmoothingFactor = 0.5f;
     public float steepSlopeAngleThresholdDeg = 55.0f;
-    public bool showOcclusionHoles3D = true;
-    public bool showCompensatedSurface3D = true;
+    public bool showHoleRegionOutlines3D = true; // Bao quanh các vùng cần vá bằng đường màu đỏ
+    public bool showOcclusionHoles3D = false;    // Tùy chọn hiện chấm đỏ từng ô bên trong vùng cần vá
+    public bool showCompensatedSurface3D = false; // Tùy chọn hiện lưới chấm xanh (mặc định tắt để thấy rõ 3D Mesh đặc & viền đỏ)
     public bool showGunTiltVectors3D = true;
     public int detectedHoleCount = 0;
+    public int detectedHoleRegionCount = 0;
     public float detectedOcclusionAreaCm2 = 0f;
     public float avgCreaseDepthMm = 0f;
     public string occlusionStatusMsg = "Sẵn sàng phân tích chỗ khuất trên bề mặt quần 3D.";
     public readonly List<Vector3> detectedHolePointsWorld = new List<Vector3>();
+    public readonly List<Vector2Int> detectedHoleCells = new List<Vector2Int>();
+    public readonly List<List<Vector3>> holeRegionOutlinesWorld = new List<List<Vector3>>();
     public readonly List<Vector3> compensatedSurfacePointsWorld = new List<Vector3>();
     public readonly List<Vector3> gunTiltNormalsWorld = new List<Vector3>();
     private readonly Dictionary<Vector2Int, float> compensatedHeightGrid = new Dictionary<Vector2Int, float>();
     private readonly Dictionary<Vector2Int, Vector3> compensatedNormalGrid = new Dictionary<Vector2Int, Vector3>();
+    private float lastGarmentMinClothY = 0.015f;
+    private float lastGarmentMedianY = 0.080f;
 
-    [Header("10. Vá Điểm 3D Chỗ Khuất (3D Inpainting Point Cloud)")]
+    [Header("10. Vá Điểm 3D & Chuyển Thành 3D Mesh (3D Inpainting & Solid Mesh)")]
     public bool autoInpaintHolesOnLoad = true;
     public bool showInpaintedSurface3D = true;
-    public bool highlightInpaintedMesh = false; // false = màu khaki vải thật, true = màu cyan nổi bật
-    public float inpaintPointSpacingMm = 3.5f; // Khoảng cách giữa các hạt điểm vá (3.5mm cho mật độ dày đặc)
+    public bool renderInpaintedAsSolidMesh = true; // true = tạo 3D Mesh tam giác đặc liền kín mép, false = hạt điểm Point Cloud
+    public bool highlightInpaintedMesh = false; // false = màu RGB tiệp vải thật, true = màu cyan nổi bật
+    public float inpaintPointSpacingMm = 3.5f; // Khoảng cách tham chiếu khi hiển thị hạt điểm
     public float inpaintPointSize = 3.5f;      // Cỡ hạt điểm Point Cloud
     public GameObject inpaintedMeshObject;
 
@@ -358,6 +401,129 @@ public class DobotCR10AIKController : MonoBehaviour
         "8: Gấu T.ngoài", "9: Gấu T.trong", "10: Gấu P.trong", "11: Gấu P.ngoài"
     };
 
+    [Serializable]
+    private class WorkbenchSetupData
+    {
+        public bool showDockPanel = true;
+        public bool ribbonExpanded = true;
+        public int interfaceTab = 2;
+        public int trajSimSubTab = 0;
+        public int configSubTab = 0;
+        public bool showGizmos = true;
+        public bool showJointSpeedControls = false;
+        public bool showJointsSubPanel = false;
+        public bool showCanonicalDrawPanel = true;
+
+        public float playbackSpeed = 1.0f;
+        public bool useConstantTcpSpeed = true;
+        public float targetTcpSpeedMmPerSec = 220f;
+        public float maxJointSpeedDegPerSecond = 223f;
+        public float maxJointAccelerationDegPerSecond2 = 12f;
+        public float[] jointSpeedDegPerSecond = new float[] { 10f, 10f, 10f, 10f, 10f, 10f };
+
+        public bool sprayPaintEnabled = true;
+        public float sprayWidthMm = 4.0f;
+        public float sprayPathToleranceMm = 20f;
+        public float sprayJumpThresholdMm = 45f;
+
+        public float toolLength = 100.0f;
+        public float toolOffsetX = 0.0f;
+        public float toolOffsetY = 0.0f;
+
+        public string trajectoryCsvPath = "output_drawing/pants_outline_cr10a.csv";
+        public string selectedSampleName = "pcl_101";
+        public string customPlyPath = "Assets/PointCloud/full_cloud_world.ply";
+        public string customImportCsvPath = "output_drawing/pants_outline_cr10a.csv";
+
+        public string activeSprayTemplateSize = "S";
+        public float customDrawZOffsetMm = 2.0f;
+        public bool preserveCustomDrawingAcrossSamples = true;
+        public string sprayTemplateDirectory = "output_drawing/spray_templates";
+        public string saveTemplateFileName = "mau_phun_1";
+        public List<Stroke2D> customDrawnStrokes = new List<Stroke2D>();
+
+        public bool showLandmarks3D = true;
+        public bool showLandmarkLabels = true;
+        public bool showSegmentationContour3D = true;
+        public bool showSprayZones3D = true;
+
+        public int selectedOcclusionAlgorithm = 0;
+        public float occlusionSearchRadiusMm = 30.0f;
+        public int occlusionKNeighbors = 16;
+        public float maxGunTiltAngleDeg = 25.0f;
+        public float occlusionZMarginMm = 12.0f;
+        public float laplacianSmoothingFactor = 0.5f;
+        public float steepSlopeAngleThresholdDeg = 55.0f;
+        public bool showHoleRegionOutlines3D = true;
+        public bool showOcclusionHoles3D = false;
+        public bool showCompensatedSurface3D = false;
+        public bool showGunTiltVectors3D = true;
+
+        public bool autoInpaintHolesOnLoad = true;
+        public bool showInpaintedSurface3D = true;
+        public bool renderInpaintedAsSolidMesh = true;
+        public bool highlightInpaintedMesh = false;
+        public float inpaintPointSpacingMm = 3.5f;
+        public float inpaintPointSize = 3.5f;
+
+        public TrajectoryEvaluationEngine.SprayTechParams sprayTechParams = new TrajectoryEvaluationEngine.SprayTechParams();
+        public bool showDepositionHeatmap3D = false;
+        public bool showKeepOutZones3D = true;
+        public bool showPhysicalWorktable = false;
+        public bool showStandingMold3D = false;
+
+        public bool forceBypassSafetyInterlock = false;
+    }
+
+    private bool hasLoadedAllSettings = false;
+    private bool pendingAutoSave = false;
+    private float lastGuiChangeRealtime = -1f;
+    private float lastSavedToastUntilRealtime = -1f;
+
+    private static string GetWorkbenchSetupFilePath()
+    {
+#if UNITY_EDITOR
+        string dir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "UserSettings"));
+#else
+        string dir = Application.persistentDataPath;
+#endif
+        return Path.Combine(dir, "CR10A_WorkbenchSetup.json");
+    }
+
+    public void MarkSettingsDirty()
+    {
+        if (!hasLoadedAllSettings) return;
+        pendingAutoSave = true;
+        lastGuiChangeRealtime = Time.realtimeSinceStartup;
+    }
+
+    public void SaveAllWorkbenchSetups(bool showToast = false)
+    {
+        pendingAutoSave = false;
+        SaveAllSettings();
+
+        CalibrationManager calib = calibrationManager ?? FindAnyObjectByType<CalibrationManager>();
+        if (calib != null) calib.SavePoseParamsToPrefs();
+
+        PLYDirectLoader ply = FindAnyObjectByType<PLYDirectLoader>();
+        if (ply != null) ply.SaveSettings();
+
+        AiServerClient ai = GetComponent<AiServerClient>() ?? FindAnyObjectByType<AiServerClient>();
+        if (ai != null) ai.SaveSettings();
+
+        FixedRigCamera rig = FindAnyObjectByType<FixedRigCamera>();
+        if (rig != null) rig.SaveRigVisualSettings();
+
+        if (robotManual != null) robotManual.SaveSettings();
+
+        if (singleMainPanel != null) DraggableUIManager.SavePanelLayout(singleMainPanel);
+
+        if (showToast)
+        {
+            lastSavedToastUntilRealtime = Time.realtimeSinceStartup + 2.5f;
+        }
+    }
+
     private void Awake()
     {
         CleanupOrphanPhotoPlanes();
@@ -369,6 +535,10 @@ public class DobotCR10AIKController : MonoBehaviour
     private void OnEnable()
     {
         EnsureComponents();
+        if (!hasLoadedAllSettings)
+        {
+            LoadAllSettings();
+        }
         if (!Application.isPlaying && robotManual != null)
         {
             robotManual.ResetAllSlidersImmediate();
@@ -388,12 +558,18 @@ public class DobotCR10AIKController : MonoBehaviour
         LoadAllSettings();
         ScanAvailableSamples();
         RefreshAvailableSprayTemplates();
-        activeSprayTemplateSize = "S"; // Khởi tạo mặc định Mẫu cần phun là Size S
+        if (string.IsNullOrEmpty(activeSprayTemplateSize)) activeSprayTemplateSize = "S";
         hasTriggeredSizeAutoSwitch = false;
         LoadTrajectoryFile();
         LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: false);
         EnsureCanonicalJeansCanvasInitialized();
         EnsureCameraController();
+
+        if (showPhysicalWorktable)
+        {
+            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
+            worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, pl != null ? pl.estimatedTableY : 0f);
+        }
 
         // Ban đầu khi khởi động (lúc chưa bấm CHẠY), robot luôn ở cấu hình Home (0°)
         if (Application.isPlaying)
@@ -414,12 +590,43 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void OnDisable()
     {
-        SaveAllSettings();
+        if (Application.isPlaying && hasLoadedAllSettings)
+        {
+            SaveAllWorkbenchSetups();
+        }
     }
 
     private void OnDestroy()
     {
-        SaveAllSettings();
+        if (Application.isPlaying && hasLoadedAllSettings)
+        {
+            SaveAllWorkbenchSetups();
+        }
+        ReleaseRealCameraFileTexture();
+        if (inkTrailMaterial != null)
+        {
+            if (Application.isPlaying) Destroy(inkTrailMaterial);
+            else DestroyImmediate(inkTrailMaterial);
+            inkTrailMaterial = null;
+        }
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (hasLoadedAllSettings)
+        {
+            SaveAllWorkbenchSetups();
+        }
+    }
+
+    private void ReleaseRealCameraFileTexture()
+    {
+        if (realCameraFileTex != null)
+        {
+            if (Application.isPlaying) Destroy(realCameraFileTex);
+            else DestroyImmediate(realCameraFileTex);
+            realCameraFileTex = null;
+        }
     }
 
     public void SaveAllSettings()
@@ -427,6 +634,8 @@ public class DobotCR10AIKController : MonoBehaviour
         PlayerPrefs.SetInt("CR10A_ShowDock", showDockPanel ? 1 : 0);
         PlayerPrefs.SetInt("CR10A_RibbonExpanded", ribbonExpanded ? 1 : 0);
         PlayerPrefs.SetInt("CR10A_InterfaceTab", interfaceTab);
+        PlayerPrefs.SetInt("CR10A_TrajSimSubTab", trajSimSubTab);
+        PlayerPrefs.SetInt("CR10A_ConfigSubTab", configSubTab);
         PlayerPrefs.SetInt("CR10A_ShowGizmos", showGizmos ? 1 : 0);
 
         PlayerPrefs.SetFloat("CR10A_PlaybackSpeed", playbackSpeed);
@@ -434,7 +643,7 @@ public class DobotCR10AIKController : MonoBehaviour
         PlayerPrefs.SetFloat("CR10A_MaxJointAcc", maxJointAccelerationDegPerSecond2);
         PlayerPrefs.SetInt("CR10A_SprayPaint", sprayPaintEnabled ? 1 : 0);
         PlayerPrefs.SetFloat("CR10A_SprayWidth", sprayWidthMm);
-        PlayerPrefs.SetString("CR10A_TrajectoryCsv", trajectoryCsvPath);
+        PlayerPrefs.SetString("CR10A_TrajectoryCsv", trajectoryCsvPath ?? "");
 
         PlayerPrefs.SetFloat("CR10A_ToolOffsetZ", toolLength);
         PlayerPrefs.SetFloat("CR10A_ToolOffsetX", toolOffsetX);
@@ -450,26 +659,258 @@ public class DobotCR10AIKController : MonoBehaviour
         PlayerPrefs.SetString(key, string.Join(";", entries));
 
         PlayerPrefs.Save();
+
+        try
+        {
+            string setupPath = GetWorkbenchSetupFilePath();
+            string dir = Path.GetDirectoryName(setupPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+            var data = new WorkbenchSetupData
+            {
+                showDockPanel = showDockPanel,
+                ribbonExpanded = ribbonExpanded,
+                interfaceTab = interfaceTab,
+                trajSimSubTab = trajSimSubTab,
+                configSubTab = configSubTab,
+                showGizmos = showGizmos,
+                showJointSpeedControls = showJointSpeedControls,
+                showJointsSubPanel = showJointsSubPanel,
+                showCanonicalDrawPanel = showCanonicalDrawPanel,
+
+                playbackSpeed = playbackSpeed,
+                useConstantTcpSpeed = useConstantTcpSpeed,
+                targetTcpSpeedMmPerSec = targetTcpSpeedMmPerSec,
+                maxJointSpeedDegPerSecond = maxJointSpeedDegPerSecond,
+                maxJointAccelerationDegPerSecond2 = maxJointAccelerationDegPerSecond2,
+                jointSpeedDegPerSecond = (jointSpeedDegPerSecond != null && jointSpeedDegPerSecond.Length == 6)
+                    ? (float[])jointSpeedDegPerSecond.Clone()
+                    : new float[] { 10f, 10f, 10f, 10f, 10f, 10f },
+
+                sprayPaintEnabled = sprayPaintEnabled,
+                sprayWidthMm = sprayWidthMm,
+                sprayPathToleranceMm = sprayPathToleranceMm,
+                sprayJumpThresholdMm = sprayJumpThresholdMm,
+
+                toolLength = toolLength,
+                toolOffsetX = toolOffsetX,
+                toolOffsetY = toolOffsetY,
+
+                trajectoryCsvPath = trajectoryCsvPath ?? "",
+                selectedSampleName = selectedSampleName ?? "pcl_101",
+                customPlyPath = customPlyPath ?? "",
+                customImportCsvPath = customImportCsvPath ?? "",
+
+                activeSprayTemplateSize = string.IsNullOrEmpty(activeSprayTemplateSize) ? "S" : activeSprayTemplateSize,
+                customDrawZOffsetMm = customDrawZOffsetMm,
+                preserveCustomDrawingAcrossSamples = preserveCustomDrawingAcrossSamples,
+                sprayTemplateDirectory = sprayTemplateDirectory ?? "output_drawing/spray_templates",
+                saveTemplateFileName = saveTemplateFileName ?? "mau_phun_1",
+
+                showLandmarks3D = showLandmarks3D,
+                showLandmarkLabels = showLandmarkLabels,
+                showSegmentationContour3D = showSegmentationContour3D,
+                showSprayZones3D = showSprayZones3D,
+
+                selectedOcclusionAlgorithm = selectedOcclusionAlgorithm,
+                occlusionSearchRadiusMm = occlusionSearchRadiusMm,
+                occlusionKNeighbors = occlusionKNeighbors,
+                maxGunTiltAngleDeg = maxGunTiltAngleDeg,
+                occlusionZMarginMm = occlusionZMarginMm,
+                laplacianSmoothingFactor = laplacianSmoothingFactor,
+                steepSlopeAngleThresholdDeg = steepSlopeAngleThresholdDeg,
+                showHoleRegionOutlines3D = showHoleRegionOutlines3D,
+                showOcclusionHoles3D = showOcclusionHoles3D,
+                showCompensatedSurface3D = showCompensatedSurface3D,
+                showGunTiltVectors3D = showGunTiltVectors3D,
+
+                autoInpaintHolesOnLoad = autoInpaintHolesOnLoad,
+                showInpaintedSurface3D = showInpaintedSurface3D,
+                renderInpaintedAsSolidMesh = renderInpaintedAsSolidMesh,
+                highlightInpaintedMesh = highlightInpaintedMesh,
+                inpaintPointSpacingMm = inpaintPointSpacingMm,
+                inpaintPointSize = inpaintPointSize,
+
+                sprayTechParams = sprayTechParams ?? new TrajectoryEvaluationEngine.SprayTechParams(),
+                showDepositionHeatmap3D = showDepositionHeatmap3D,
+                showKeepOutZones3D = showKeepOutZones3D,
+                showPhysicalWorktable = showPhysicalWorktable,
+                showStandingMold3D = showStandingMold3D,
+
+                forceBypassSafetyInterlock = forceBypassSafetyInterlock
+            };
+
+            if (customDrawnStrokes != null)
+            {
+                for (int s = 0; s < customDrawnStrokes.Count; s++)
+                {
+                    var st = customDrawnStrokes[s];
+                    if (st == null || st.Count == 0) continue;
+                    var s2d = new Stroke2D();
+                    for (int p = 0; p < st.Count; p++)
+                    {
+                        s2d.points.Add(new StrokePoint2D(st[p].x, st[p].y));
+                    }
+                    data.customDrawnStrokes.Add(s2d);
+                }
+            }
+
+            File.WriteAllText(setupPath, JsonUtility.ToJson(data, true));
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[CR10A] Không thể lưu file cấu hình setup: {ex.Message}");
+        }
     }
 
     public void LoadAllSettings()
     {
-        showDockPanel = PlayerPrefs.GetInt("CR10A_ShowDock", 1) == 1;
-        ribbonExpanded = PlayerPrefs.GetInt("CR10A_RibbonExpanded", 1) == 1;
-        interfaceTab = PlayerPrefs.GetInt("CR10A_InterfaceTab", 0);
-        showGizmos = PlayerPrefs.GetInt("CR10A_ShowGizmos", 1) == 1;
+        bool loadedFromJson = false;
+        try
+        {
+            string setupPath = GetWorkbenchSetupFilePath();
+            if (File.Exists(setupPath))
+            {
+                string rawJson = File.ReadAllText(setupPath);
+                var data = JsonUtility.FromJson<WorkbenchSetupData>(rawJson);
+                if (data != null)
+                {
+                    showDockPanel = data.showDockPanel;
+                    ribbonExpanded = data.ribbonExpanded;
+                    interfaceTab = data.interfaceTab;
+                    trajSimSubTab = data.trajSimSubTab;
+                    configSubTab = data.configSubTab;
+                    showGizmos = data.showGizmos;
+                    showJointSpeedControls = data.showJointSpeedControls;
+                    showJointsSubPanel = data.showJointsSubPanel;
+                    showCanonicalDrawPanel = data.showCanonicalDrawPanel;
 
-        playbackSpeed = PlayerPrefs.GetFloat("CR10A_PlaybackSpeed", 1.0f);
-        maxJointSpeedDegPerSecond = PlayerPrefs.GetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
-        maxJointAccelerationDegPerSecond2 = PlayerPrefs.GetFloat("CR10A_MaxJointAcc", maxJointAccelerationDegPerSecond2);
-        sprayPaintEnabled = PlayerPrefs.GetInt("CR10A_SprayPaint", sprayPaintEnabled ? 1 : 0) == 1;
-        sprayWidthMm = PlayerPrefs.GetFloat("CR10A_SprayWidth", 4.0f);
-        trajectoryCsvPath = PlayerPrefs.GetString("CR10A_TrajectoryCsv", trajectoryCsvPath);
+                    playbackSpeed = Mathf.Clamp(data.playbackSpeed, 0.1f, 2.0f);
+                    useConstantTcpSpeed = data.useConstantTcpSpeed;
+                    targetTcpSpeedMmPerSec = Mathf.Clamp(data.targetTcpSpeedMmPerSec, 20f, 600f);
+                    maxJointSpeedDegPerSecond = Mathf.Clamp(data.maxJointSpeedDegPerSecond, 1f, 223f);
+                    maxJointAccelerationDegPerSecond2 = Mathf.Clamp(data.maxJointAccelerationDegPerSecond2, 1f, 1000f);
+                    if (data.jointSpeedDegPerSecond != null && data.jointSpeedDegPerSecond.Length == 6)
+                    {
+                        EnsureJointSpeedSettings();
+                        for (int j = 0; j < 6; j++)
+                        {
+                            jointSpeedDegPerSecond[j] = Mathf.Clamp(data.jointSpeedDegPerSecond[j], 1f, 223f);
+                        }
+                    }
 
-        toolLength = PlayerPrefs.GetFloat("CR10A_ToolOffsetZ", toolLength);
-        toolOffsetX = PlayerPrefs.GetFloat("CR10A_ToolOffsetX", toolOffsetX);
-        toolOffsetY = PlayerPrefs.GetFloat("CR10A_ToolOffsetY", toolOffsetY);
+                    sprayPaintEnabled = data.sprayPaintEnabled;
+                    sprayWidthMm = Mathf.Clamp(data.sprayWidthMm, 0.5f, 30f);
+                    sprayPathToleranceMm = Mathf.Clamp(data.sprayPathToleranceMm, 2f, 60f);
+                    sprayJumpThresholdMm = Mathf.Clamp(data.sprayJumpThresholdMm, 10f, 200f);
+
+                    toolLength = Mathf.Max(0f, data.toolLength);
+                    toolOffsetX = data.toolOffsetX;
+                    toolOffsetY = data.toolOffsetY;
+
+                    if (!string.IsNullOrEmpty(data.trajectoryCsvPath)) trajectoryCsvPath = data.trajectoryCsvPath;
+                    if (!string.IsNullOrEmpty(data.selectedSampleName)) selectedSampleName = data.selectedSampleName;
+                    if (!string.IsNullOrEmpty(data.customPlyPath)) customPlyPath = data.customPlyPath;
+                    if (!string.IsNullOrEmpty(data.customImportCsvPath)) customImportCsvPath = data.customImportCsvPath;
+
+                    if (!string.IsNullOrEmpty(data.activeSprayTemplateSize)) activeSprayTemplateSize = data.activeSprayTemplateSize;
+                    customDrawZOffsetMm = Mathf.Clamp(data.customDrawZOffsetMm, 0f, 100f);
+                    preserveCustomDrawingAcrossSamples = data.preserveCustomDrawingAcrossSamples;
+                    if (!string.IsNullOrEmpty(data.sprayTemplateDirectory)) sprayTemplateDirectory = data.sprayTemplateDirectory;
+                    if (!string.IsNullOrEmpty(data.saveTemplateFileName)) saveTemplateFileName = data.saveTemplateFileName;
+
+                    if (data.customDrawnStrokes != null && data.customDrawnStrokes.Count > 0)
+                    {
+                        customDrawnStrokes.Clear();
+                        for (int s = 0; s < data.customDrawnStrokes.Count; s++)
+                        {
+                            var st = data.customDrawnStrokes[s];
+                            if (st == null || st.points == null || st.points.Count == 0) continue;
+                            var list = new List<Vector2>(st.points.Count);
+                            for (int p = 0; p < st.points.Count; p++)
+                            {
+                                list.Add(new Vector2(st.points[p].u, st.points[p].v));
+                            }
+                            customDrawnStrokes.Add(list);
+                        }
+                        if (customDrawnStrokes.Count > 0) hasInitializedDefaultStrokes = true;
+                    }
+
+                    showLandmarks3D = data.showLandmarks3D;
+                    showLandmarkLabels = data.showLandmarkLabels;
+                    showSegmentationContour3D = data.showSegmentationContour3D;
+                    showSprayZones3D = data.showSprayZones3D;
+
+                    selectedOcclusionAlgorithm = Mathf.Clamp(data.selectedOcclusionAlgorithm, 0, 4);
+                    occlusionSearchRadiusMm = Mathf.Clamp(data.occlusionSearchRadiusMm, 12f, 80f);
+                    occlusionKNeighbors = Mathf.Clamp(data.occlusionKNeighbors, 8, 48);
+                    maxGunTiltAngleDeg = Mathf.Clamp(data.maxGunTiltAngleDeg, 10f, 45f);
+                    occlusionZMarginMm = Mathf.Clamp(data.occlusionZMarginMm, 5f, 30f);
+                    laplacianSmoothingFactor = Mathf.Clamp01(data.laplacianSmoothingFactor);
+                    steepSlopeAngleThresholdDeg = Mathf.Clamp(data.steepSlopeAngleThresholdDeg, 15f, 85f);
+                    showHoleRegionOutlines3D = data.showHoleRegionOutlines3D;
+                    showOcclusionHoles3D = data.showOcclusionHoles3D;
+                    showCompensatedSurface3D = data.showCompensatedSurface3D;
+                    showGunTiltVectors3D = data.showGunTiltVectors3D;
+
+                    autoInpaintHolesOnLoad = data.autoInpaintHolesOnLoad;
+                    showInpaintedSurface3D = data.showInpaintedSurface3D;
+                    renderInpaintedAsSolidMesh = data.renderInpaintedAsSolidMesh;
+                    highlightInpaintedMesh = data.highlightInpaintedMesh;
+                    inpaintPointSpacingMm = Mathf.Clamp(data.inpaintPointSpacingMm, 1f, 20f);
+                    inpaintPointSize = Mathf.Clamp(data.inpaintPointSize, 1f, 20f);
+
+                    if (data.sprayTechParams != null)
+                    {
+                        sprayTechParams = data.sprayTechParams;
+                        sprayTechParams.targetSpeedMmPerSec = targetTcpSpeedMmPerSec;
+                    }
+                    showDepositionHeatmap3D = data.showDepositionHeatmap3D;
+                    showKeepOutZones3D = data.showKeepOutZones3D;
+                    showPhysicalWorktable = data.showPhysicalWorktable;
+                    showStandingMold3D = data.showStandingMold3D;
+
+                    forceBypassSafetyInterlock = data.forceBypassSafetyInterlock;
+                    loadedFromJson = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[CR10A] Không thể đọc file cấu hình setup: {ex.Message}");
+        }
+
+        if (!loadedFromJson)
+        {
+            showDockPanel = PlayerPrefs.GetInt("CR10A_ShowDock", 1) == 1;
+            ribbonExpanded = PlayerPrefs.GetInt("CR10A_RibbonExpanded", 1) == 1;
+            interfaceTab = PlayerPrefs.GetInt("CR10A_InterfaceTab", 0);
+            trajSimSubTab = PlayerPrefs.GetInt("CR10A_TrajSimSubTab", 0);
+            configSubTab = PlayerPrefs.GetInt("CR10A_ConfigSubTab", 0);
+            showGizmos = PlayerPrefs.GetInt("CR10A_ShowGizmos", 1) == 1;
+
+            playbackSpeed = PlayerPrefs.GetFloat("CR10A_PlaybackSpeed", 1.0f);
+            maxJointSpeedDegPerSecond = PlayerPrefs.GetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
+            maxJointAccelerationDegPerSecond2 = PlayerPrefs.GetFloat("CR10A_MaxJointAcc", maxJointAccelerationDegPerSecond2);
+            sprayPaintEnabled = PlayerPrefs.GetInt("CR10A_SprayPaint", sprayPaintEnabled ? 1 : 0) == 1;
+            sprayWidthMm = PlayerPrefs.GetFloat("CR10A_SprayWidth", 4.0f);
+            trajectoryCsvPath = PlayerPrefs.GetString("CR10A_TrajectoryCsv", trajectoryCsvPath);
+
+            toolLength = PlayerPrefs.GetFloat("CR10A_ToolOffsetZ", toolLength);
+            toolOffsetX = PlayerPrefs.GetFloat("CR10A_ToolOffsetX", toolOffsetX);
+            toolOffsetY = PlayerPrefs.GetFloat("CR10A_ToolOffsetY", toolOffsetY);
+        }
+
         ApplyToolOffsetToTransforms();
+        if (robotManual != null)
+        {
+            robotManual.toolLengthMm = toolLength;
+            robotManual.toolOffsetX = toolOffsetX;
+            robotManual.toolOffsetY = toolOffsetY;
+            robotManual.toolOffsetZText = toolLength.ToString("F1", CultureInfo.InvariantCulture);
+            robotManual.toolOffsetXText = toolOffsetX.ToString("F1", CultureInfo.InvariantCulture);
+            robotManual.toolOffsetYText = toolOffsetY.ToString("F1", CultureInfo.InvariantCulture);
+        }
         UpdateSprayWidth(sprayWidthMm);
 
         customWaypointConfigurations.Clear();
@@ -490,6 +931,7 @@ public class DobotCR10AIKController : MonoBehaviour
                 }
             }
         }
+        hasLoadedAllSettings = true;
     }
 
     private void EnsureComponents()
@@ -527,39 +969,83 @@ public class DobotCR10AIKController : MonoBehaviour
         if (lineRenderer == null)
         {
             lineRenderer = gameObject.AddComponent<LineRenderer>();
-            lineRenderer.startWidth = sprayWidthMm * 0.001f;
-            lineRenderer.endWidth = sprayWidthMm * 0.001f;
-            lineRenderer.material = new Material(Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default"));
-            lineRenderer.material.color = inkColor;
             lineRenderer.useWorldSpace = true;
         }
-        else
-        {
-            lineRenderer.startWidth = sprayWidthMm * 0.001f;
-            lineRenderer.endWidth = sprayWidthMm * 0.001f;
-            if (lineRenderer.material != null)
-                lineRenderer.material.color = inkColor;
-        }
+        EnsureInkTrailMaterial();
+        lineRenderer.sharedMaterial = inkTrailMaterial;
+        lineRenderer.startWidth = sprayWidthMm * 0.001f;
+        lineRenderer.endWidth = sprayWidthMm * 0.001f;
+        lineRenderer.startColor = inkColor;
+        lineRenderer.endColor = inkColor;
+        lineRenderer.numCapVertices = 4;
+        lineRenderer.numCornerVertices = 4;
+        lineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        lineRenderer.receiveShadows = false;
 
         ApplyToolOffsetToTransforms();
+    }
+
+    private Material inkTrailMaterial;
+
+    private void EnsureInkTrailMaterial()
+    {
+        if (inkTrailMaterial == null)
+        {
+            Shader sh = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color");
+            if (sh != null)
+            {
+                inkTrailMaterial = new Material(sh);
+                inkTrailMaterial.name = "CR10A_SprayInk_RuntimeMat";
+                inkTrailMaterial.hideFlags = HideFlags.DontSave;
+            }
+        }
+        if (inkTrailMaterial != null)
+        {
+            inkTrailMaterial.color = inkColor;
+            if (inkTrailMaterial.HasProperty("_BaseColor"))
+            {
+                inkTrailMaterial.SetColor("_BaseColor", inkColor);
+            }
+        }
     }
 
     public void UpdateSprayWidth(float widthMm)
     {
         sprayWidthMm = Mathf.Clamp(widthMm, 0.5f, 30.0f);
+        float widthM = sprayWidthMm * 0.001f;
         if (lineRenderer != null)
         {
-            lineRenderer.startWidth = sprayWidthMm * 0.001f;
-            lineRenderer.endWidth = sprayWidthMm * 0.001f;
+            lineRenderer.startWidth = widthM;
+            lineRenderer.endWidth = widthM;
+        }
+        for (int i = 0; i < committedTrailRenderers.Count; i++)
+        {
+            if (committedTrailRenderers[i] != null)
+            {
+                committedTrailRenderers[i].startWidth = widthM;
+                committedTrailRenderers[i].endWidth = widthM;
+            }
         }
     }
 
     public void SetInkColor(Color color)
     {
         inkColor = color;
-        if (lineRenderer != null && lineRenderer.material != null)
+        EnsureInkTrailMaterial();
+        if (lineRenderer != null)
         {
-            lineRenderer.material.color = inkColor;
+            lineRenderer.sharedMaterial = inkTrailMaterial;
+            lineRenderer.startColor = inkColor;
+            lineRenderer.endColor = inkColor;
+        }
+        for (int i = 0; i < committedTrailRenderers.Count; i++)
+        {
+            if (committedTrailRenderers[i] != null)
+            {
+                committedTrailRenderers[i].sharedMaterial = inkTrailMaterial;
+                committedTrailRenderers[i].startColor = inkColor;
+                committedTrailRenderers[i].endColor = inkColor;
+            }
         }
     }
 
@@ -865,6 +1351,10 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void Update()
     {
+        if (pendingAutoSave && hasLoadedAllSettings && (Time.realtimeSinceStartup - lastGuiChangeRealtime) >= 0.35f)
+        {
+            SaveAllWorkbenchSetups();
+        }
         CleanupOrphanPhotoPlanes();
         // Không chạy quỹ đạo (về Home, đi tới điểm thủ công, dừng...) -> luôn TẮT phun
         if (!(isPlaying && Application.isPlaying) || isMovingToManualTarget)
@@ -893,20 +1383,74 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             if (!paintingStarted && currentWaypointIndex == 0)
             {
+                cycleTimerSec = 0f;
+                cartesianSegProgress = 0f;
+                recordedSpraySpeedsMmS.Clear();
                 if (robotManual != null)
                     robotManual.ikStatus = "Đang di chuyển từ Home đến điểm đầu quỹ đạo...";
+            }
+            else
+            {
+                cycleTimerSec += Time.deltaTime;
             }
 
             if (MoveTowardWaypoint(currentWaypointIndex, Time.deltaTime))
             {
                 paintingStarted = true;
+                cartesianSegProgress = 0f;
+                if (currentWaypointIndex + 1 >= waypoints.Count)
+                {
+                    measuredCycleTimeSec = cycleTimerSec;
+                    UpdateMeasuredTcpSpeedCv();
+                    cycleTimerSec = 0f;
+                    recordedSpraySpeedsMmS.Clear();
+                }
                 currentWaypointIndex = (currentWaypointIndex + 1) % waypoints.Count;
                 if (robotManual != null)
-                    robotManual.ikStatus = $"Đang vận hành quỹ đạo ({currentWaypointIndex + 1}/{waypoints.Count})...";
+                    robotManual.ikStatus = $"Đang vận hành quỹ đạo ({currentWaypointIndex + 1}/{waypoints.Count}) | v_TCP={liveTcpSpeedMmPerSec:F0} mm/s...";
             }
+
+            // Đo vận tốc TCP thực tế thời gian thực để tính độ đều tốc độ V_cv (%)
+            if (tcpTransform != null)
+            {
+                if (hasLastFrameTcpWorldPos && Time.deltaTime > 1e-4f)
+                {
+                    float instSpeedMmS = Vector3.Distance(tcpTransform.position, lastFrameTcpWorldPos) * 1000f / Time.deltaTime;
+                    liveTcpSpeedMmPerSec = Mathf.Lerp(liveTcpSpeedMmPerSec, instSpeedMmS, 0.25f);
+                    if (isSprayingNow && instSpeedMmS > 5f)
+                    {
+                        recordedSpraySpeedsMmS.Add(instSpeedMmS);
+                        if (recordedSpraySpeedsMmS.Count > 2000) recordedSpraySpeedsMmS.RemoveAt(0);
+                        UpdateMeasuredTcpSpeedCv();
+                    }
+                }
+                lastFrameTcpWorldPos = tcpTransform.position;
+                hasLastFrameTcpWorldPos = true;
+            }
+        }
+        else
+        {
+            hasLastFrameTcpWorldPos = false;
+            liveTcpSpeedMmPerSec = 0f;
         }
 
         UpdateInkTrail();
+    }
+
+    private void UpdateMeasuredTcpSpeedCv()
+    {
+        if (recordedSpraySpeedsMmS.Count < 3) return;
+        double sum = 0;
+        for (int i = 0; i < recordedSpraySpeedsMmS.Count; i++) sum += recordedSpraySpeedsMmS[i];
+        double mean = sum / recordedSpraySpeedsMmS.Count;
+        if (mean < 1e-3) return;
+        double sq = 0;
+        for (int i = 0; i < recordedSpraySpeedsMmS.Count; i++)
+        {
+            double d = recordedSpraySpeedsMmS[i] - mean;
+            sq += d * d;
+        }
+        measuredTcpSpeedCvPct = (float)(Math.Sqrt(sq / recordedSpraySpeedsMmS.Count) / mean * 100.0);
     }
 
     /// <summary>
@@ -1026,6 +1570,56 @@ public class DobotCR10AIKController : MonoBehaviour
             return true;
         }
 
+        // Chế độ nội suy vận tốc TCP đều (Cartesian Linear Path) trên các đoạn đang phun:
+        // Giữ v_TCP = const (không dừng giật tại mỗi waypoint), giải IK giải tích trực tuyến (< 0.04ms)
+        if (useConstantTcpSpeed && paintingStarted && index > 0 && waypoint.sprayOn)
+        {
+            WaypointData prevWp = waypoints[index - 1];
+            float segLenMm = Vector3.Distance(prevWp.targetPosGlobal_mm, waypoint.targetPosGlobal_mm);
+            if (segLenMm >= 0.5f && segLenMm <= 250f)
+            {
+                float speedMmS = Mathf.Clamp(targetTcpSpeedMmPerSec * Mathf.Clamp(playbackSpeed, 0.1f, 2.0f), 15f, 800f);
+                cartesianSegProgress += (speedMmS * Mathf.Max(0f, deltaTime)) / segLenMm;
+                float t = Mathf.Clamp01(cartesianSegProgress);
+
+                Vector3 interpPosMm = Vector3.Lerp(prevWp.targetPosGlobal_mm, waypoint.targetPosGlobal_mm, t);
+                Quaternion qA = GetWaypointFlangeRotation(prevWp);
+                Quaternion qB = GetWaypointFlangeRotation(waypoint);
+                Quaternion interpRot = Quaternion.Slerp(qA, qB, t);
+
+                float[] curQ = { robotManual.axis0, robotManual.axis1, robotManual.axis2, robotManual.axis3, robotManual.axis4, robotManual.axis5 };
+                var sols = DobotCR10AKinematics.SolveTcpPose(
+                    interpPosMm, interpRot, curQ, toolLength,
+                    useAdaptiveTilt: true, maxTiltDeg: sprayTechParams != null ? sprayTechParams.maxTiltDeg : 30f,
+                    toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+
+                if (sols != null && sols.Count > 0)
+                {
+                    var best = sols[0];
+                    robotManual.axis0 = (float)best.jointsRad[0];
+                    robotManual.axis1 = (float)best.jointsRad[1];
+                    robotManual.axis2 = (float)best.jointsRad[2];
+                    robotManual.axis3 = (float)best.jointsRad[3];
+                    robotManual.axis4 = (float)best.jointsRad[4];
+                    robotManual.axis5 = (float)best.jointsRad[5];
+                    robotManual.ApplyRotations();
+
+                    bool sprayNow = sprayPaintEnabled && tcpTransform != null && waypoint.sprayOn;
+                    if (sprayNow && !prevWp.sprayOn && cartesianSegProgress <= (speedMmS * Mathf.Max(0f, deltaTime)) / segLenMm + 1e-4f)
+                    {
+                        SetSprayState(false);
+                    }
+                    SetSprayState(sprayNow);
+                    if (sprayNow)
+                    {
+                        RecordSprayInkPoint(tcpTransform.position);
+                    }
+
+                    return cartesianSegProgress >= 1f;
+                }
+            }
+        }
+
         sprayTargetIndex = index;
         bool arrived = MoveTowardJointAngles(waypoint.jointAngles_rad, deltaTime, true);
         sprayTargetIndex = -1;
@@ -1111,15 +1705,155 @@ public class DobotCR10AIKController : MonoBehaviour
             && IsTcpOnTrajectorySegment(sprayTargetIndex);
         SetSprayState(sprayNow);
 
-        if (sprayNow && (actualTcpTrail.Count == 0 ||
-            Vector3.Distance(actualTcpTrail[actualTcpTrail.Count - 1], tcpTransform.position) >= 0.001f))
+        if (sprayNow)
         {
-            actualTcpTrail.Add(tcpTransform.position);
-            if (actualTcpTrail.Count > 7000)
-                actualTcpTrail.RemoveRange(0, actualTcpTrail.Count - 7000);
+            RecordSprayInkPoint(tcpTransform.position);
         }
 
         return arrived;
+    }
+
+    private void RecordSprayInkPoint(Vector3 tcpWorldPos)
+    {
+        Vector3 inkPt = ProjectSprayInkPointToSurface(tcpWorldPos);
+        if (actualTcpTrail.Count > 0)
+        {
+            float d = Vector3.Distance(actualTcpTrail[actualTcpTrail.Count - 1], inkPt);
+            if (d < 0.0015f) return;
+            // Nếu điểm phun nhảy quá 5.5 cm (chuyển nét / vượt khe) -> ngắt đoạn cũ để không vẽ vệt đỏ nối ngang qua không trung
+            if (d > 0.055f)
+            {
+                CommitCurrentTrailSegment();
+            }
+        }
+        actualTcpTrail.Add(inkPt);
+        if (actualTcpTrail.Count > 7000)
+        {
+            actualTcpTrail.RemoveRange(0, actualTcpTrail.Count - 7000);
+        }
+    }
+
+    private PLYDirectLoader cachedPlyLoaderForSpray;
+
+    /// <summary>
+    /// Chiếu điểm phun từ đầu súng (TCP) theo đúng trục vòi phun (flange.forward = z6) xuống bề mặt thực
+    /// của 3D Mesh / Point Cloud / Khuôn 3D (+1.8 mm theo pháp tuyến) để vệt mực bám khít mặt vải.
+    /// Lưu ý: Không dùng tcpTransform.forward vì trong scene `tcp` xoay -90° quanh Y (hướng ngang)!
+    /// </summary>
+    private Vector3 ProjectSprayInkPointToSurface(Vector3 tcpWorldPos)
+    {
+        const float surfaceLiftM = 0.0018f;
+        bool moldActive = (standingMoldObj != null && standingMoldObj.activeInHierarchy);
+
+        // Trục vòi phun thực tế là trục +Z của mặt bích cuối (axis5 / parent của tcp)
+        Transform flange = (tcpTransform != null) ? tcpTransform.parent : null;
+        if (flange == null && robotManual != null && robotManual.axisTransforms != null && robotManual.axisTransforms.Length >= 6)
+        {
+            flange = robotManual.axisTransforms[5];
+        }
+        Vector3 sprayDir = (flange != null) ? flange.forward : Vector3.down;
+        if (sprayDir.sqrMagnitude < 1e-5f) sprayDir = Vector3.down;
+        sprayDir.Normalize();
+
+        // Đảm bảo tia phun luôn hướng xuống bề mặt vải khi dùng phôi đặt nằm ngang
+        if (!moldActive)
+        {
+            if (sprayDir.y > 0.1f) sprayDir = -sprayDir;
+            if (sprayDir.y > -0.25f) sprayDir = Vector3.down;
+        }
+
+        Ray sprayRay = new Ray(tcpWorldPos - sprayDir * 0.015f, sprayDir);
+
+        // 1. Ưu tiên khuôn chân đứng 3D nếu đang bật
+        if (moldActive)
+        {
+            Collider moldCol = standingMoldObj.GetComponent<Collider>();
+            if (moldCol != null && moldCol.Raycast(sprayRay, out RaycastHit moldHit, 0.50f))
+            {
+                return moldHit.point + moldHit.normal * surfaceLiftM;
+            }
+        }
+
+        if (cachedPlyLoaderForSpray == null)
+        {
+            cachedPlyLoaderForSpray = FindAnyObjectByType<PLYDirectLoader>();
+        }
+
+        // 2. Raycast trực tiếp theo tia súng phun lên WorkpieceSurfaceMesh & lớp vá InpaintedJeansSurface_Mesh
+        bool foundHit = false;
+        float bestDist = float.MaxValue;
+        Vector3 bestPt = tcpWorldPos;
+        Vector3 bestNorm = Vector3.up;
+
+        if (cachedPlyLoaderForSpray != null && cachedPlyLoaderForSpray.RaycastSurfaceMesh(sprayRay, 0.45f, out RaycastHit meshHit))
+        {
+            foundHit = true;
+            bestDist = meshHit.distance;
+            bestPt = meshHit.point;
+            bestNorm = meshHit.normal;
+        }
+        if (inpaintedMeshObject != null && inpaintedMeshObject.activeInHierarchy)
+        {
+            MeshCollider patchCol = inpaintedMeshObject.GetComponent<MeshCollider>();
+            if (patchCol != null && patchCol.Raycast(sprayRay, out RaycastHit patchHit, 0.45f) && patchHit.distance < bestDist)
+            {
+                foundHit = true;
+                bestDist = patchHit.distance;
+                bestPt = patchHit.point;
+                bestNorm = patchHit.normal;
+            }
+        }
+        if (foundHit)
+        {
+            float horizShift = Vector2.Distance(new Vector2(bestPt.x, bestPt.z), new Vector2(tcpWorldPos.x, tcpWorldPos.z));
+            if (moldActive || horizShift <= 0.14f)
+            {
+                if (bestNorm.y < 0f && !moldActive) bestNorm = -bestNorm;
+                return bestPt + bestNorm.normalized * surfaceLiftM;
+            }
+        }
+
+        // 3. Chế độ Point Cloud (hoặc tia nghiêng ngoài mép collider): giao tia phun với lưới cao độ bề mặt vải 3D (2 bước lặp hội tụ)
+        if (cachedPlyLoaderForSpray != null)
+        {
+            float queryX = tcpWorldPos.x;
+            float queryZ = tcpWorldPos.z;
+            float surfY = lastGarmentMedianY;
+            Vector3 surfNorm = Vector3.up;
+
+            if (sprayDir.y < -0.25f)
+            {
+                // Bước lặp 1 & 2: tìm giao điểm (X, Z) chính xác của tia súng nghiêng với bề mặt lồi lõm Point Cloud
+                for (int iter = 0; iter < 2; iter++)
+                {
+                    if (SampleCompensatedSurface(queryX, queryZ, out float cy, out Vector3 cn))
+                    {
+                        surfY = cy; surfNorm = cn;
+                    }
+                    else if (cachedPlyLoaderForSpray.SampleSurfaceWorldHeightAndNormal(queryX, queryZ, out float gy, out Vector3 gn))
+                    {
+                        surfY = gy; surfNorm = gn;
+                    }
+                    float t = Mathf.Clamp((surfY - tcpWorldPos.y) / sprayDir.y, 0f, 0.45f);
+                    Vector3 p = tcpWorldPos + sprayDir * t;
+                    queryX = p.x;
+                    queryZ = p.z;
+                }
+            }
+
+            if (SampleCompensatedSurface(queryX, queryZ, out float finalCompY, out Vector3 finalCompN))
+            {
+                if (finalCompN.y < 0f) finalCompN = -finalCompN;
+                return new Vector3(queryX, finalCompY, queryZ) + finalCompN.normalized * surfaceLiftM;
+            }
+            if (cachedPlyLoaderForSpray.SampleSurfaceWorldHeightAndNormal(queryX, queryZ, out float finalGridY, out Vector3 finalGridN))
+            {
+                if (finalGridN.y < 0f) finalGridN = -finalGridN;
+                return new Vector3(queryX, finalGridY, queryZ) + finalGridN.normalized * surfaceLiftM;
+            }
+        }
+
+        return tcpWorldPos;
     }
 
     // =========================================================================
@@ -1180,14 +1914,21 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         if (actualTcpTrail.Count >= 2 && lineRenderer != null)
         {
+            EnsureInkTrailMaterial();
             GameObject go = new GameObject($"SprayTrailSegment_{committedTrailRenderers.Count}");
             go.hideFlags = HideFlags.DontSave;
             go.transform.SetParent(transform, false);
             LineRenderer lr = go.AddComponent<LineRenderer>();
             lr.useWorldSpace = true;
-            lr.sharedMaterial = lineRenderer.sharedMaterial;
+            lr.sharedMaterial = inkTrailMaterial != null ? inkTrailMaterial : lineRenderer.sharedMaterial;
             lr.startWidth = sprayWidthMm * 0.001f;
             lr.endWidth = sprayWidthMm * 0.001f;
+            lr.startColor = inkColor;
+            lr.endColor = inkColor;
+            lr.numCapVertices = 4;
+            lr.numCornerVertices = 4;
+            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            lr.receiveShadows = false;
             lr.positionCount = actualTcpTrail.Count;
             lr.SetPositions(actualTcpTrail.ToArray());
             committedTrailRenderers.Add(lr);
@@ -1310,9 +2051,19 @@ public class DobotCR10AIKController : MonoBehaviour
     /// <summary>
     /// Nạp một file PLY bất kỳ theo đường dẫn tuyệt đối hoặc tương đối
     /// </summary>
+    public void StopPlaybackForNewFrame()
+    {
+        isPlaying = false;
+        isMovingToManualTarget = false;
+        isMovingToHome = false;
+        SetSprayState(false);
+    }
+
     public void SelectSampleByFullPath(string fullPath)
     {
         if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return;
+        StopPlaybackForNewFrame();
+        waypoints.Clear();
         selectedSampleName = Path.GetFileNameWithoutExtension(fullPath);
         customPlyPath = fullPath;
         ReloadPointCloudFromPath(fullPath);
@@ -1329,6 +2080,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             LoadNamedTrajectory(candidateTraj);
         }
+        SaveAllSettings();
     }
 
     /// <summary>
@@ -1390,6 +2142,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             LoadNamedTrajectory(candidateTraj);
         }
+        SaveAllSettings();
     }
 
     /// <summary>
@@ -1404,11 +2157,124 @@ public class DobotCR10AIKController : MonoBehaviour
         SelectSample(availableSamples[selectedSampleIdx], true);
     }
 
+    public static float WorkbenchHeaderHeight { get; private set; } = 86f;
+    public static float WorkbenchDockWidth { get; private set; } = 540f;
+    public static bool WorkbenchDockVisible { get; private set; }
+
+    public CalibrationManager EnsureCalibrationManager()
+    {
+        if (calibrationManager == null)
+        {
+            calibrationManager = GetComponent<CalibrationManager>() ?? FindAnyObjectByType<CalibrationManager>();
+            if (calibrationManager == null)
+            {
+                calibrationManager = gameObject.AddComponent<CalibrationManager>();
+            }
+        }
+        return calibrationManager;
+    }
+
+    private int trajSimSubTab = 0; // 0: Mô phỏng, 1: Quỹ đạo 2D->3D
+    private int configSubTab = 0;  // 0: Robot & Đầu phun, 1: Hiệu chuẩn Camera
+    public bool showCameraAxesInCalibration = true; // Hiện trục tọa độ XYZ của Camera khi đang hiệu chuẩn
+
+    private bool ShouldDrawCameraAxes3D()
+    {
+        return showCameraAxesInCalibration && showDockPanel && (interfaceTab == 9 || (interfaceTab == 1 && configSubTab == 1));
+    }
+
+    private static readonly string[] SinglePanelTabTitles =
+    {
+        "4. Quỹ đạo & Mô phỏng",
+        "7. Cấu hình & Hiệu chuẩn",
+        "1. Nạp phôi 3D",
+        "4. Quỹ đạo & Mô phỏng",
+        "6. Xuất / Nhập",
+        "8. Kiểm tra an toàn",
+        "2. Views (Hiển thị 3D)",
+        "3. Vá lỗ & 3D Mesh",
+        "5. Đánh giá & Gauss",
+        "7. Cấu hình & Hiệu chuẩn"
+    };
+
+    private void EnsureFloatingPanelsInitialized(float topSafeY)
+    {
+        if (floatingPanelsInitialized && singleMainPanel != null) return;
+
+        // Quy đổi tab cũ sang cấu trúc gộp mới
+        if (interfaceTab == 0) { interfaceTab = 3; trajSimSubTab = 0; }
+        else if (interfaceTab == 9) { interfaceTab = 1; configSubTab = 1; }
+
+        float w = Mathf.Clamp(Screen.width * 0.34f, 400f, 520f);
+        float h = Mathf.Max(200f, Screen.height - topSafeY);
+        float rightX = Mathf.Max(0f, Screen.width - w);
+
+        singleMainPanel = new DraggableUIManager.PanelState(
+            "main_inspector",
+            SinglePanelTabTitles[Mathf.Clamp(interfaceTab, 0, SinglePanelTabTitles.Length - 1)],
+            new Rect(rightX, topSafeY, w, h),
+            new Vector2(360f, 260f),
+            openByDefault: true
+        );
+        singleMainPanel.isDockedRight = true;
+        DraggableUIManager.LoadPanelLayout(singleMainPanel, topSafeY);
+        singleMainPanel.isDockedRight = true;
+        singleMainPanel.isOpen = showDockPanel;
+        floatingPanelsInitialized = true;
+    }
+
+    public void OpenOrFocusPanel(int panelIdx)
+    {
+        EnsureFloatingPanelsInitialized(WorkbenchHeaderHeight);
+        if (panelIdx < 0 || panelIdx >= SinglePanelTabTitles.Length) return;
+
+        if (panelIdx == 0)
+        {
+            interfaceTab = 3;
+            trajSimSubTab = 0;
+        }
+        else if (panelIdx == 9)
+        {
+            interfaceTab = 1;
+            configSubTab = 1;
+        }
+        else
+        {
+            interfaceTab = panelIdx;
+        }
+
+        showDockPanel = true;
+        singleMainPanel.isDockedRight = true;
+        singleMainPanel.isOpen = true;
+        singleMainPanel.isCollapsed = false;
+        singleMainPanel.scrollPos = Vector2.zero;
+        singleMainPanel.title = SinglePanelTabTitles[Mathf.Clamp(interfaceTab, 0, SinglePanelTabTitles.Length - 1)];
+        MarkSettingsDirty();
+    }
+
+    public void ResetAllPanelLayouts()
+    {
+        EnsureFloatingPanelsInitialized(WorkbenchHeaderHeight);
+        float topY = WorkbenchHeaderHeight;
+        float w = Mathf.Clamp(Screen.width * 0.34f, 400f, 520f);
+        float h = Mathf.Max(200f, Screen.height - topY);
+        singleMainPanel.isDockedRight = true;
+        singleMainPanel.defaultRect = new Rect(Mathf.Max(0f, Screen.width - w), topY, w, h);
+        DraggableUIManager.ResetPanelToDefault(singleMainPanel, topY);
+        singleMainPanel.isOpen = true;
+        showDockPanel = true;
+        PlayerPrefs.Save();
+    }
+
     private void OnGUI()
     {
         CleanupOrphanPhotoPlanes();
         AntigravityUITheme.EnsureInitialized();
+        AntigravityUITheme.ApplyDarkScrollbarsToCurrentSkin();
+        DraggableUIManager.BeginFrame();
+
         if (robotManual == null) EnsureComponents();
+        EnsureCalibrationManager();
         if (landmarks3D.Count == 0) LoadLandmarksAndSegmentationForSample(selectedSampleName);
         EnsureCanonicalJeansCanvasInitialized();
 
@@ -1416,494 +2282,188 @@ public class DobotCR10AIKController : MonoBehaviour
         DrawViewport3DOverlaysInGUI();
 
         float screenW = Screen.width;
-        float headerHeight = 34f;
-        float stripHeight = ribbonExpanded ? 64f : 0f;
-        float totalRibbonH = headerHeight + stripHeight;
+        bool narrow = screenW < 1180f;
+        float navRows = narrow ? 2f : 1f;
+        float headerTopH = 44f;
+        float navH = navRows * 34f + 8f;
+        float totalHeaderH = headerTopH + navH;
 
-        // 1. THANH RUY BĂNG TRÊN CÙNG (TOP RIBBON BAR - NỀN TỐI PHẲNG ANTIGRAVITY)
-        GUI.DrawTexture(new Rect(0, 0, screenW, totalRibbonH), AntigravityUITheme.TexBgHeader);
-        GUI.DrawTexture(new Rect(0, totalRibbonH - 1, screenW, 1), AntigravityUITheme.TexBorder);
-        if (ribbonExpanded)
-        {
-            GUI.DrawTexture(new Rect(0, headerHeight, screenW, stripHeight), AntigravityUITheme.TexBgStrip);
-            GUI.DrawTexture(new Rect(0, headerHeight - 1, screenW, 1), AntigravityUITheme.TexBorder);
-        }
+        WorkbenchHeaderHeight = totalHeaderH;
+        EnsureFloatingPanelsInitialized(totalHeaderH);
 
-        // Header Line: Logo + 8 Tabs cô đọng + Nút hành động nhanh
-        GUILayout.BeginArea(new Rect(10, 3, screenW - 20, headerHeight));
-        GUILayout.BeginHorizontal();
+        // Đăng ký thanh Header trên cùng vào vùng chặn chuột 3D
+        DraggableUIManager.RegisterBlockingRect(new Rect(0f, 0f, screenW, totalHeaderH));
 
-        // Brand Title
-        GUILayout.Label("CR10A WORKBENCH", AntigravityUITheme.StyleHeaderTitle, GUILayout.Width(165));
+        // 1. NỀN THANH TIÊU ĐỀ & ĐIỀU HƯỚNG (GỌN GÀNG, KHÔNG CÓ THANH TRƯỢT NGANG!)
+        GUI.DrawTexture(new Rect(0, 0, screenW, totalHeaderH), AntigravityUITheme.TexBgHeader);
+        GUI.DrawTexture(new Rect(0, headerTopH - 1, screenW, 1), AntigravityUITheme.TexBorder);
+        GUI.DrawTexture(new Rect(0, totalHeaderH - 1, screenW, 1), AntigravityUITheme.TexBorder);
 
-        // 8 Tab chuẩn (Tên cô đọng, thanh lịch, gọn gàng)
-        string[] tabNames = {
-            "MÔ PHỎNG",
-            "CẤU HÌNH",
-            "POINT CLOUD",
-            "QUỸ ĐẠO",
-            "XUẤT/NHẬP",
-            "CẢNH BÁO",
-            "MỐC & SEG",
-            "BÙ CHỖ KHUẤT"
-        };
-        float[] tabWidths = { 88f, 82f, 104f, 90f, 96f, 88f, 96f, 108f };
+        GUI.Label(new Rect(14, 6, 220, 22), "Dobot CR10A", AntigravityUITheme.StyleHeaderTitle);
+        string savedNote = (Time.realtimeSinceStartup < lastSavedToastUntilRealtime) ? " | Đã lưu setup" : "";
+        string subInfo = $"Phôi: {(string.IsNullOrEmpty(selectedSampleName) ? "-" : selectedSampleName)} | Size {detectedJeansSize} | {(hasCriticalErrors ? "Lỗi an toàn" : "Sẵn sàng")}{savedNote}";
+        GUI.Label(new Rect(15, 26, 420, 16), subInfo, hasCriticalErrors ? AntigravityUITheme.StyleLabelRed : AntigravityUITheme.StyleLabelMuted);
 
-        for (int t = 0; t < tabNames.Length; t++)
-        {
-            bool isCurrent = (interfaceTab == t);
-            if (AntigravityUITheme.RibbonTab(tabNames[t], isCurrent, tabWidths[t], 26f))
-            {
-                interfaceTab = t;
-                showDockPanel = true;
-                if (t == 5 && diagnosticResults.Count == 0) RunDiagnostics();
-                if (t == 6)
-                {
-                    RobotCameraController camCtrl = EnsureCameraController();
-                    if (camCtrl != null) camCtrl.SetPresetTopDown();
-                    LoadLandmarksAndSegmentationForSample(selectedSampleName);
-                }
-                if (t == 7)
-                {
-                    if (detectedHoleCount == 0) DetectOcclusionAndHoles();
-                }
-            }
-        }
+        // Nút thao tác nhanh bên phải thanh trên cùng
+        float btnH = 28f;
+        float btnY = 8f;
+        float rx = screenW - 12f;
 
-        GUILayout.FlexibleSpace();
-
-        // Nút Bật/Tắt Đường Dự Kiến Phun 3D (Đường Cyan)
-        string trajQuickText = showGizmos ? "Cyan: BẬT" : "Cyan: TẮT";
-        GUIStyle trajQuickStyle = showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-        if (GUILayout.Button(trajQuickText, trajQuickStyle, GUILayout.Height(24)))
-        {
-            showGizmos = !showGizmos;
-        }
-
-        GUILayout.Space(4);
-
-        // Nút Bật/Tắt Dock bên phải
-        if (GUILayout.Button(showDockPanel ? "Ẩn Bảng" : "Hiện Bảng", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        rx -= 82f;
+        if (GUI.Button(new Rect(rx, btnY, 82f, btnH), showDockPanel ? "Ẩn bảng" : "Mở bảng", AntigravityUITheme.StyleButton))
         {
             showDockPanel = !showDockPanel;
+            singleMainPanel.isOpen = showDockPanel;
+            MarkSettingsDirty();
         }
-
-        GUILayout.Space(4);
-
-        // Ribbon Collapse/Expand Toggle
-        if (GUILayout.Button(ribbonExpanded ? "Thu Ruy Băng" : "Mở Ruy Băng", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        rx -= 94f;
+        if (GUI.Button(new Rect(rx, btnY, 88f, btnH), "Cỡ mặc định", AntigravityUITheme.StyleButton))
         {
-            ribbonExpanded = !ribbonExpanded;
+            ResetAllPanelLayouts();
         }
-
-        GUILayout.EndHorizontal();
-        GUILayout.EndArea();
-
-        // 2. DẢI CÔNG CỤ RUY BĂNG NGANG (COMMAND RIBBON STRIP)
-        if (ribbonExpanded)
+        rx -= 84f;
+        if (GUI.Button(new Rect(rx, btnY, 78f, btnH), "Lưu setup", AntigravityUITheme.StyleButton))
         {
-            GUILayout.BeginArea(new Rect(12, headerHeight + 2, screenW - 24, stripHeight - 4));
-            GUILayout.BeginHorizontal();
-
-            RobotCameraController rcc = EnsureCameraController();
-
-            if (interfaceTab == 0)
-            {
-                // =============================================================
-                // TAB 0: MÔ PHỎNG (SIM) - PLAY, STOP, RESET, TỐC ĐỘ 1X MẶC ĐỊNH
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(270));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button(isPlaying ? "TẠM DỪNG" : "CHẠY", isPlaying ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    isPlaying = !isPlaying;
-                    if (isPlaying)
-                    {
-                        isMovingToManualTarget = false;
-                        isMovingToHome = false;
-                    }
-                }
-                if (GUILayout.Button("DỪNG", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    isPlaying = false;
-                    isMovingToManualTarget = false;
-                }
-                if (GUILayout.Button("RESET HOME", isMovingToHome ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    MoveToHomeGradually();
-                    ClearInkTrail();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("VẬN HÀNH MÔ PHỎNG", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(310));
-                GUILayout.BeginHorizontal();
-                GUILayout.Label($"Tốc độ: {playbackSpeed:F1}×", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(80));
-                playbackSpeed = GUILayout.HorizontalSlider(playbackSpeed, 0.1f, 2.0f);
-                GUILayout.EndHorizontal();
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("0.5×", AntigravityUITheme.StyleButton, GUILayout.Height(18))) playbackSpeed = 0.5f;
-                if (GUILayout.Button("1.0× (Chuẩn)", Mathf.Abs(playbackSpeed - 1.0f) < 0.05f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(18))) playbackSpeed = 1.0f;
-                if (GUILayout.Button("1.5×", AntigravityUITheme.StyleButton, GUILayout.Height(18))) playbackSpeed = 1.5f;
-                if (GUILayout.Button("2.0×", AntigravityUITheme.StyleButton, GUILayout.Height(18))) playbackSpeed = 2.0f;
-                GUILayout.EndHorizontal();
-                GUILayout.Label("TỐC ĐỘ MÔ PHỎNG (1× CHUẨN)", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(250));
-                int wpTotal = Mathf.Max(1, waypoints.Count);
-                int wpCur = Mathf.Clamp(currentWaypointIndex, 0, wpTotal - 1);
-                float progress = (float)wpCur / (wpTotal - 1) * 100f;
-                GUILayout.Label($"Điểm: {wpCur + 1} / {wpTotal} ({progress:F0}%)", AntigravityUITheme.StyleLabelCyan);
-                string simStatus = isPlaying ? (isSprayingNow ? "🟢 ĐANG PHUN" : "🟡 CHUYỂN TIẾP") : (isMovingToHome ? "Đang về Home..." : "Đang chờ.");
-                GUILayout.Label(simStatus, isSprayingNow ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelMuted);
-                GUILayout.Label("TRẠNG THÁI", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 1)
-            {
-                // =============================================================
-                // TAB 1: CẤU HÌNH ROBOT - VẬN TỐC KHỚP, OFFSET TCP, MÀU & CỠ ĐƯỜNG PHUN
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(250));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button(showJointsSubPanel ? "Đóng Bảng Khớp" : "Mở Bảng Khớp", showJointSubPanelActive() ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    showJointsSubPanel = !showJointsSubPanel;
-                    showDockPanel = true;
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label($"Gia tốc: {maxJointAccelerationDegPerSecond2:F0}°/s² | V_max: {maxJointSpeedDegPerSecond:F0}°/s", AntigravityUITheme.StyleLabelMuted);
-                GUILayout.Label("VẬN TỐC & GIA TỐC KHỚP", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
-                GUILayout.BeginHorizontal();
-                GUILayout.Label($"Offset TCP: Z={toolLength:F1}mm (X={toolOffsetX:F1}, Y={toolOffsetY:F1})", AntigravityUITheme.StyleLabelCyan);
-                GUILayout.EndHorizontal();
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("0 (Bích)", Mathf.Abs(toolLength) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(18))) SetToolOffset(0f, 0f, 0f);
-                if (GUILayout.Button("50 (Bút)", Mathf.Abs(toolLength - 50f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(18))) SetToolOffset(50f, 0f, 0f);
-                if (GUILayout.Button("100 (Súng)", Mathf.Abs(toolLength - 100f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(18))) SetToolOffset(100f, 0f, 0f);
-                if (GUILayout.Button("150 (Kẹp)", Mathf.Abs(toolLength - 150f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(18))) SetToolOffset(150f, 0f, 0f);
-                GUILayout.EndHorizontal();
-                GUILayout.BeginHorizontal();
-                float rZ = GUILayout.HorizontalSlider(toolLength, 0f, 250f);
-                if (Mathf.Abs(rZ - toolLength) > 0.05f) SetToolOffset(Mathf.Round(rZ * 10f) / 10f, toolOffsetX, toolOffsetY);
-                GUILayout.EndHorizontal();
-                GUILayout.Label("OFFSET ĐẦU TCP", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(220));
-                sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled, " Vệt vẽ (Trail)", AntigravityUITheme.StyleToggle, GUILayout.Height(20));
-                if (sprayPaintEnabled)
-                {
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label($"Nét: {sprayWidthMm:F1}mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(80));
-                    float newW = GUILayout.HorizontalSlider(sprayWidthMm, 1f, 10f);
-                    if (Mathf.Abs(newW - sprayWidthMm) > 0.1f) UpdateSprayWidth(newW);
-                    GUILayout.EndHorizontal();
-                }
-                GUILayout.Label("NÉT VẼ MÔ PHỎNG", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 2)
-            {
-                // =============================================================
-                // TAB 2: CAM & ĐÁM MÂY ĐIỂM - PRESET CAMERA & BỘ CHỌN MẪU PHÔI
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(310));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("3/4", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetPerspective(); }
-                if (GUILayout.Button("Trên", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetTopDown(); }
-                if (GUILayout.Button("Trước", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetFront(); }
-                if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetSide(); }
-                if (GUILayout.Button("Focus", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.FocusGarment(); }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("GÓC NHÌN CAMERA TRÊN ĐỒ", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                // KHỐI NẠP FILE PHÔI (.PLY)
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(250));
-                GUILayout.BeginHorizontal();
-                string tabSampleName = !string.IsNullOrEmpty(selectedSampleName) ? selectedSampleName : "Chọn File";
-                if (GUILayout.Button($"📁 Duyệt File [{tabSampleName}]", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    OpenFileBrowserForSample();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("NẠP FILE PHÔI (.PLY)", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(300));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Nạp Lại", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    ReloadPointCloudFromPath(customPlyPath);
-                }
-                bool isCloudVis = plyLoader != null && plyLoader.IsVisible();
-                if (GUILayout.Button(isCloudVis ? "Ẩn Phôi" : "Hiện Phôi", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    TogglePointCloudVisible(!isCloudVis);
-                }
-                bool isMesh3D = plyLoader != null && plyLoader.renderMode == PLYDirectLoader.WorkpieceRenderMode.Mesh3D;
-                if (GUILayout.Button(isMesh3D ? "Đổi: PointCloud" : "Đổi: 3D Mesh", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    if (plyLoader != null) plyLoader.SetRenderMode(isMesh3D ? PLYDirectLoader.WorkpieceRenderMode.PointCloud : PLYDirectLoader.WorkpieceRenderMode.Mesh3D);
-                }
-                GUILayout.EndHorizontal();
-                int pts = plyLoader != null ? plyLoader.totalLoadedPoints : 0;
-                GUILayout.Label($"Đã nạp: {pts:N0} điểm | Chế độ: {(isMesh3D ? "3D Mesh (Siêu nhẹ)" : "Point Cloud")}", AntigravityUITheme.StyleLabelMuted);
-                GUILayout.Label("HIỂN THỊ PHÔI QUẦN", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 3)
-            {
-                // =============================================================
-                // TAB 3: QUỸ ĐẠO - VẼ QUẦN 2D -> 3D, KÍCH HOẠT AI & CHỈNH SỬA
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(400));
-                GUILayout.BeginHorizontal();
-                showGizmos = GUILayout.Toggle(showGizmos, " Hiện Cyan", AntigravityUITheme.StyleToggle, GUILayout.Width(95), GUILayout.Height(26));
-
-                if (GUILayout.Button("🎯 Áp Dụng 2D➔3D", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    ApplyCanonical2DDrawingTo3DTrajectory();
-                }
-
-                AiServerClient aiClient = EnsureAiClient();
-                bool isAiBusy = aiClient != null && aiClient.isProcessing;
-                string aiBtnText = isAiBusy ? "Đang xử lý..." : $"⚡ Nhận Diện [{selectedSampleName}]";
-                if (GUILayout.Button(aiBtnText, AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
-                    if (aiClient != null) aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
-                    else LoadPantsOutlineTrajectory();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label($"Size quần: {detectedJeansSize} | Mẫu phun: Size {activeSprayTemplateSize}", AntigravityUITheme.StyleLabelGreen);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(340));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("< Trước", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    int prev = Mathf.Max(0, currentWaypointIndex - 1);
-                    ApplyWaypoint(prev);
-                }
-                GUILayout.Label($"Wp #{currentWaypointIndex} ({waypoints.Count} pts)", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(110));
-                if (GUILayout.Button("Sau >", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    int next = Mathf.Min(waypoints.Count - 1, currentWaypointIndex + 1);
-                    ApplyWaypoint(next);
-                }
-                if (GUILayout.Button("Khôi phục", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    ResetWaypointToDefault(currentWaypointIndex);
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("CHỈNH SỬA TỪNG ĐOẠN", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                if (currentWaypointIndex >= 0 && currentWaypointIndex < waypoints.Count)
-                {
-                    var curWp = waypoints[currentWaypointIndex];
-                    GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(250));
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label($"R:{curWp.roll_deg:F0}° P:{curWp.pitch_deg:F0}° Y:{curWp.yaw_deg:F0}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(95));
-                    if (GUILayout.Button("P -5°", AntigravityUITheme.StyleButton, GUILayout.Width(40), GUILayout.Height(26))) UpdateWaypointRpy(currentWaypointIndex, curWp.roll_deg, curWp.pitch_deg - 5f, curWp.yaw_deg);
-                    if (GUILayout.Button("P +5°", AntigravityUITheme.StyleButton, GUILayout.Width(40), GUILayout.Height(26))) UpdateWaypointRpy(currentWaypointIndex, curWp.roll_deg, curWp.pitch_deg + 5f, curWp.yaw_deg);
-                    if (GUILayout.Button("180°", AntigravityUITheme.StyleButton, GUILayout.Width(42), GUILayout.Height(26))) UpdateWaypointRpy(currentWaypointIndex, 180f, 0f, 0f);
-                    GUILayout.EndHorizontal();
-                    GUILayout.Label("GÓC SÚNG RPY", AntigravityUITheme.StyleSectionLabel);
-                    GUILayout.EndVertical();
-                }
-            }
-            else if (interfaceTab == 4)
-            {
-                // =============================================================
-                // TAB 4: XUẤT / NHẬP LỆNH - DOBOT PYTHON, CSV TỌA ĐỘ
-                // =============================================================
-                bool canExport = !hasCriticalErrors || forceBypassSafetyInterlock;
-                GUIStyle exportBtnStyle = canExport ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Xuất Dobot (.py)", exportBtnStyle, GUILayout.Height(26)))
-                {
-                    ExportDobotPythonScript();
-                }
-                if (GUILayout.Button("Xuất CSV Tọa Độ", exportBtnStyle, GUILayout.Height(26)))
-                {
-                    ExportUpdatedCsvTrajectory();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label(canExport ? "XUẤT CHƯƠNG TRÌNH GỬI SANG ROBOT CR10A" : "CHẶN XUẤT: Có lỗi an toàn nghiêm trọng", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(280));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Mở Thư Mục Xuất", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    OpenExportFolder();
-                }
-                if (GUILayout.Button("Nạp Lại File CSV", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    LoadTrajectoryFile();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("QUẢN LÝ TẬP TIN DỮ LIỆU", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 5)
-            {
-                // =============================================================
-                // TAB 5: CẢNH BÁO VÀ XỬ LÝ LỖI - PHÔI, VA CHẠM, KỲ DỊ, VƯỢT TẦM VỚI
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(380));
-                GUILayout.BeginHorizontal();
-                if (hasCriticalErrors)
-                {
-                    GUILayout.Label("❌ PHÁT HIỆN LỖI: Khóa an toàn chặn xuất lệnh!", AntigravityUITheme.StyleLabelRed);
-                }
-                else
-                {
-                    GUILayout.Label("✅ QUỸ ĐẠO AN TOÀN 100%: Sẵn sàng xuất lệnh.", AntigravityUITheme.StyleLabelGreen);
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("GIÁM SÁT AN TOÀN QUỸ ĐẠO", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(270));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Quét Lại An Toàn", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    RunDiagnostics();
-                }
-                if (GUILayout.Button("Sửa Quỹ Đạo", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
-                {
-                    interfaceTab = 3;
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("THAO TÁC XỬ LÝ", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 6)
-            {
-                // =============================================================
-                // TAB 6: CAMERA TRÊN XUỐNG & HIỂN THỊ 12 ĐIỂM MỐC AI / SEGMENT
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(280));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("📷 Cam Trên Xuống", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    if (rcc != null) rcc.SetPresetTopDown();
-                }
-                if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Width(75), GUILayout.Height(26)))
-                {
-                    if (rcc != null) rcc.SetPresetPerspective();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label("CAMERA NHÌN TỪ TRÊN XUỐNG", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(440));
-                GUILayout.BeginHorizontal();
-                showLandmarks3D = GUILayout.Toggle(showLandmarks3D, " 12 Mốc AI", AntigravityUITheme.StyleToggle, GUILayout.Width(100), GUILayout.Height(26));
-                showSegmentationContour3D = GUILayout.Toggle(showSegmentationContour3D, " Đường Bao Seg", AntigravityUITheme.StyleToggle, GUILayout.Width(130), GUILayout.Height(26));
-                showSprayZones3D = GUILayout.Toggle(showSprayZones3D, " Vùng Phun", AntigravityUITheme.StyleToggle, GUILayout.Width(110), GUILayout.Height(26));
-                GUILayout.EndHorizontal();
-                GUILayout.Label($"[{selectedSampleName}]: {landmarks3D.Count} MỐC 3D | {garmentContourWorld.Count} ĐIỂM SEG", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-            else if (interfaceTab == 7)
-            {
-                // =============================================================
-                // TAB 7: THUẬT TOÁN BÙ ĐẮP CHỖ KHUẤT (OCCLUSION & HOLE FILLING)
-                // =============================================================
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("🔍 Quét Lỗ Khuyết", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
-                {
-                    DetectOcclusionAndHoles();
-                }
-                if (GUILayout.Button("⚡ Chạy Bù Đắp", AntigravityUITheme.StyleButton, GUILayout.Width(100), GUILayout.Height(26)))
-                {
-                    RunOcclusionCompensation();
-                }
-                if (GUILayout.Button("🎯 Áp Dụng", AntigravityUITheme.StyleButton, GUILayout.Width(90), GUILayout.Height(26)))
-                {
-                    ApplyOcclusionCompensationToTrajectory();
-                }
-                GUILayout.EndHorizontal();
-                GUILayout.Label($"PHÁT HIỆN: {detectedHoleCount} VÙNG KHUẤT ({detectedOcclusionAreaCm2:F1} cm²)", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(420));
-                GUILayout.BeginHorizontal();
-                showOcclusionHoles3D = GUILayout.Toggle(showOcclusionHoles3D, " Lỗ Khuyết (Đỏ)", AntigravityUITheme.StyleToggle, GUILayout.Width(130), GUILayout.Height(26));
-                showCompensatedSurface3D = GUILayout.Toggle(showCompensatedSurface3D, " Lưới Bù (Xanh)", AntigravityUITheme.StyleToggle, GUILayout.Width(130), GUILayout.Height(26));
-                showGunTiltVectors3D = GUILayout.Toggle(showGunTiltVectors3D, " Bù Góc Súng (Vàng)", AntigravityUITheme.StyleToggle, GUILayout.Width(140), GUILayout.Height(26));
-                GUILayout.EndHorizontal();
-                string[] algoShortNames = { "TPS Spline RBF", "Poisson & Laplace PDE", "MLS K-NN Tangent", "Adaptive Gun Tilt", "Bilateral Symmetry" };
-                GUILayout.Label($"THUẬT TOÁN: {algoShortNames[Mathf.Clamp(selectedOcclusionAlgorithm, 0, 4)]}", AntigravityUITheme.StyleSectionLabel);
-                GUILayout.EndVertical();
-            }
-
-            GUILayout.FlexibleSpace();
-            GUILayout.EndHorizontal();
-            GUILayout.EndArea();
+            SaveAllWorkbenchSetups(showToast: true);
+        }
+        rx -= 104f;
+        if (GUI.Button(new Rect(rx, btnY, 98f, btnH), showGizmos ? "Quỹ đạo: Bật" : "Quỹ đạo: Tắt",
+            showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton))
+        {
+            showGizmos = !showGizmos;
+            MarkSettingsDirty();
+        }
+        rx -= 76f;
+        if (GUI.Button(new Rect(rx, btnY, 70f, btnH), "Home", isMovingToHome ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton))
+        {
+            MoveToHomeGradually();
+            ClearInkTrail();
+        }
+        rx -= 92f;
+        if (GUI.Button(new Rect(rx, btnY, 86f, btnH), isPlaying ? "Tạm dừng" : "Chạy",
+            isPlaying ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton))
+        {
+            isPlaying = !isPlaying;
+            if (isPlaying) { isMovingToManualTarget = false; isMovingToHome = false; }
         }
 
-        // 3. DOCK CHỨA BẢNG ĐIỀU KHIỂN CHI TIẾT BÊN PHẢI (INSPECTOR DOCK BÊN PHẢI)
+        // 2. THANH CHỌN TAB (8 TAB GỌN TRÊN 1 HÀNG)
+        string[] tabNames = {
+            "1. Phôi", "2. Views", "3. Vá lỗ", "4. Quỹ đạo & MP",
+            "5. Đánh giá", "6. Xuất", "7. Cấu hình", "8. An toàn"
+        };
+        int[] tabOrder = { 2, 6, 7, 3, 8, 4, 1, 5 };
+        int cols = narrow ? 4 : 8;
+        float padX = 12f;
+        float gap = 5f;
+        float tabW = (screenW - padX * 2f - (cols - 1) * gap) / cols;
+
+        for (int n = 0; n < tabOrder.Length; n++)
+        {
+            int pIdx = tabOrder[n];
+            int row = n / cols;
+            int col = n % cols;
+            Rect tRect = new Rect(padX + col * (tabW + gap), headerTopH + 4f + row * 34f, tabW, 28f);
+            bool isCurrent = (interfaceTab == pIdx) && showDockPanel;
+
+            if (GUI.Button(tRect, tabNames[n], isCurrent ? AntigravityUITheme.StyleTabActive : AntigravityUITheme.StyleTabInactive))
+            {
+                OpenOrFocusPanel(pIdx);
+                if (pIdx == 5 && diagnosticResults.Count == 0) RunDiagnostics();
+                if (pIdx == 6) LoadLandmarksAndSegmentationForSample(selectedSampleName);
+                if (pIdx == 7 && detectedHoleCount == 0) DetectOcclusionAndHoles();
+            }
+            if (isCurrent)
+            {
+                GUI.DrawTexture(new Rect(tRect.x + 8f, tRect.yMax - 2f, tRect.width - 16f, 2f), AntigravityUITheme.TexSliderThumb);
+            }
+        }
+
+        // 3. VẼ BẢNG TAB GẮN CỐ ĐỊNH BÊN PHẢI (KHÔNG DI CHUYỂN, CHỈ KÉO CẠNH TRÁI ĐỂ ĐỔI CỠ -> ĐẨY VIEWPORT 3D SANG TRÁI)
+        singleMainPanel.isDockedRight = true;
+        singleMainPanel.isOpen = showDockPanel;
+        singleMainPanel.title = SinglePanelTabTitles[Mathf.Clamp(interfaceTab, 0, SinglePanelTabTitles.Length - 1)];
+
         if (showDockPanel)
         {
-            float dockW = 410f;
-            float dockH = Screen.height - totalRibbonH - 14f;
-            Rect dockRect = new Rect(screenW - dockW - 10f, totalRibbonH + 6f, dockW, dockH);
-
-            GUI.DrawTexture(dockRect, AntigravityUITheme.TexBgDock);
-            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, 1, dockRect.height), AntigravityUITheme.TexBorder);
-            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, dockRect.width, 1), AntigravityUITheme.TexBorder);
-            GUI.DrawTexture(new Rect(dockRect.x, dockRect.y + dockRect.height - 1, dockRect.width, 1), AntigravityUITheme.TexBorder);
-
-            GUILayout.BeginArea(new Rect(dockRect.x + 6f, dockRect.y + 4f, dockW - 12f, dockH - 8f));
-            dockScrollPosition = GUILayout.BeginScrollView(dockScrollPosition, GUILayout.Width(dockW - 12f), GUILayout.Height(dockH - 8f));
-            float cardWidth = dockW - 28f;
-
-            switch (interfaceTab)
+            bool prevGuiChanged = GUI.changed;
+            GUI.changed = false;
+            DraggableUIManager.DrawDraggablePanel(singleMainPanel, totalHeaderH, (innerW) =>
             {
-                case 0:
-                    DrawSimCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 1:
-                    DrawRobotConfigCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 2:
-                    DrawCamPointCloudCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 3:
-                    DrawTrajectoryEditingCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 4:
-                    DrawExportImportCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 5:
-                    DrawDiagnosticsCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 6:
-                    DrawTopDownLandmarksAndSegCard(cardWidth, () => showDockPanel = false);
-                    break;
-                case 7:
-                    DrawOcclusionCompensationCard(cardWidth, () => showDockPanel = false);
-                    break;
+                switch (interfaceTab)
+                {
+                    case 0:
+                    case 3: DrawTrajectoryAndSimCombinedCard(innerW); break;
+                    case 1:
+                    case 9: DrawConfigAndCalibrationCombinedCard(innerW); break;
+                    case 2: DrawCamPointCloudCard(innerW, null); break;
+                    case 4: DrawExportImportCard(innerW, null); break;
+                    case 5: DrawDiagnosticsCard(innerW, null); break;
+                    case 6: DrawTopDownLandmarksAndSegCard(innerW, null); break;
+                    case 7: DrawOcclusionCompensationCard(innerW, null); break;
+                    case 8: DrawEvaluationAndSprayCard(innerW); break;
+                }
+            });
+            if (GUI.changed)
+            {
+                MarkSettingsDirty();
             }
-
-            GUILayout.EndScrollView();
-            GUILayout.EndArea();
+            GUI.changed = prevGuiChanged || GUI.changed;
+            if (showDockPanel != singleMainPanel.isOpen)
+            {
+                showDockPanel = singleMainPanel.isOpen;
+                MarkSettingsDirty();
+            }
         }
+
+        WorkbenchDockVisible = showDockPanel;
+        WorkbenchDockWidth = showDockPanel ? singleMainPanel.rect.width : 0f;
+
+        RobotCameraController rccViewport = EnsureCameraController();
+        if (rccViewport != null)
+        {
+            rccViewport.UpdateCameraViewportRect();
+        }
+    }
+
+    private void DrawTrajectoryAndSimCombinedCard(float width)
+    {
+        GUILayout.BeginHorizontal(GUILayout.Width(width));
+        if (GUILayout.Button("Mô phỏng", trajSimSubTab == 0 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            trajSimSubTab = 0;
+        }
+        if (GUILayout.Button("Quỹ đạo 2D -> 3D", trajSimSubTab == 1 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            trajSimSubTab = 1;
+        }
+        GUILayout.EndHorizontal();
+        GUILayout.Space(4);
+
+        if (trajSimSubTab == 0)
+            DrawSimCard(width, null);
+        else
+            DrawTrajectoryEditingCard(width, null);
+    }
+
+    private void DrawConfigAndCalibrationCombinedCard(float width)
+    {
+        GUILayout.BeginHorizontal(GUILayout.Width(width));
+        if (GUILayout.Button("Robot & Đầu phun", configSubTab == 0 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            configSubTab = 0;
+        }
+        if (GUILayout.Button("Hiệu chuẩn Camera", configSubTab == 1 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            configSubTab = 1;
+        }
+        GUILayout.EndHorizontal();
+        GUILayout.Space(4);
+
+        if (configSubTab == 0)
+            DrawRobotConfigCard(width, null);
+        else
+            DrawCameraCalibrationCard(width);
     }
 
     private bool showJointSubPanelActive()
@@ -1918,24 +2478,24 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("MÔ PHỎNG VẬN HÀNH ROBOT (SIM)", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("MÔ PHỎNG ROBOT", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         GUILayout.Space(4);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(isPlaying ? "TẠM DỪNG" : "CHẠY MÔ PHỎNG", isPlaying ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton, GUILayout.Height(32)))
+        if (GUILayout.Button(isPlaying ? "Tạm dừng" : "Chạy", isPlaying ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
         {
             isPlaying = !isPlaying;
             if (isPlaying) { isMovingToManualTarget = false; isMovingToHome = false; }
         }
-        if (GUILayout.Button("DỪNG HẲN", AntigravityUITheme.StyleButton, GUILayout.Height(32)))
+        if (GUILayout.Button("Dừng", AntigravityUITheme.StyleButton, GUILayout.Height(30)))
         {
             isPlaying = false;
             isMovingToManualTarget = false;
         }
-        if (GUILayout.Button("RESET (HOME 0°)", isMovingToHome ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(32)))
+        if (GUILayout.Button("Home", isMovingToHome ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(30)))
         {
             MoveToHomeGradually();
             ClearInkTrail();
@@ -1943,26 +2503,37 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         GUILayout.Space(8);
-        GUILayout.Label("TỐC ĐỘ MÔ PHỎNG (1× MẶC ĐỊNH)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("TỐC ĐỘ TCP", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        useConstantTcpSpeed = GUILayout.Toggle(useConstantTcpSpeed, " Giữ tốc độ TCP đều (MovL)", AntigravityUITheme.StyleToggle);
+        if (useConstantTcpSpeed)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"Tốc độ TCP: {targetTcpSpeedMmPerSec:F0} mm/s", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(170));
+            targetTcpSpeedMmPerSec = GUILayout.HorizontalSlider(targetTcpSpeedMmPerSec, 40f, 500f);
+            if (sprayTechParams != null) sprayTechParams.targetSpeedMmPerSec = targetTcpSpeedMmPerSec;
+            GUILayout.EndHorizontal();
+        }
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Hệ số tốc độ: {playbackSpeed:F1}×", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
+        GUILayout.Label($"Tốc độ phát: {playbackSpeed:F1}x", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
         playbackSpeed = GUILayout.HorizontalSlider(playbackSpeed, 0.1f, 2.0f);
         GUILayout.EndHorizontal();
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("0.5×", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 0.5f;
-        if (GUILayout.Button("1.0× (Mặc định)", Mathf.Abs(playbackSpeed - 1.0f) < 0.05f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 1.0f;
-        if (GUILayout.Button("1.5×", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 1.5f;
-        if (GUILayout.Button("2.0×", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 2.0f;
+        if (GUILayout.Button("0.5x", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 0.5f;
+        if (GUILayout.Button("1.0x", Mathf.Abs(playbackSpeed - 1.0f) < 0.05f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 1.0f;
+        if (GUILayout.Button("1.5x", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 1.5f;
+        if (GUILayout.Button("2.0x", AntigravityUITheme.StyleButton, GUILayout.Height(22))) playbackSpeed = 2.0f;
         GUILayout.EndHorizontal();
+        GUILayout.Label($"v={liveTcpSpeedMmPerSec:F0} mm/s | CV={measuredTcpSpeedCvPct:F1}% | t={(measuredCycleTimeSec > 0f ? measuredCycleTimeSec : cycleTimerSec):F1}s", AntigravityUITheme.StyleLabelGreen);
+        GUILayout.EndVertical();
 
         GUILayout.Space(8);
-        GUILayout.Label("TIẾN ĐỘ VẬN HÀNH QUỸ ĐẠO", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("TIẾN ĐỘ QUỸ ĐẠO", AntigravityUITheme.StyleSectionLabel);
         int wpTotal = Mathf.Max(1, waypoints.Count);
         int wpCur = Mathf.Clamp(currentWaypointIndex, 0, wpTotal - 1);
-        float progress = (float)wpCur / (wpTotal - 1) * 100f;
+        float progress = (waypoints.Count <= 1 ? 0f : (float)wpCur / (wpTotal - 1) * 100f);
         float distMm = waypoints.Count > 0 ? waypoints[wpCur].distance_mm : 0f;
-        GUILayout.Label($"Điểm hiện tại: {wpCur + 1} / {wpTotal} ({progress:F1}%)", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.Label($"Quãng đường đầu phun: {distMm:F1} mm", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.Label($"Điểm: {wpCur + 1}/{wpTotal} ({progress:F0}%) | Quãng đường: {distMm:F0} mm", AntigravityUITheme.StyleLabelCyan);
 
         int newIdx = Mathf.RoundToInt(GUILayout.HorizontalSlider(wpCur, 0, wpTotal - 1));
         if (newIdx != currentWaypointIndex)
@@ -1972,17 +2543,17 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         GUILayout.Space(8);
-        GUILayout.Label("TỌA ĐỘ TCP THỰC TẾ TRÊN MÔ HÌNH", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("TỌA ĐỘ TCP (mm)", AntigravityUITheme.StyleSectionLabel);
         if (tcpTransform != null)
         {
             Vector3 worldTcp = tcpTransform.position;
             Vector3 robotTcpMm = globalReference != null ? globalReference.InverseTransformPoint(worldTcp) * 1000f : worldTcp * 1000f;
-            GUILayout.Label($"X: {robotTcpMm.x:F1} mm   Y: {robotTcpMm.y:F1} mm   Z: {robotTcpMm.z:F1} mm", AntigravityUITheme.StyleLabelCyan);
+            GUILayout.Label($"X: {robotTcpMm.x:F1}   Y: {robotTcpMm.y:F1}   Z: {robotTcpMm.z:F1}", AntigravityUITheme.StyleLabelCyan);
         }
 
-        GUILayout.Space(6);
+        GUILayout.Space(4);
         string statusText = robotManual != null && !string.IsNullOrEmpty(robotManual.ikStatus) ? robotManual.ikStatus : "Sẵn sàng.";
-        GUILayout.Label($"Trạng thái: {statusText}", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.Label(statusText, AntigravityUITheme.StyleLabelMuted);
 
         GUILayout.EndVertical();
     }
@@ -1994,23 +2565,23 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("CẤU HÌNH ROBOT & ĐẦU PHUN SƠN", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("CẤU HÌNH ROBOT", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         GUILayout.Space(6);
-        GUILayout.Label("1. GIỚI HẠN VẬN TỐC & GIA TỐC CÁC KHỚP", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. VẬN TỐC & KHỚP", AntigravityUITheme.StyleSectionLabel);
         DrawAccelerationInput();
-        GUILayout.Label($"Trần tốc độ chung: {Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 223f):F0}°/s", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.Label($"Tốc độ tối đa: {Mathf.Clamp(maxJointSpeedDegPerSecond, 1f, 223f):F0}°/s", AntigravityUITheme.StyleLabelMuted);
 
-        showJointSpeedControls = GUILayout.Toggle(showJointSpeedControls, " Bảng chỉnh vận tốc riêng từng khớp J1-J6", AntigravityUITheme.StyleToggle);
+        showJointSpeedControls = GUILayout.Toggle(showJointSpeedControls, " Chỉnh tốc độ từng khớp J1-J6", AntigravityUITheme.StyleToggle);
         if (showJointSpeedControls)
         {
             DrawJointSpeedInputs();
         }
 
-        if (GUILayout.Button(showJointsSubPanel ? "Đóng Bảng Điều Khiển Khớp q1-q6" : "Mở Bảng Điều Khiển Khớp q1-q6 (Thủ công)", showJointsSubPanel ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        if (GUILayout.Button(showJointsSubPanel ? "Đóng chỉnh khớp q1-q6" : "Mở chỉnh khớp q1-q6", showJointsSubPanel ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(24)))
         {
             showJointsSubPanel = !showJointsSubPanel;
         }
@@ -2021,59 +2592,57 @@ public class DobotCR10AIKController : MonoBehaviour
             robotManual.DrawJointsControlCard(width - 16, () => showJointsSubPanel = false);
         }
 
-        GUILayout.Space(10);
-        GUILayout.Label("2. KÍCH THƯỚC OFFSET ĐẦU CÔNG CỤ (MẶT BÍCH ➔ TCP)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Space(8);
+        GUILayout.Label("2. OFFSET ĐẦU PHUN (BÍCH -> TCP)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Offset Z (Dài): {toolLength:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(150));
+        GUILayout.Label($"Z: {toolLength:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(100));
         float rZ = GUILayout.HorizontalSlider(toolLength, 0f, 300f);
         if (Mathf.Abs(rZ - toolLength) > 0.05f) SetToolOffset(Mathf.Round(rZ * 10f) / 10f, toolOffsetX, toolOffsetY);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label("Mẫu sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(60));
-        if (GUILayout.Button("0 (Bích)", Mathf.Abs(toolLength) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(0f, 0f, 0f);
-        if (GUILayout.Button("50 (Bút)", Mathf.Abs(toolLength - 50f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(50f, 0f, 0f);
-        if (GUILayout.Button("100 (Súng)", Mathf.Abs(toolLength - 100f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(100f, 0f, 0f);
-        if (GUILayout.Button("150 (Kẹp)", Mathf.Abs(toolLength - 150f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(150f, 0f, 0f);
+        if (GUILayout.Button("0", Mathf.Abs(toolLength) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(0f, 0f, 0f);
+        if (GUILayout.Button("50", Mathf.Abs(toolLength - 50f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(50f, 0f, 0f);
+        if (GUILayout.Button("100", Mathf.Abs(toolLength - 100f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(100f, 0f, 0f);
+        if (GUILayout.Button("150", Mathf.Abs(toolLength - 150f) < 0.1f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) SetToolOffset(150f, 0f, 0f);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Lệch X: {toolOffsetX:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
+        GUILayout.Label($"X: {toolOffsetX:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(100));
         float rX = GUILayout.HorizontalSlider(toolOffsetX, -100f, 100f);
         if (Mathf.Abs(rX - toolOffsetX) > 0.1f) SetToolOffset(toolLength, Mathf.Round(rX * 10f) / 10f, toolOffsetY);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Lệch Y: {toolOffsetY:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
+        GUILayout.Label($"Y: {toolOffsetY:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(100));
         float rY = GUILayout.HorizontalSlider(toolOffsetY, -100f, 100f);
         if (Mathf.Abs(rY - toolOffsetY) > 0.1f) SetToolOffset(toolLength, toolOffsetX, Mathf.Round(rY * 10f) / 10f);
         GUILayout.EndHorizontal();
 
-        GUILayout.Space(10);
-        GUILayout.Label("3. VỆT BÚT VẼ MÔ PHỎNG (PEN TRAIL)", AntigravityUITheme.StyleSectionLabel);
-        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled, sprayPaintEnabled ? " HIỂN THỊ NÉT VẼ: BẬT" : " HIỂN THỊ NÉT VẼ: TẮT", AntigravityUITheme.StyleToggle, GUILayout.Height(22));
+        GUILayout.Space(8);
+        GUILayout.Label("3. VỆT PHUN MÔ PHỎNG", AntigravityUITheme.StyleSectionLabel);
+        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled, " Hiện vệt phun", AntigravityUITheme.StyleToggle, GUILayout.Height(22));
 
         if (sprayPaintEnabled)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Bề rộng nét vẽ: {sprayWidthMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(160));
+            GUILayout.Label($"Bề rộng: {sprayWidthMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
             float newWidth = GUILayout.HorizontalSlider(sprayWidthMm, 1f, 10f);
             if (Mathf.Abs(newWidth - sprayWidthMm) > 0.1f) UpdateSprayWidth(newWidth);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Cỡ sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(50));
-            if (GUILayout.Button("2mm (Bút nhỏ)", Mathf.Abs(sprayWidthMm - 2f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) UpdateSprayWidth(2.0f);
-            if (GUILayout.Button("4mm (Bút dạ)", Mathf.Abs(sprayWidthMm - 4f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) UpdateSprayWidth(4.0f);
-            if (GUILayout.Button("Xóa nét vẽ", AntigravityUITheme.StyleButton, GUILayout.Height(20))) { ClearInkTrail(); }
+            if (GUILayout.Button("2 mm", Mathf.Abs(sprayWidthMm - 2f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) UpdateSprayWidth(2.0f);
+            if (GUILayout.Button("4 mm", Mathf.Abs(sprayWidthMm - 4f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) UpdateSprayWidth(4.0f);
+            if (GUILayout.Button("Xóa vệt", AntigravityUITheme.StyleButton, GUILayout.Height(20))) { ClearInkTrail(); }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Dung sai bám đường: {sprayPathToleranceMm:F0} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(170));
+            GUILayout.Label($"Dung sai: {sprayPathToleranceMm:F0} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
             sprayPathToleranceMm = GUILayout.HorizontalSlider(sprayPathToleranceMm, 5f, 50f);
             GUILayout.EndHorizontal();
 
-            string sprayStateLabel = isSprayingNow ? "🟢 TRẠNG THÁI: ĐANG PHUN TRÊN QUỸ ĐẠO" : "🔴 TRẠNG THÁI: TẮT PHUN (Ngoài Quỹ Đạo / Chuyển Tiếp)";
+            string sprayStateLabel = isSprayingNow ? "Trạng thái: Đang phun" : "Trạng thái: Tắt phun";
             GUILayout.Label(sprayStateLabel, isSprayingNow ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelRed);
         }
 
@@ -2081,168 +2650,91 @@ public class DobotCR10AIKController : MonoBehaviour
     }
 
     // =========================================================================
-    // CARD 2: CAM & POINT CLOUD (SETUP CAM & POINT CLOUD LOADER)
+    // CARD 2: NẠP PHÔI 3D & CHỤP ZIVID / AI
     // =========================================================================
     private void DrawCamPointCloudCard(float width, Action onClose = null)
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("CAMERA & NẠP ĐÁM MÂY ĐIỂM (POINT CLOUD)", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("NẠP PHÔI 3D", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
-        RobotCameraController rcc = EnsureCameraController();
         PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
 
         GUILayout.Space(6);
-        GUILayout.Label("1. GÓC NHÌN CAMERA TRÊN PHÔI", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. CAMERA ZIVID", AntigravityUITheme.StyleSectionLabel);
+        RobotCameraController rccCamCard = EnsureCameraController();
+        bool oldEnabled = GUI.enabled;
+        AiServerClient cameraClient = EnsureAiClient();
+        GUI.enabled = oldEnabled && cameraClient != null && !cameraClient.isProcessing;
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetPerspective(); }
-        if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetTopDown(); }
-        if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetFront(); }
-        if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(26))) { if (rcc) rcc.SetPresetSide(); }
+        if (GUILayout.Button("Chụp Zivid", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
+            cameraClient.CapturePreview();
+        if (GUILayout.Button("Chụp + AI", AntigravityUITheme.StyleButton, GUILayout.Height(30)))
+            cameraClient.CaptureAndDetect();
         GUILayout.EndHorizontal();
-
+        GUI.enabled = oldEnabled;
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Focus vào Phôi Đồ", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24))) { if (rcc) rcc.FocusGarment(); }
-        if (GUILayout.Button("Reset Focus vào Robot", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.ResetFocus(); }
+        GUIStyle zividCardBtnSt = (rccCamCard != null && rccCamCard.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Góc nhìn Camera Zivid", zividCardBtnSt, GUILayout.Height(25))) { if (rccCamCard) rccCamCard.ToggleZividCameraView(); }
+        GUIStyle pipCardBtnSt = (rccCamCard != null && rccCamCard.showZividPipWindow && !rccCamCard.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Khung PiP", pipCardBtnSt, GUILayout.Width(96), GUILayout.Height(25))) { if (rccCamCard) rccCamCard.ToggleZividPip(); }
         GUILayout.EndHorizontal();
-        GUILayout.Label("Thao tác 3D: Chuột phải để Xoay | Chuột giữa để Lia cam | Cuộn để Zoom", AntigravityUITheme.StyleLabelMuted);
+        if (cameraClient != null && !string.IsNullOrEmpty(cameraClient.lastStatusMessage))
+            GUILayout.Label(cameraClient.lastStatusMessage, cameraClient.isServerOnline ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelMuted);
 
-        GUILayout.Space(10);
-        GUILayout.Label("2. NẠP FILE PHÔI (.PLY) / CHẾ ĐỘ TỰ ĐỘNG", AntigravityUITheme.StyleSectionLabel);
-
-        // Nút mở File Dialog duyệt file từ máy tính
+        GUILayout.Space(8);
+        GUILayout.Label("2. NẠP FILE .PLY & NHẬN DIỆN AI", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("📁 Duyệt & Chọn File từ Máy Tính... (.ply)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
+        if (GUILayout.Button("Chọn file .PLY...", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
         {
             OpenFileBrowserForSample();
         }
-        GUILayout.EndHorizontal();
-
-        // Hiển thị tên file đang chọn và nút tải lại
-        GUILayout.BeginHorizontal();
-        string displaySample = !string.IsNullOrEmpty(selectedSampleName) ? $"{selectedSampleName}.ply" : "Chưa chọn file";
-        GUILayout.Label($"File hiện tại: {displaySample}", AntigravityUITheme.StyleLabelCyan);
-        if (!string.IsNullOrEmpty(customPlyPath) && GUILayout.Button("Tải Lại", AntigravityUITheme.StyleButton, GUILayout.Width(70), GUILayout.Height(22)))
+        if (!string.IsNullOrEmpty(customPlyPath) && GUILayout.Button("Tải lại", AntigravityUITheme.StyleButton, GUILayout.Width(72), GUILayout.Height(28)))
         {
             ReloadPointCloudFromPath(customPlyPath);
         }
         GUILayout.EndHorizontal();
 
-        // 2.3. Chế độ Tự Động (Model AI tự gửi vào qua UDP 5006)
-        GUILayout.Space(6);
+        string displaySample = !string.IsNullOrEmpty(selectedSampleName) ? $"{selectedSampleName}.ply" : "Chưa chọn";
+        int totalPts = plyLoader != null ? plyLoader.totalLoadedPoints : 0;
+        GUILayout.Label($"File: {displaySample} ({totalPts:N0} điểm)", AntigravityUITheme.StyleLabelCyan);
+
         AiServerClient aiClient = EnsureAiClient();
         if (aiClient != null)
         {
-            GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-            bool newAuto = GUILayout.Toggle(aiClient.autoModeEnabled, " CHẾ ĐỘ TỰ ĐỘNG (Model AI tự gửi vào - UDP 5006)", AntigravityUITheme.StyleToggle);
-            if (newAuto != aiClient.autoModeEnabled)
-            {
-                aiClient.SetAutoMode(newAuto);
-            }
+            bool newAuto = GUILayout.Toggle(aiClient.autoModeEnabled, " Tự động nhận từ AI (UDP 5006)", AntigravityUITheme.StyleToggle);
+            if (newAuto != aiClient.autoModeEnabled) aiClient.SetAutoMode(newAuto);
 
-            if (aiClient.autoModeEnabled)
+            if (!aiClient.autoModeEnabled)
             {
-                GUILayout.Label("🟢 Đang lắng nghe: Model AI tự động đẩy phôi & quỹ đạo vào Unity!", AntigravityUITheme.StyleLabelGreen);
-            }
-            else
-            {
-                GUILayout.Label("⚪ Chế độ thủ công: Tự chọn file hoặc nhấn nút nạp.", AntigravityUITheme.StyleLabelMuted);
-            }
-            GUILayout.EndVertical();
-        }
-
-        // Nút kích hoạt AI Server cho mẫu đang chọn (Thủ công)
-        if (aiClient != null && !aiClient.autoModeEnabled)
-        {
-            bool isAiBusy = aiClient.isProcessing;
-            string aiBtnText = isAiBusy ? "🟡 Server AI đang xử lý..." : $"⚡ Nhận Diện Quần & Mốc [{selectedSampleName}] (Tự Đổi Size Phun)";
-            GUIStyle aiStyle = isAiBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
-            if (GUILayout.Button(aiBtnText, aiStyle, GUILayout.Height(28)))
-            {
-                DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
-                aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
+                bool isAiBusy = aiClient.isProcessing;
+                string aiBtnText = isAiBusy ? "Đang nhận diện..." : $"Nhận diện AI [{selectedSampleName}]";
+                GUIStyle aiStyle = isAiBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
+                if (GUILayout.Button(aiBtnText, aiStyle, GUILayout.Height(28)))
+                {
+                    DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
+                    aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
+                }
             }
         }
 
         GUILayout.Space(6);
         DrawJeansSizeDetectionSummaryBox();
 
-        GUILayout.Space(10);
-        GUILayout.Label("3. NẠP ĐÁM MÂY ĐIỂM TÙY CHỌN (.PLY HOẶC ĐƯỜNG DẪN)", AntigravityUITheme.StyleSectionLabel);
-        GUILayout.Label("Đường dẫn file .PLY:", AntigravityUITheme.StyleLabelMuted);
-        customPlyPath = GUILayout.TextField(customPlyPath, AntigravityUITheme.StyleTextField);
-
+        GUILayout.Space(8);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Tải lại / Nạp Đám Mây Điểm", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        if (GUILayout.Button("Mở Views (3D / Mesh / Mốc)", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
-            ReloadPointCloudFromPath(customPlyPath);
+            OpenOrFocusPanel(6);
         }
-        bool isCloudVis = plyLoader != null && plyLoader.IsVisible();
-        if (GUILayout.Button(isCloudVis ? "Ẩn Phôi Quần" : "Hiện Phôi Quần", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        if (GUILayout.Button("Hiệu chuẩn Camera", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
-            TogglePointCloudVisible(!isCloudVis);
+            OpenOrFocusPanel(9);
         }
         GUILayout.EndHorizontal();
-
-        GUILayout.Space(6);
-        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("CHẾ ĐỘ HIỂN THỊ PHÔI QUẦN (TỐI ƯU HIỆU NĂNG LAPTOP):", AntigravityUITheme.StyleSectionLabel);
-        GUILayout.BeginHorizontal();
-        bool isMeshMode = plyLoader != null && plyLoader.renderMode == PLYDirectLoader.WorkpieceRenderMode.Mesh3D;
-        GUIStyle bMeshStyle = isMeshMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-        GUIStyle bCloudStyle = !isMeshMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-        if (GUILayout.Button("🌐 3D MESH SIÊU NHẸ (60-120 FPS)", bMeshStyle, GUILayout.Height(28)))
-        {
-            if (plyLoader != null) plyLoader.SetRenderMode(PLYDirectLoader.WorkpieceRenderMode.Mesh3D);
-        }
-        if (GUILayout.Button("☁️ POINT CLOUD (Gốc 1.7M Điểm)", bCloudStyle, GUILayout.Height(28)))
-        {
-            if (plyLoader != null) plyLoader.SetRenderMode(PLYDirectLoader.WorkpieceRenderMode.PointCloud);
-        }
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("⚡ Tạo Lại / Cập Nhật 3D Surface Mesh", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
-        {
-            if (plyLoader != null) plyLoader.ConvertPointCloudToSurfaceMesh();
-        }
-        GUILayout.EndHorizontal();
-
-        if (isMeshMode)
-        {
-            GUILayout.Label("✔ Đang dùng 3D Surface Mesh: 1 Draw Call, mượt mà, không nóng máy, bám sát mặt vải!", AntigravityUITheme.StyleLabelGreen);
-        }
-        else
-        {
-            GUILayout.Label("⚠ Đang dùng Point Cloud gốc: 1.7M điểm, nhiều Chunks, tải nặng GPU laptop.", AntigravityUITheme.StyleLabelMuted);
-        }
-        GUILayout.EndVertical();
-
-        GUILayout.Space(6);
-        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("HIỂN THỊ ĐIỂM MỐC AI (12 LANDMARKS) & ĐƯỜNG BAO SEGMENT:", AntigravityUITheme.StyleSectionLabel);
-        showLandmarks3D = GUILayout.Toggle(showLandmarks3D, " Hiện 12 Điểm Mốc Giải Phẫu AI (Landmarks 3D + Skeleton)", AntigravityUITheme.StyleToggle);
-        if (showLandmarks3D)
-        {
-            showLandmarkLabels = GUILayout.Toggle(showLandmarkLabels, " Hiện nhãn tên & cao độ Z (mm) của 12 mốc", AntigravityUITheme.StyleToggle);
-        }
-        showSegmentationContour3D = GUILayout.Toggle(showSegmentationContour3D, " Hiện Đường Bao Segment Thân Quần 3D (Garment Contour)", AntigravityUITheme.StyleToggle);
-        showSprayZones3D = GUILayout.Toggle(showSprayZones3D, " Hiện Vùng Cho Phép Phun 2 Ống Quần (Sprayable Zones)", AntigravityUITheme.StyleToggle);
-        GUILayout.EndVertical();
-
-        GUILayout.Space(6);
-        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("THỐNG KÊ DỮ LIỆU ĐÁM MÂY ĐIỂM:", AntigravityUITheme.StyleSectionLabel);
-        int totalPts = plyLoader != null ? plyLoader.totalLoadedPoints : 0;
-        int chunkCnt = plyLoader != null ? plyLoader.GetChunkCount() : 0;
-        GUILayout.Label($"• Tổng số điểm ảnh 3D: {totalPts:N0} điểm (Đã tối ưu lấy mẫu)", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.Label("• Giữ nguyên 100% màu sắc gốc (Original RGB)", AntigravityUITheme.StyleLabelGreen);
-        GUILayout.Label($"• Phân chia hiển thị: {chunkCnt} Mesh Chunks", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.Label("• Tọa độ Camera Fixed Rig: Y=1.685m, Z=0.335m", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.EndVertical();
 
         GUILayout.EndVertical();
     }
@@ -2254,75 +2746,90 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("VẼ QUỸ ĐẠO 2D ➔ ÁNH XẠ 3D & CHỈNH SỬA", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("QUỸ ĐẠO 2D -> 3D", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
-        // ---------------------------------------------------------------------
-        // MỤC MỚI: BẢNG VẼ QUẦN JEAN 2D TIÊU CHUẨN -> ÁNH XẠ LÊN BỀ MẶT 3D
-        // ---------------------------------------------------------------------
         GUILayout.Space(6);
         DrawCanonicalJeans2DCanvasSection(width - 16f);
 
         GUILayout.Space(8);
-        GUILayout.Label("1. KẾT NỐI MÁY CHỦ AI (UDP / HTTP REST)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. SINH QUỸ ĐẠO (P1 / P3 / P4)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("P1: Zigzag", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            GenerateAndApplyMethodTrajectory("P1");
+        }
+        if (GUILayout.Button("P3: 12 Mốc", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            GenerateAndApplyMethodTrajectory("P3");
+        }
+        if (GUILayout.Button("P4: ICP/TPS", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
+        {
+            GenerateAndApplyMethodTrajectory("P4");
+        }
+        GUILayout.EndHorizontal();
+        if (GUILayout.Button("So sánh P1 / P3 / P4", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        {
+            OpenOrFocusPanel(8);
+            RunAllMethodsComparison();
+        }
+        if (!string.IsNullOrEmpty(comparisonStatusMsg))
+        {
+            GUILayout.Label(comparisonStatusMsg, AntigravityUITheme.StyleLabelCyan);
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.Space(8);
+        GUILayout.Label("2. MÁY CHỦ AI", AntigravityUITheme.StyleSectionLabel);
         AiServerClient aiClient = EnsureAiClient();
         if (aiClient != null)
         {
-            // Hàng nhập IP và Cổng máy chủ
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Địa chỉ IP:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(65));
-            string newIp = GUILayout.TextField(aiClient.serverIp, AntigravityUITheme.StyleTextField, GUILayout.Width(125));
-            if (newIp != aiClient.serverIp) { aiClient.serverIp = newIp; }
+            GUILayout.Label("IP:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(24));
+            string newIp = GUILayout.TextField(aiClient.serverIp, AntigravityUITheme.StyleTextField, GUILayout.Width(115));
+            if (newIp != aiClient.serverIp) { aiClient.serverIp = newIp; aiClient.SaveSettings(); }
 
-            GUILayout.Label("Cổng:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(40));
-            string portStr = GUILayout.TextField(aiClient.serverPort.ToString(), AntigravityUITheme.StyleTextField, GUILayout.Width(55));
+            GUILayout.Label("Cổng:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(38));
+            string portStr = GUILayout.TextField(aiClient.serverPort.ToString(), AntigravityUITheme.StyleTextField, GUILayout.Width(52));
             int parsedPort;
-            if (int.TryParse(portStr, out parsedPort)) { aiClient.serverPort = parsedPort; }
+            if (int.TryParse(portStr, out parsedPort) && parsedPort != aiClient.serverPort) { aiClient.serverPort = parsedPort; aiClient.SaveSettings(); }
 
-            if (GUILayout.Button("Kiểm Tra", AntigravityUITheme.StyleButton, GUILayout.Width(75), GUILayout.Height(22)))
+            if (GUILayout.Button("Ping", AntigravityUITheme.StyleButton, GUILayout.Width(56), GUILayout.Height(22)))
             {
                 aiClient.CheckServerStatus();
             }
             GUILayout.EndHorizontal();
 
-            // Hàng chọn Giao thức UDP hoặc HTTP
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Giao thức:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(65));
             GUIStyle bUdp = (aiClient.protocol == AiServerClient.ProtocolType.UDP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
             GUIStyle bHttp = (aiClient.protocol == AiServerClient.ProtocolType.HTTP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-            if (GUILayout.Button("UDP (5005 - Siêu tốc <1ms)", bUdp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.UDP);
-            if (GUILayout.Button("HTTP (5000 - REST)", bHttp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.HTTP);
+            if (GUILayout.Button("UDP (5005)", bUdp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.UDP);
+            if (GUILayout.Button("HTTP (5000)", bHttp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.HTTP);
             GUILayout.EndHorizontal();
 
-            // File phôi hiện tại dùng cho AI
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"Phôi gửi AI: [ {(!string.IsNullOrEmpty(selectedSampleName) ? selectedSampleName + ".ply" : "Chưa chọn file")} ]", AntigravityUITheme.StyleLabelCyan);
-            GUILayout.EndHorizontal();
-
-            // Nút Kích hoạt AI & Duyệt file
             GUILayout.BeginHorizontal();
             bool isBusy = aiClient.isProcessing;
-            string aiBtnTitle = isBusy ? "🟡 Đang xử lý AI..." : $"⚡ NHẬN DIỆN QUẦN & MỐC [{selectedSampleName}]";
+            string aiBtnTitle = isBusy ? "Đang xử lý..." : $"Nhận diện [{selectedSampleName}]";
             GUIStyle btnSt = isBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
-            if (GUILayout.Button(aiBtnTitle, btnSt, GUILayout.Height(30)))
+            if (GUILayout.Button(aiBtnTitle, btnSt, GUILayout.Height(28)))
             {
                 DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
                 aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
             }
-            if (GUILayout.Button("📁 Duyệt File...", AntigravityUITheme.StyleButton, GUILayout.Width(110), GUILayout.Height(30)))
+            if (GUILayout.Button("Chọn file...", AntigravityUITheme.StyleButton, GUILayout.Width(86), GUILayout.Height(28)))
             {
                 OpenFileBrowserForSample();
             }
-            if (GUILayout.Button("Quần Mẫu Cũ", AntigravityUITheme.StyleButton, GUILayout.Width(95), GUILayout.Height(30)))
+            if (GUILayout.Button("Mẫu mặc định", AntigravityUITheme.StyleButton, GUILayout.Width(92), GUILayout.Height(28)))
             {
                 LoadPantsOutlineTrajectory();
             }
             GUILayout.EndHorizontal();
 
-            // Toggle Chế độ tự động trong Card 3
-            bool newAutoMode = GUILayout.Toggle(aiClient.autoModeEnabled, " CHẾ ĐỘ TỰ ĐỘNG (Model AI tự gửi kết quả vào - UDP 5006)", AntigravityUITheme.StyleToggle);
+            bool newAutoMode = GUILayout.Toggle(aiClient.autoModeEnabled, " Tự động nhận từ AI (UDP 5006)", AntigravityUITheme.StyleToggle);
             if (newAutoMode != aiClient.autoModeEnabled)
             {
                 aiClient.SetAutoMode(newAutoMode);
@@ -2335,25 +2842,21 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         else
         {
-            if (GUILayout.Button("Nạp Mẫu Quần Jean CR10A", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26))) LoadPantsOutlineTrajectory();
+            if (GUILayout.Button("Nạp quỹ đạo mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26))) LoadPantsOutlineTrajectory();
         }
 
         GUILayout.Space(8);
-        GUILayout.Label("2. XEM TRƯỚC QUỸ ĐẠO TRÊN PHÔI (PREVIEW)", AntigravityUITheme.StyleSectionLabel);
-        showGizmos = GUILayout.Toggle(showGizmos, " Hiển thị đường quỹ đạo 3D (Polyline) đè lên phôi", AntigravityUITheme.StyleToggle);
-
-        GUILayout.Space(10);
-        GUILayout.Label("3. CHỈNH SỬA QUỸ ĐẠO THEO TỪNG ĐOẠN", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("3. CHỈNH ĐIỂM QUỸ ĐẠO", AntigravityUITheme.StyleSectionLabel);
+        showGizmos = GUILayout.Toggle(showGizmos, " Hiện đường quỹ đạo 3D", AntigravityUITheme.StyleToggle);
         int wpCount = waypoints.Count;
         int wpIdx = wpCount > 0 ? Mathf.Clamp(currentWaypointIndex, 0, wpCount - 1) : 0;
-        float distance = wpCount > 0 ? waypoints[wpIdx].distance_mm : 0f;
 
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("<< -10", AntigravityUITheme.StyleButton, GUILayout.Width(50), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 10));
-        if (GUILayout.Button("< Trước", AntigravityUITheme.StyleButton, GUILayout.Width(60), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 1));
-        GUILayout.Label($"Waypoint #{wpIdx} / {Mathf.Max(0, wpCount - 1)}", AntigravityUITheme.StyleLabelCyan);
-        if (GUILayout.Button("Sau >", AntigravityUITheme.StyleButton, GUILayout.Width(60), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 1));
-        if (GUILayout.Button("+10 >>", AntigravityUITheme.StyleButton, GUILayout.Width(50), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 10));
+        if (GUILayout.Button("-10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 10));
+        if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 1));
+        GUILayout.Label($"Điểm {wpIdx + 1}/{Mathf.Max(1, wpCount)}", AntigravityUITheme.StyleLabelCyan);
+        if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 1));
+        if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 10));
         GUILayout.EndHorizontal();
 
         int sliderIdx = Mathf.RoundToInt(GUILayout.HorizontalSlider(wpIdx, 0, Mathf.Max(0, wpCount - 1)));
@@ -2368,64 +2871,58 @@ public class DobotCR10AIKController : MonoBehaviour
             WaypointData wp = waypoints[wpIdx];
             GUILayout.Space(4);
             GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-            GUILayout.Label($"TCP Vị Trí: X={wp.targetPosGlobal_mm.x:F1}   Y={wp.targetPosGlobal_mm.y:F1}   Z={wp.targetPosGlobal_mm.z:F1} mm", AntigravityUITheme.StyleLabelMuted);
-            GUILayout.Label($"Góc 6 Khớp: {wp.jointAngles_deg[0]:F1}°, {wp.jointAngles_deg[1]:F1}°, {wp.jointAngles_deg[2]:F1}°, {wp.jointAngles_deg[3]:F1}°, {wp.jointAngles_deg[4]:F1}°, {wp.jointAngles_deg[5]:F1}°", AntigravityUITheme.StyleLabelCyan);
+            GUILayout.Label($"TCP (mm): X={wp.targetPosGlobal_mm.x:F1}  Y={wp.targetPosGlobal_mm.y:F1}  Z={wp.targetPosGlobal_mm.z:F1}", AntigravityUITheme.StyleLabelMuted);
+            GUILayout.Label($"Khớp (°): {wp.jointAngles_deg[0]:F1}, {wp.jointAngles_deg[1]:F1}, {wp.jointAngles_deg[2]:F1}, {wp.jointAngles_deg[3]:F1}, {wp.jointAngles_deg[4]:F1}, {wp.jointAngles_deg[5]:F1}", AntigravityUITheme.StyleLabelCyan);
             GUILayout.EndVertical();
 
-            // KHỐI ĐIỀU CHỈNH GÓC HƯỚNG TCP (ROLL / PITCH / YAW)
             GUILayout.Space(6);
-            GUILayout.Label("ĐIỀU CHỈNH GÓC HƯỚNG ĐẦU SÚNG (ROLL / PITCH / YAW):", AntigravityUITheme.StyleSectionLabel);
+            GUILayout.Label("GÓC HƯỚNG ĐẦU PHUN (RPY)", AntigravityUITheme.StyleSectionLabel);
 
-            // 1. Roll
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Roll: {wp.roll_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(85));
-            if (GUILayout.Button("-5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 5f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("-1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 1f, wp.pitch_deg, wp.yaw_deg);
+            GUILayout.Label($"Roll: {wp.roll_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 5f, wp.pitch_deg, wp.yaw_deg);
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 1f, wp.pitch_deg, wp.yaw_deg);
             float rSlider = GUILayout.HorizontalSlider(wp.roll_deg, -180f, 180f);
             if (Mathf.Abs(rSlider - wp.roll_deg) > 0.1f) UpdateWaypointRpy(wpIdx, Mathf.Round(rSlider * 10f) / 10f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("+1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 1f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("+5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 5f, wp.pitch_deg, wp.yaw_deg);
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 1f, wp.pitch_deg, wp.yaw_deg);
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 5f, wp.pitch_deg, wp.yaw_deg);
             GUILayout.EndHorizontal();
 
-            // 2. Pitch
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Pitch: {wp.pitch_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(85));
-            if (GUILayout.Button("-5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 5f, wp.yaw_deg);
-            if (GUILayout.Button("-1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 1f, wp.yaw_deg);
+            GUILayout.Label($"Pitch: {wp.pitch_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 5f, wp.yaw_deg);
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 1f, wp.yaw_deg);
             float pSlider = GUILayout.HorizontalSlider(wp.pitch_deg, -90f, 90f);
             if (Mathf.Abs(pSlider - wp.pitch_deg) > 0.1f) UpdateWaypointRpy(wpIdx, wp.roll_deg, Mathf.Round(pSlider * 10f) / 10f, wp.yaw_deg);
-            if (GUILayout.Button("+1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 1f, wp.yaw_deg);
-            if (GUILayout.Button("+5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 5f, wp.yaw_deg);
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 1f, wp.yaw_deg);
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 5f, wp.yaw_deg);
             GUILayout.EndHorizontal();
 
-            // 3. Yaw
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Yaw: {wp.yaw_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(85));
-            if (GUILayout.Button("-5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 5f);
-            if (GUILayout.Button("-1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 1f);
+            GUILayout.Label($"Yaw: {wp.yaw_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 5f);
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 1f);
             float ySlider = GUILayout.HorizontalSlider(wp.yaw_deg, -180f, 180f);
             if (Mathf.Abs(ySlider - wp.yaw_deg) > 0.1f) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, Mathf.Round(ySlider * 10f) / 10f);
-            if (GUILayout.Button("+1°", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 1f);
-            if (GUILayout.Button("+5°", AntigravityUITheme.StyleButton, GUILayout.Width(35), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 5f);
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 1f);
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 5f);
             GUILayout.EndHorizontal();
 
-            // 4. Các nút thao tác nhanh
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Bích Chúc Thẳng (180, 0, 0)", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+            if (GUILayout.Button("Thẳng đứng", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
             {
                 UpdateWaypointRpy(wpIdx, 180f, 0f, 0f);
             }
-            if (GUILayout.Button("Lan truyền RPY về sau", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+            if (GUILayout.Button("Áp dụng về sau", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
             {
                 PropagateRpyForward(wpIdx);
             }
-            if (GUILayout.Button("Áp dụng RPY cho toàn bộ", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+            if (GUILayout.Button("Áp dụng tất cả", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
             {
                 ApplyRpyToAllWaypoints(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
             }
             GUILayout.EndHorizontal();
 
-            // Danh sách 8 nghiệm giải tích
             Quaternion rot = GetWaypointFlangeRotation(wp);
             float[] seedAngles = wpIdx > 0 ? waypoints[wpIdx - 1].jointAngles_rad : null;
             List<DobotCR10AKinematics.IKSolution> sols = DobotCR10AKinematics.SolveTcpPose(
@@ -2434,14 +2931,14 @@ public class DobotCR10AIKController : MonoBehaviour
             if (sols != null && sols.Count > 0)
             {
                 GUILayout.Space(4);
-                GUILayout.Label($"CHỌN BỘ NGHIỆM PHÙ HỢP ({sols.Count} NGHIỆM GIẢI TÍCH):", AntigravityUITheme.StyleSectionLabel);
-                waypointSolsScroll = GUILayout.BeginScrollView(waypointSolsScroll, GUILayout.Height(Mathf.Min(130f, sols.Count * 26f + 4f)));
+                GUILayout.Label($"NGHIỆM IK ({sols.Count})", AntigravityUITheme.StyleSectionLabel);
+                waypointSolsScroll = GUILayout.BeginScrollView(waypointSolsScroll, GUILayout.Height(Mathf.Min(120f, sols.Count * 24f + 4f)));
                 for (int i = 0; i < sols.Count; i++)
                 {
                     var s = sols[i];
                     bool isCurrentChoice = IsMatchingConfiguration(wp.jointAngles_rad, s.jointsRad);
-                    string pref = isCurrentChoice ? "★ [ĐANG CHỌN] " : $"#{i + 1} ";
-                    string label = $"{pref}{s.branchName} (Sai số: {s.positionErrorMm:F4}mm)";
+                    string pref = isCurrentChoice ? "[Đang chọn] " : $"#{i + 1} ";
+                    string label = $"{pref}{s.branchName} ({s.positionErrorMm:F3} mm)";
 
                     GUIStyle btnStyle = isCurrentChoice ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
                     if (GUILayout.Button(label, btnStyle, GUILayout.Height(22)))
@@ -2452,11 +2949,11 @@ public class DobotCR10AIKController : MonoBehaviour
                 GUILayout.EndScrollView();
 
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Lan truyền cấu hình cho các điểm sau", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+                if (GUILayout.Button("Lan truyền về sau", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
                 {
                     PropagateCurrentConfigurationForward(wpIdx);
                 }
-                if (GUILayout.Button("Khôi phục mặc định Q*", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+                if (GUILayout.Button("Mặc định Q*", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
                 {
                     ResetWaypointToDefault(wpIdx);
                 }
@@ -2474,21 +2971,18 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("XUẤT & CẬP NHẬT CHƯƠNG TRÌNH ROBOT", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("XUẤT / NHẬP CHƯƠNG TRÌNH", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         GUILayout.Space(6);
 
-        // Khối kiểm tra Khóa An Toàn (Safety Interlock)
         if (hasCriticalErrors)
         {
             GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-            GUILayout.Label("⚠️ KHÓA AN TOÀN ĐANG HOẠT ĐỘNG", AntigravityUITheme.StyleLabelRed);
-            GUILayout.Label("Quỹ đạo có lỗi nghiêm trọng (ngoài tầm với, kỳ dị hoặc va chạm).", AntigravityUITheme.StyleLabelMuted);
-            GUILayout.Label("Lệnh xuất sang Robot CR10A bị CHẶN để bảo vệ phần cứng!", AntigravityUITheme.StyleLabelRed);
-            forceBypassSafetyInterlock = GUILayout.Toggle(forceBypassSafetyInterlock, " [Kỹ sư] Mở khóa cưỡng bức (Force Bypass Interlock)", AntigravityUITheme.StyleToggle);
+            GUILayout.Label("KHÓA AN TOÀN: Quỹ đạo có lỗi, đang chặn xuất.", AntigravityUITheme.StyleLabelRed);
+            forceBypassSafetyInterlock = GUILayout.Toggle(forceBypassSafetyInterlock, " Mở khóa cưỡng bức (Kỹ sư)", AntigravityUITheme.StyleToggle);
             GUILayout.EndVertical();
             GUILayout.Space(6);
         }
@@ -2496,24 +2990,28 @@ public class DobotCR10AIKController : MonoBehaviour
         bool canExport = !hasCriticalErrors || forceBypassSafetyInterlock;
         GUIStyle exportBtnStyle = canExport ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
 
-        GUILayout.Label("1. XUẤT VÀ CẬP NHẬT LẠI CHƯƠNG TRÌNH (EXPORT / RE-EXPORT)", AntigravityUITheme.StyleSectionLabel);
-        if (GUILayout.Button("1. Xuất Script Python Dobot CR10A (.py)", exportBtnStyle, GUILayout.Height(28)))
+        GUILayout.Label("1. XUẤT CHƯƠNG TRÌNH", AntigravityUITheme.StyleSectionLabel);
+        if (GUILayout.Button("Xuất Python Dobot CR10A (.py)", exportBtnStyle, GUILayout.Height(28)))
         {
             ExportDobotPythonScript();
         }
-        if (GUILayout.Button("2. Xuất Tọa Độ Quỹ Đạo Đã Chỉnh Sửa (.csv)", exportBtnStyle, GUILayout.Height(28)))
+        if (GUILayout.Button("Xuất ROS 2 / MoveIt 2 (.yaml)", exportBtnStyle, GUILayout.Height(28)))
+        {
+            ExportRos2TrajectoryYaml();
+        }
+        if (GUILayout.Button("Xuất Quỹ Đạo 6-DOF (.csv)", exportBtnStyle, GUILayout.Height(28)))
         {
             ExportUpdatedCsvTrajectory();
         }
-        if (GUILayout.Button("3. Mở Thư Mục Xuất (output_drawing)", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        if (GUILayout.Button("Mở thư mục xuất", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
             OpenExportFolder();
         }
 
-        GUILayout.Space(10);
-        GUILayout.Label("2. NHẬP FILE QUỸ ĐẠO MỚI (IMPORT CSV)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Space(8);
+        GUILayout.Label("2. NHẬP FILE QUỸ ĐẠO (.CSV)", AntigravityUITheme.StyleSectionLabel);
         customImportCsvPath = GUILayout.TextField(customImportCsvPath, AntigravityUITheme.StyleTextField);
-        if (GUILayout.Button("Nạp File CSV Quỹ Đạo Vào Simulator", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        if (GUILayout.Button("Nạp file CSV", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
             LoadNamedTrajectory(customImportCsvPath);
         }
@@ -2527,7 +3025,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (!string.IsNullOrEmpty(lastExportedCodePreview))
         {
             GUILayout.Space(6);
-            GUILayout.Label("XEM TRƯỚC MÃ LỆNH VỪA XUẤT:", AntigravityUITheme.StyleSectionLabel);
+            GUILayout.Label("XEM TRƯỚC", AntigravityUITheme.StyleSectionLabel);
             exportPreviewScroll = GUILayout.BeginScrollView(exportPreviewScroll, GUILayout.Height(120));
             GUILayout.TextArea(lastExportedCodePreview, GUI.skin.textArea);
             GUILayout.EndScrollView();
@@ -2543,36 +3041,32 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("CẢNH BÁO AN TOÀN & XỬ LÝ LỖI", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("KIỂM TRA AN TOÀN", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         GUILayout.Space(6);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         if (hasCriticalErrors)
         {
-            GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-            GUILayout.Label("❌ NGUY HIỂM: PHÁT HIỆN LỖI QUỸ ĐẠO!", AntigravityUITheme.StyleLabelRed);
-            GUILayout.Label("Đã tự động kích hoạt Khóa An Toàn chặn xuất lệnh sang Robot thật.", AntigravityUITheme.StyleLabelMuted);
-            GUILayout.EndVertical();
+            GUILayout.Label("Phát hiện lỗi an toàn - Đã khóa xuất lệnh.", AntigravityUITheme.StyleLabelRed);
         }
         else
         {
-            GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-            GUILayout.Label("✅ AN TOÀN TUYỆT ĐỐI: Quỹ đạo đạt chuẩn 100%", AntigravityUITheme.StyleLabelGreen);
-            GUILayout.Label("Không phát hiện va chạm bàn, điểm kỳ dị hay vượt tầm với.", AntigravityUITheme.StyleLabelMuted);
-            GUILayout.EndVertical();
+            GUILayout.Label("Đạt chuẩn an toàn (không va chạm / kỳ dị).", AntigravityUITheme.StyleLabelGreen);
         }
+        GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        if (GUILayout.Button("Quét Lại Toàn Bộ Quỹ Đạo (Run Safety Diagnostics)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+        if (GUILayout.Button("Quét lại quỹ đạo", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
         {
             RunDiagnostics();
         }
 
         GUILayout.Space(8);
-        GUILayout.Label($"DANH SÁCH SỰ CỐ ĐÃ QUÉT ({diagnosticResults.Count} MỤC):", AntigravityUITheme.StyleSectionLabel);
-        diagnosticsScroll = GUILayout.BeginScrollView(diagnosticsScroll, GUILayout.Height(220));
+        GUILayout.Label($"KẾT QUẢ QUÉT ({diagnosticResults.Count})", AntigravityUITheme.StyleSectionLabel);
+        diagnosticsScroll = GUILayout.BeginScrollView(diagnosticsScroll, GUILayout.Height(240));
 
         for (int i = 0; i < diagnosticResults.Count; i++)
         {
@@ -2580,15 +3074,15 @@ public class DobotCR10AIKController : MonoBehaviour
             GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
             GUILayout.BeginHorizontal();
 
-            string icon = item.severity == DiagnosticItem.Severity.Error ? "[LỖI]" : (item.severity == DiagnosticItem.Severity.Warning ? "[CẢNH BÁO]" : "[THÔNG TIN]");
+            string tag = item.severity == DiagnosticItem.Severity.Error ? "[LỖI]" : (item.severity == DiagnosticItem.Severity.Warning ? "[CẢNH BÁO]" : "[OK]");
             GUIStyle textStyle = item.severity == DiagnosticItem.Severity.Error ? AntigravityUITheme.StyleLabelRed : (item.severity == DiagnosticItem.Severity.Warning ? AntigravityUITheme.StyleLabelYellow : AntigravityUITheme.StyleLabelGreen);
 
-            GUILayout.Label($"{icon} {item.category}", textStyle, GUILayout.ExpandWidth(true));
+            GUILayout.Label($"{tag} {item.category}", textStyle, GUILayout.ExpandWidth(true));
             if (item.waypointIndex >= 0)
             {
-                if (GUILayout.Button($"Xem Wp #{item.waypointIndex}", AntigravityUITheme.StyleButton, GUILayout.Width(100), GUILayout.Height(20)))
+                if (GUILayout.Button($"Điểm #{item.waypointIndex + 1}", AntigravityUITheme.StyleButton, GUILayout.Width(80), GUILayout.Height(20)))
                 {
-                    interfaceTab = 3; // Chuyển sang Tab Quỹ đạo
+                    OpenOrFocusPanel(3);
                     ApplyWaypoint(item.waypointIndex);
                 }
             }
@@ -2624,86 +3118,51 @@ public class DobotCR10AIKController : MonoBehaviour
 
         try
         {
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine("#!/usr/bin/env python3");
-            sb.AppendLine("# -*- coding: utf-8 -*-");
-            sb.AppendLine("\"\"\"");
-            sb.AppendLine("DOBOT CR10A TRAJECTORY EXECUTION SCRIPT");
-            sb.AppendLine("Sinh tu dong tu Dobot CR10A Workbench (Unity Simulator).");
-            sb.AppendLine($"Ngay xuat: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"Tong so Waypoint: {waypoints.Count}");
-            sb.AppendLine($"Dau phun TCP: Z={toolLength:F1}mm, X={toolOffsetX:F1}mm, Y={toolOffsetY:F1}mm, Co vet={sprayWidthMm:F1}mm");
-            sb.AppendLine("\"\"\"");
-            sb.AppendLine();
-            sb.AppendLine("import time");
-            sb.AppendLine();
-            sb.AppendLine("class DobotCR10A:");
-            sb.AppendLine("    def __init__(self, ip='192.168.5.1', port=29999):");
-            sb.AppendLine("        self.ip = ip");
-            sb.AppendLine("        self.port = port");
-            sb.AppendLine("        print(f'[CR10A] Ket noi Robot tai {self.ip}:{self.port}...')");
-            sb.AppendLine();
-            sb.AppendLine("    def enable_robot(self):");
-            sb.AppendLine("        print('[CR10A] EnableRobot() - San sang van hanh.')");
-            sb.AppendLine();
-            sb.AppendLine("    def set_speed_factor(self, ratio):");
-            sb.AppendLine("        print(f'[CR10A] SpeedFactor({ratio}%)')");
-            sb.AppendLine();
-            sb.AppendLine("    def move_j(self, j1, j2, j3, j4, j5, j6):");
-            sb.AppendLine("        # print(f'MoveJ({j1:.2f}, {j2:.2f}, {j3:.2f}, {j4:.2f}, {j5:.2f}, {j6:.2f})')");
-            sb.AppendLine("        pass");
-            sb.AppendLine();
-            sb.AppendLine("    def set_digital_output(self, index, status):");
-            sb.AppendLine("        print(f'[CR10A] DO({index}) = {status}')");
-            sb.AppendLine();
-            sb.AppendLine("def main():");
-            sb.AppendLine("    robot = DobotCR10A()");
-            sb.AppendLine("    robot.enable_robot()");
-            sb.AppendLine($"    robot.set_speed_factor({Mathf.Clamp(Mathf.RoundToInt(playbackSpeed * 30f), 1, 100)})");
-            sb.AppendLine();
-            sb.AppendLine("    # 1. Ve vi tri Home Pose");
-            sb.AppendLine("    print('[CR10A] Di chuyen ve Home (0, 0, 0, 0, 0, 0)...')");
-            sb.AppendLine("    robot.move_j(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)");
-            sb.AppendLine("    time.sleep(1.0)");
-            sb.AppendLine();
+            float speedRatioPct = Mathf.Clamp(playbackSpeed * 30f, 5f, 100f);
+            string code = TrajectoryEvaluationEngine.BuildRealDobotPythonScript(
+                waypoints, toolLength, toolOffsetX, toolOffsetY,
+                sprayWidthMm, speedRatioPct, targetTcpSpeedMmPerSec);
 
-            if (waypoints.Count > 0)
-            {
-                var wp0 = waypoints[0];
-                sb.AppendLine("    # 2. Tiep can diem bat dau quy dao");
-                sb.AppendLine($"    robot.move_j({wp0.jointAngles_deg[0]:F2}, {wp0.jointAngles_deg[1]:F2}, {wp0.jointAngles_deg[2]:F2}, {wp0.jointAngles_deg[3]:F2}, {wp0.jointAngles_deg[4]:F2}, {wp0.jointAngles_deg[5]:F2})");
-                sb.AppendLine();
-                sb.AppendLine("    # 3. Bat van sung phun");
-                sb.AppendLine("    robot.set_digital_output(1, 1)");
-                sb.AppendLine();
-                sb.AppendLine("    # 4. Van hanh toan bo cac waypoint");
-                for (int i = 0; i < waypoints.Count; i++)
-                {
-                    var wp = waypoints[i];
-                    sb.AppendLine($"    robot.move_j({wp.jointAngles_deg[0]:F2}, {wp.jointAngles_deg[1]:F2}, {wp.jointAngles_deg[2]:F2}, {wp.jointAngles_deg[3]:F2}, {wp.jointAngles_deg[4]:F2}, {wp.jointAngles_deg[5]:F2}) # Wp #{i}");
-                }
-                sb.AppendLine();
-                sb.AppendLine("    # 5. Tat van sung phun");
-                sb.AppendLine("    robot.set_digital_output(1, 0)");
-            }
-
-            sb.AppendLine();
-            sb.AppendLine("    # 6. Tro ve Home an toan");
-            sb.AppendLine("    print('[CR10A] Hoan tat quy dao. Tro ve Home (0, 0, 0, 0, 0, 0)...')");
-            sb.AppendLine("    robot.move_j(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)");
-            sb.AppendLine();
-            sb.AppendLine("if __name__ == '__main__':");
-            sb.AppendLine("    main()");
-
-            File.WriteAllText(outputPath, sb.ToString());
-            exportStatusMessage = $"✓ Đã xuất Dobot Python script ({waypoints.Count} wp) sang:\n{Path.GetFileName(outputPath)}";
-            lastExportedCodePreview = sb.ToString();
+            File.WriteAllText(outputPath, code);
+            exportStatusMessage = $"Đã xuất Python ({waypoints.Count} điểm): {Path.GetFileName(outputPath)}";
+            lastExportedCodePreview = code.Substring(0, Mathf.Min(1500, code.Length));
             Debug.Log($"[CR10A Export] {exportStatusMessage}");
         }
         catch (Exception ex)
         {
             exportStatusMessage = $"Lỗi khi xuất Python: {ex.Message}";
             Debug.LogError($"[CR10A Export] {exportStatusMessage}");
+        }
+    }
+
+    public void ExportRos2TrajectoryYaml(string outputPath = null)
+    {
+        if (hasCriticalErrors && !forceBypassSafetyInterlock)
+        {
+            exportStatusMessage = "[CHẶN XUẤT] Không thể xuất ROS 2 YAML do có lỗi an toàn nghiêm trọng!";
+            Debug.LogError(exportStatusMessage);
+            return;
+        }
+
+        string exportDir = Path.Combine(Application.dataPath, "..", "output_drawing");
+        if (!Directory.Exists(exportDir)) Directory.CreateDirectory(exportDir);
+        if (string.IsNullOrEmpty(outputPath))
+        {
+            outputPath = Path.Combine(exportDir, "dobot_cr10a_ros2_trajectory.yaml");
+        }
+
+        try
+        {
+            string yaml = TrajectoryEvaluationEngine.BuildRos2TrajectoryYaml(waypoints, targetTcpSpeedMmPerSec);
+            File.WriteAllText(outputPath, yaml);
+            exportStatusMessage = $"Đã xuất ROS 2 YAML ({waypoints.Count} điểm): {Path.GetFileName(outputPath)}";
+            lastExportedCodePreview = yaml.Substring(0, Mathf.Min(1200, yaml.Length));
+            Debug.Log($"[CR10A Export ROS2] {exportStatusMessage}");
+        }
+        catch (Exception ex)
+        {
+            exportStatusMessage = $"Lỗi khi xuất ROS 2 YAML: {ex.Message}";
+            Debug.LogError($"[CR10A Export ROS2] {exportStatusMessage}");
         }
     }
 
@@ -2744,7 +3203,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
 
             File.WriteAllText(outputPath, sb.ToString());
-            exportStatusMessage = $"✓ Đã xuất CSV cập nhật ({waypoints.Count} wp) sang:\n{Path.GetFileName(outputPath)}";
+            exportStatusMessage = $"Đã xuất CSV ({waypoints.Count} điểm): {Path.GetFileName(outputPath)}";
             lastExportedCodePreview = "[CSV PREVIEW]\n" + sb.ToString().Substring(0, Mathf.Min(800, sb.Length));
             Debug.Log($"[CR10A Export] {exportStatusMessage}");
         }
@@ -2828,13 +3287,21 @@ public class DobotCR10AIKController : MonoBehaviour
             return;
         }
 
-        // 2. Kiểm tra quỹ đạo: Tầm với, Va chạm mặt bàn, Điểm kỳ dị, Hướng phôi
+        // 2. Kiểm tra quỹ đạo toàn diện (Khâu 7 — Safety Interlock theo file góp ý):
+        //    IK, Tầm với, Giới hạn khớp cơ khí CR10A, Cú nhảy khớp lớn, Va chạm 3D toàn bộ khâu Link2..TCP với bàn,
+        //    Điểm kỳ dị, Góc nghiêng súng <= θ_max, và Vùng cấm phun (Keep-Out Zones).
         int unsolvedCount = 0;
         int outOfReachCount = 0;
+        int jointLimitCount = 0;
+        int jointJumpCount = 0;
         int lowZCount = 0;
+        int linkCollisionCount = 0;
+        int tiltExceedCount = 0;
+        int keepOutViolationCount = 0;
         int wristSingularityCount = 0;
         int elbowSingularityCount = 0;
         int invertedCount = 0;
+        float maxAllowedTilt = sprayTechParams != null ? sprayTechParams.maxTiltDeg : 30f;
 
         for (int i = 0; i < waypoints.Count; i++)
         {
@@ -2879,20 +3346,82 @@ public class DobotCR10AIKController : MonoBehaviour
                     diagnosticResults.Add(new DiagnosticItem
                     {
                         severity = DiagnosticItem.Severity.Error,
-                        category = "Va chạm bàn (Collision)",
-                        message = $"Waypoint #{i} có Z = {wp.targetPosGlobal_mm.z:F1}mm quá sát mặt bàn (<10mm)!",
+                        category = "Va chạm bàn — TCP (Collision)",
+                        message = $"Waypoint #{i} có TCP Z = {wp.targetPosGlobal_mm.z:F1}mm quá sát mặt bàn (<10mm)!",
                         waypointIndex = i
                     });
                 }
             }
 
-            if (Mathf.Abs(wp.pitch_deg) > 45.0f && Mathf.Abs(wp.pitch_deg - 90.0f) > 10.0f)
+            if (wp.isSolved && wp.jointAngles_deg != null && wp.jointAngles_deg.Length >= 6)
             {
-                invertedCount++;
-            }
+                // Kiểm tra giới hạn cơ khí 6 khớp CR10A (J3 ±160°...)
+                if (!DobotCR10AKinematics.IsWithinJointLimits(wp.jointAngles_deg, out int badJ, out float badAng))
+                {
+                    jointLimitCount++;
+                    if (jointLimitCount <= 3)
+                    {
+                        diagnosticResults.Add(new DiagnosticItem
+                        {
+                            severity = DiagnosticItem.Severity.Error,
+                            category = "Giới hạn khớp cơ khí (Joint Limit)",
+                            message = $"Waypoint #{i}: Khớp J{badJ + 1} = {badAng:F1}° vượt giới hạn cơ khí Dobot CR10A!",
+                            waypointIndex = i
+                        });
+                    }
+                }
 
-            if (wp.isSolved && wp.jointAngles_rad != null && wp.jointAngles_rad.Length >= 6)
-            {
+                // Kiểm tra va chạm 3D thực của các khâu Link2..Flange..TCP với mặt bàn (Z < 15mm) và tự va chạm đế (R < 110mm, Z < 180mm)
+                Vector3[] linkPts = DobotCR10AKinematics.ForwardAllJointPositionsRobotMm(
+                    wp.jointAngles_rad, toolLength, toolOffsetX, toolOffsetY);
+                for (int l = 2; l <= 5; l++)
+                {
+                    float horizR = Mathf.Sqrt(linkPts[l].x * linkPts[l].x + linkPts[l].y * linkPts[l].y);
+                    bool hitTable = linkPts[l].z < 20f;
+                    bool hitBase = (l >= 3 && horizR < 115f && linkPts[l].z < 190f);
+                    if (hitTable || hitBase)
+                    {
+                        linkCollisionCount++;
+                        if (linkCollisionCount <= 3)
+                        {
+                            diagnosticResults.Add(new DiagnosticItem
+                            {
+                                severity = DiagnosticItem.Severity.Error,
+                                category = hitTable ? "Va chạm khâu Robot với bàn (3D Link)" : "Tự va chạm thân đế Robot",
+                                message = $"Waypoint #{i}: Khâu J{l + 1} tại ({linkPts[l].x:F0}, {linkPts[l].y:F0}, Z={linkPts[l].z:F0}mm) có nguy cơ va chạm!",
+                                waypointIndex = i
+                            });
+                        }
+                        break;
+                    }
+                }
+
+                // Kiểm tra bước nhảy góc khớp đột ngột giữa 2 waypoint liền kề trên cùng đoạn phun
+                if (i > 0 && wp.sprayOn && waypoints[i - 1].isSolved)
+                {
+                    float maxJump = 0f;
+                    int jumpJoint = 0;
+                    for (int j = 0; j < 6; j++)
+                    {
+                        float dq = Mathf.Abs(Mathf.DeltaAngle(waypoints[i - 1].jointAngles_deg[j], wp.jointAngles_deg[j]));
+                        if (dq > maxJump) { maxJump = dq; jumpJoint = j; }
+                    }
+                    if (maxJump > 45f)
+                    {
+                        jointJumpCount++;
+                        if (jointJumpCount <= 3)
+                        {
+                            diagnosticResults.Add(new DiagnosticItem
+                            {
+                                severity = DiagnosticItem.Severity.Warning,
+                                category = "Bước nhảy khớp lớn (>45°)",
+                                message = $"Waypoint #{i}: Khớp J{jumpJoint + 1} nhảy {maxJump:F1}° so với Wp #{i - 1} (dễ giật khi phun)!",
+                                waypointIndex = i
+                            });
+                        }
+                    }
+                }
+
                 if (Mathf.Abs(wp.jointAngles_rad[4]) < 0.052f) // ~3 deg
                 {
                     wristSingularityCount++;
@@ -2923,11 +3452,70 @@ public class DobotCR10AIKController : MonoBehaviour
                     }
                 }
             }
+
+            // Kiểm tra góc nghiêng súng so với trục đứng <= θ_max (khi đang ở chế độ bàn phẳng)
+            if (!showStandingMold3D)
+            {
+                Vector3 sprayAxisR = DobotCR10AKinematics.RpyToSprayAxisRobot(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+                float tiltFromDown = Vector3.Angle(sprayAxisR, new Vector3(0f, 0f, -1f));
+                if (tiltFromDown > maxAllowedTilt + 5f)
+                {
+                    tiltExceedCount++;
+                    if (tiltExceedCount <= 3)
+                    {
+                        diagnosticResults.Add(new DiagnosticItem
+                        {
+                            severity = DiagnosticItem.Severity.Warning,
+                            category = $"Góc nghiêng súng > θ_max ({maxAllowedTilt:F0}°)",
+                            message = $"Waypoint #{i} nghiêng {tiltFromDown:F1}° vượt ngưỡng công nghệ {maxAllowedTilt:F0}°!",
+                            waypointIndex = i
+                        });
+                    }
+                }
+
+                // Kiểm tra vùng cấm phun (Keep-Out Zones) cho các điểm đang bật phun
+                if (wp.sprayOn && garmentContourWorld != null && garmentContourWorld.Count >= 4 && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+                {
+                    float marginMm = sprayTechParams != null ? sprayTechParams.borderMarginMm : 15f;
+                    if (!TrajectoryEvaluationEngine.IsInsideValidSprayZone(
+                        wp.targetPosWorld_m.x, wp.targetPosWorld_m.z,
+                        garmentContourWorld, landmarksWorldPos, marginMm * 0.5f, out string reason))
+                    {
+                        keepOutViolationCount++;
+                        if (keepOutViolationCount <= 3)
+                        {
+                            diagnosticResults.Add(new DiagnosticItem
+                            {
+                                severity = DiagnosticItem.Severity.Warning,
+                                category = "Vi phạm Vùng Cấm / Biên vải",
+                                message = $"Waypoint #{i} đang bật phun nhưng rơi vào [{reason}].",
+                                waypointIndex = i
+                            });
+                        }
+                    }
+                }
+            }
+
+            if (Mathf.Abs(wp.pitch_deg) > 45.0f && Mathf.Abs(wp.pitch_deg - 90.0f) > 10.0f)
+            {
+                invertedCount++;
+            }
         }
 
-        if (unsolvedCount > 0 || outOfReachCount > 0 || lowZCount > 0)
+        if (unsolvedCount > 0 || outOfReachCount > 0 || lowZCount > 0 || jointLimitCount > 0 || linkCollisionCount > 0)
         {
             hasCriticalErrors = true;
+        }
+
+        if (keepOutViolationCount > 3)
+        {
+            diagnosticResults.Add(new DiagnosticItem
+            {
+                severity = DiagnosticItem.Severity.Warning,
+                category = "Tổng hợp Vùng cấm phun",
+                message = $"Có {keepOutViolationCount} điểm bật phun sát mép vải hoặc vùng cấm (cạp/đũng/gấu).",
+                waypointIndex = -1
+            });
         }
 
         if (invertedCount > 0)
@@ -2982,6 +3570,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             loader.plyFilePath = path;
             loader.ReloadFullPointCloud();
+            RefreshRealCameraImageForCurrentSample();
             RunDiagnostics();
         }
         else
@@ -3196,59 +3785,144 @@ public class DobotCR10AIKController : MonoBehaviour
     }
 
     // =========================================================================
-    // CARD 6: CAMERA TỪ TRÊN XUỐNG & HIỂN THỊ 12 ĐIỂM MỐC AI / SEGMENT
+    // CARD 6: TAB VIEWS (GÓC NHÌN, 3D MESH / POINT CLOUD, MỐC AI & LỚP HIỂN THỊ)
     // =========================================================================
     private void DrawTopDownLandmarksAndSegCard(float width, Action onClose = null)
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("CAMERA TRÊN XUỐNG & ĐIỂM MỐC AI / SEGMENT", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("VIEWS - HIỂN THỊ 3D", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         RobotCameraController rcc = EnsureCameraController();
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
 
         GUILayout.Space(6);
-        GUILayout.Label("1. GÓC NHÌN CAMERA TRỰC DIỆN TỪ TRÊN XUỐNG (TOP-DOWN VIEW)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. GÓC NHÌN CAMERA", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("📷 Chuyển Góc Nhìn Từ Trên Xuống (Top-Down)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
-        {
-            if (rcc != null) rcc.SetPresetTopDown();
-        }
-        if (GUILayout.Button("Focus Quần", AntigravityUITheme.StyleButton, GUILayout.Width(95), GUILayout.Height(30)))
-        {
-            if (rcc != null) rcc.FocusGarment();
-        }
+        if (GUILayout.Button("3/4", AntigravityUITheme.StyleButton, GUILayout.Height(25))) { if (rcc) rcc.SetPresetPerspective(); }
+        if (GUILayout.Button("Trên", AntigravityUITheme.StyleButton, GUILayout.Height(25))) { if (rcc) rcc.SetPresetTopDown(); }
+        if (GUILayout.Button("Trước", AntigravityUITheme.StyleButton, GUILayout.Height(25))) { if (rcc) rcc.SetPresetFront(); }
+        if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(25))) { if (rcc) rcc.SetPresetSide(); }
         GUILayout.EndHorizontal();
-
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Góc 3/4 Phối Cảnh", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.SetPresetPerspective(); }
-        if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.SetPresetFront(); }
-        if (GUILayout.Button("Ngang Bàn", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.SetPresetSide(); }
+        GUIStyle zividViewBtnSt = (rcc != null && rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Góc Camera Zivid", zividViewBtnSt, GUILayout.Height(25))) { if (rcc) rcc.ToggleZividCameraView(); }
+        GUIStyle pipViewBtnSt = (rcc != null && rcc.showZividPipWindow && !rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Khung PiP Cam", pipViewBtnSt, GUILayout.Height(25))) { if (rcc) rcc.ToggleZividPip(); }
         GUILayout.EndHorizontal();
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Focus Phôi", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.FocusGarment(); }
+        if (GUILayout.Button("Focus Robot", AntigravityUITheme.StyleButton, GUILayout.Height(24))) { if (rcc) rcc.ResetFocus(); }
+        GUILayout.EndHorizontal();
+        FixedRigCamera rigViewCam = rcc != null ? rcc.EnsureFixedRigCamera(createIfMissing: false) : FindAnyObjectByType<FixedRigCamera>();
+        if (rigViewCam != null)
+        {
+            rigViewCam.showRuntimeRigVisual = GUILayout.Toggle(rigViewCam.showRuntimeRigVisual, " Hiện mô hình Camera Zivid & vùng FOV 3D", AntigravityUITheme.StyleToggle);
+            rigViewCam.showRuntimeFovFrustum = rigViewCam.showRuntimeRigVisual;
+        }
 
-        GUILayout.Space(8);
-        GUILayout.Label("2. BẬT / TẮT LỚP HIỂN THỊ AI TRÊN ĐÁM MÂY ĐIỂM 3D", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Space(6);
+        GUILayout.Label("2. CHẾ ĐỘ PHÔI (3D MESH / POINT CLOUD)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        showLandmarks3D = GUILayout.Toggle(showLandmarks3D, " [YOLO11-pose] Hiện 12 Điểm Mốc Giải Phẫu 3D (Landmarks + Khung Xương)", AntigravityUITheme.StyleToggle);
-        if (showLandmarks3D)
+        bool isMeshMode = plyLoader != null && plyLoader.renderMode == PLYDirectLoader.WorkpieceRenderMode.Mesh3D;
+        bool isCloudVis = plyLoader != null && plyLoader.IsVisible();
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("3D Mesh", isMeshMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
-            showLandmarkLabels = GUILayout.Toggle(showLandmarkLabels, " Hiện nhãn tên & cao độ Z (mm) từng điểm mốc", AntigravityUITheme.StyleToggle);
+            if (plyLoader != null) plyLoader.SetRenderMode(PLYDirectLoader.WorkpieceRenderMode.Mesh3D);
         }
-        showSegmentationContour3D = GUILayout.Toggle(showSegmentationContour3D, " [YOLO11-seg] Hiện Đường Bao Segment Quần 3D (Viền Xanh Ngọc)", AntigravityUITheme.StyleToggle);
-        showSprayZones3D = GUILayout.Toggle(showSprayZones3D, " [Keep-out] Hiện Vùng Cho Phép Phun 2 Ống Đùi-Gối (Viền Vàng Cam)", AntigravityUITheme.StyleToggle);
-        showGizmos = GUILayout.Toggle(showGizmos, " [Trajectory] Hiện Đường Quỹ Đạo Phun 3D (Cyan Polyline)", AntigravityUITheme.StyleToggle);
+        if (GUILayout.Button("Point Cloud", !isMeshMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            if (plyLoader != null) plyLoader.SetRenderMode(PLYDirectLoader.WorkpieceRenderMode.PointCloud);
+        }
+        if (GUILayout.Button(isCloudVis ? "Ẩn phôi" : "Hiện phôi", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            TogglePointCloudVisible(!isCloudVis);
+        }
+        GUILayout.EndHorizontal();
+        if (GUILayout.Button("Cập nhật 3D Mesh", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        {
+            if (plyLoader != null) plyLoader.ConvertPointCloudToSurfaceMesh();
+        }
+        int totalPts = plyLoader != null ? plyLoader.totalLoadedPoints : 0;
+        GUILayout.Label($"Điểm 3D: {totalPts:N0} | Đang xem: {(isMeshMode ? "3D Mesh" : "Point Cloud")}", AntigravityUITheme.StyleLabelMuted);
         GUILayout.EndVertical();
 
-        GUILayout.Space(8);
+        GUILayout.Space(6);
+        GUILayout.Label("3. CÁC LỚP HIỂN THỊ 3D", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        showLandmarks3D = GUILayout.Toggle(showLandmarks3D, " 12 mốc AI & khung xương", AntigravityUITheme.StyleToggle);
+        if (showLandmarks3D) showLandmarkLabels = GUILayout.Toggle(showLandmarkLabels, " Nhãn tên & cao độ Z", AntigravityUITheme.StyleToggle);
+        showSegmentationContour3D = GUILayout.Toggle(showSegmentationContour3D, " Đường bao thân quần", AntigravityUITheme.StyleToggle);
+        showSprayZones3D = GUILayout.Toggle(showSprayZones3D, " Vùng phun 2 ống quần", AntigravityUITheme.StyleToggle);
+        showGizmos = GUILayout.Toggle(showGizmos, " Đường quỹ đạo 3D", AntigravityUITheme.StyleToggle);
+        showHoleRegionOutlines3D = GUILayout.Toggle(showHoleRegionOutlines3D, " Viền đỏ vùng cần vá", AntigravityUITheme.StyleToggle);
+
+        bool prevShowInp = showInpaintedSurface3D;
+        showInpaintedSurface3D = GUILayout.Toggle(showInpaintedSurface3D, " Lớp vá 3D", AntigravityUITheme.StyleToggle);
+        if (showInpaintedSurface3D != prevShowInp && inpaintedMeshObject != null)
+        {
+            var mr = inpaintedMeshObject.GetComponent<MeshRenderer>();
+            if (mr != null) mr.enabled = showInpaintedSurface3D;
+        }
+
+        bool prevSolid = renderInpaintedAsSolidMesh;
+        renderInpaintedAsSolidMesh = GUILayout.Toggle(renderInpaintedAsSolidMesh, " Lớp vá dạng 3D Mesh đặc", AntigravityUITheme.StyleToggle);
+        if (renderInpaintedAsSolidMesh != prevSolid && compensatedSurfacePointsWorld.Count > 0)
+        {
+            BuildAndDisplayInpaintedMesh(plyLoader);
+        }
+
+        bool prevHl = highlightInpaintedMesh;
+        highlightInpaintedMesh = GUILayout.Toggle(highlightInpaintedMesh, " Tô màu Cyan vùng vá", AntigravityUITheme.StyleToggle);
+        if (highlightInpaintedMesh != prevHl && compensatedSurfacePointsWorld.Count > 0)
+        {
+            BuildAndDisplayInpaintedMesh(plyLoader);
+        }
+
+        showGunTiltVectors3D = GUILayout.Toggle(showGunTiltVectors3D, " Tia hướng súng", AntigravityUITheme.StyleToggle);
+
+        bool prevHm = showDepositionHeatmap3D;
+        showDepositionHeatmap3D = GUILayout.Toggle(showDepositionHeatmap3D, " Heatmap phun Gauss 3D", AntigravityUITheme.StyleToggle);
+        if (showDepositionHeatmap3D != prevHm)
+        {
+            if (showDepositionHeatmap3D && waypoints.Count >= 2)
+            {
+                TrajectoryEvaluationEngine.SimulateGaussianDepositionAndHeatmap(
+                    waypoints, this, plyLoader, sprayTechParams, true, ref depositionHeatmapObj, out _, out _, out _);
+            }
+            else if (depositionHeatmapObj != null)
+            {
+                depositionHeatmapObj.SetActive(false);
+            }
+        }
+
+        bool prevTbl = showPhysicalWorktable;
+        showPhysicalWorktable = GUILayout.Toggle(showPhysicalWorktable, " Bàn thao tác (Collider)", AntigravityUITheme.StyleToggle);
+        if (showPhysicalWorktable != prevTbl)
+        {
+            if (showPhysicalWorktable)
+            {
+                worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, plyLoader != null ? plyLoader.estimatedTableY : 0f);
+            }
+            else if (worktableObj != null)
+            {
+                worktableObj.SetActive(false);
+            }
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
         DrawJeansSizeDetectionSummaryBox();
 
         GUILayout.Space(6);
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"3. BẢNG TỌA ĐỘ 3D CỦA 12 ĐIỂM MỐC [{selectedSampleName}]", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label($"4. TỌA ĐỘ 12 MỐC [{selectedSampleName}]", AntigravityUITheme.StyleSectionLabel);
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button("🔍 Nhận Diện & Đổi Size", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(145), GUILayout.Height(20)))
+        if (GUILayout.Button("Nhận diện Size", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(110), GUILayout.Height(22)))
         {
             DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
         }
@@ -3261,83 +3935,85 @@ public class DobotCR10AIKController : MonoBehaviour
             {
                 var lm = landmarks3D[i];
                 GUILayout.BeginHorizontal();
-                GUILayout.Label(lm.label_vi, AntigravityUITheme.StyleLabelCyan, GUILayout.Width(135));
+                GUILayout.Label(lm.label_vi, AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
                 GUILayout.Label($"X={lm.x_mm:F0}  Y={lm.y_mm:F0}  Z={lm.z_mm:F1} mm", AntigravityUITheme.StyleLabelMuted);
                 GUILayout.EndHorizontal();
             }
         }
         else
         {
-            GUILayout.Label("Đang khởi tạo 12 điểm mốc 3D cho mẫu hiện tại...", AntigravityUITheme.StyleLabelMuted);
+            GUILayout.Label("Chưa có dữ liệu 12 mốc.", AntigravityUITheme.StyleLabelMuted);
         }
         GUILayout.EndVertical();
-
-        GUILayout.Space(6);
-        if (GUILayout.Button("✏️ Mở Bảng Vẽ Quần 2D Tiêu Chuẩn ➔ Ánh Xạ Lên 3D", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
-        {
-            interfaceTab = 3;
-            showCanonicalDrawPanel = true;
-        }
 
         GUILayout.EndVertical();
     }
 
     // =========================================================================
-    // CARD 7: THUẬT TOÁN BÙ ĐẮP CHỖ KHUẤT & KHUYẾT TẬT 3D (OCCLUSION & HOLE FILLING)
+    // CARD 7: THUẬT TOÁN BÙ ĐẮP CHỖ KHUẤT, VIỀN ĐỎ VÙNG VÁ & CHUYỂN THÀNH 3D MESH
     // =========================================================================
     private void DrawOcclusionCompensationCard(float width, Action onClose = null)
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("BÙ ĐẮP CHỖ KHUẤT & KHUYẾT TẬT 3D (OCCLUSION)", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("VÁ LỖ 3D & CHUYỂN MESH", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
 
         GUILayout.Space(6);
-        // Khối 1: Phân tích & Trạng thái chỗ khuất
-        GUILayout.Label("1. PHÂN TÍCH & PHÁT HIỆN CHỖ KHUẤT TRÊN PHÔI QUẦN", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. QUÉT VÙNG BỊ CHE", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("🔍 Quét Lỗ Khuyết Tật & Chỗ Khuất", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+        if (GUILayout.Button("Quét & Khoanh đỏ", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
         {
+            showHoleRegionOutlines3D = true;
             DetectOcclusionAndHoles();
         }
-        if (GUILayout.Button("Làm Mới", AntigravityUITheme.StyleButton, GUILayout.Width(75), GUILayout.Height(28)))
+        if (GUILayout.Button("Khôi phục gốc", AntigravityUITheme.StyleButton, GUILayout.Width(115), GUILayout.Height(28)))
         {
             detectedHolePointsWorld.Clear();
+            detectedHoleCells.Clear();
+            holeRegionOutlinesWorld.Clear();
             compensatedSurfacePointsWorld.Clear();
             gunTiltNormalsWorld.Clear();
             compensatedHeightGrid.Clear();
             compensatedNormalGrid.Clear();
             detectedHoleCount = 0;
+            detectedHoleRegionCount = 0;
             detectedOcclusionAreaCm2 = 0f;
             avgCreaseDepthMm = 0f;
-            occlusionStatusMsg = "Đã làm mới dữ liệu chỗ khuất.";
+            if (inpaintedMeshObject != null)
+            {
+                if (Application.isPlaying) Destroy(inpaintedMeshObject);
+                else DestroyImmediate(inpaintedMeshObject);
+                inpaintedMeshObject = null;
+            }
+            PLYDirectLoader plReset = FindAnyObjectByType<PLYDirectLoader>();
+            if (plReset != null) plReset.ResetInpaintedPointsToRaw();
+            occlusionStatusMsg = "Đã khôi phục bề mặt gốc.";
         }
         GUILayout.EndHorizontal();
 
         GUILayout.Space(2);
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Khuyết: {(detectedHoleCount > 0 ? detectedHoleCount + " pts" : "0")}", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.Label($"Vùng: {(detectedOcclusionAreaCm2 > 0 ? detectedOcclusionAreaCm2.ToString("F1") + " cm²" : "0 cm²")}", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.Label($"Nếp sâu: {(avgCreaseDepthMm > 0 ? avgCreaseDepthMm.ToString("F1") + " mm" : "0 mm")}", AntigravityUITheme.StyleLabelCyan);
+        GUILayout.Label($"Vùng: {detectedHoleRegionCount}", AntigravityUITheme.StyleLabelRed);
+        GUILayout.Label($"Ô khuyết: {detectedHoleCount}", AntigravityUITheme.StyleLabelCyan);
+        GUILayout.Label($"DT: {detectedOcclusionAreaCm2:F1} cm²", AntigravityUITheme.StyleLabelCyan);
         GUILayout.EndHorizontal();
 
-        GUILayout.Space(2);
         GUILayout.Label(occlusionStatusMsg, AntigravityUITheme.StyleLabelGreen);
         GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        // Khối 2: Bộ thuật toán bù đắp
-        GUILayout.Label("2. CHỌN THUẬT TOÁN BÙ ĐẮP CHUYÊN SÂU (THEO HUONG_DAN_PIPELINE)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("2. PHƯƠNG PHÁP VÁ", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         string[] algos = {
-            "1. KDTree K-NN Tangent Plane & SVD/PCA (Bước 3 & 4 - HUONG_DAN_PIPELINE)",
-            "2. Thin Plate Spline (TPS) RBF Non-Rigid (Bước 5 P4 - HUONG_DAN_PIPELINE)",
-            "3. Poisson & Laplacian PDE Surface Propagation",
-            "4. Adaptive Gun Tilt & Crease Standoff Compensation",
-            "5. Bilateral Leg Symmetry Mirroring"
+            "1. K-NN MLS & PCA",
+            "2. Thin Plate Spline (TPS RBF)",
+            "3. Poisson & Laplacian PDE",
+            "4. Bù góc súng & nâng Z",
+            "5. Đối xứng 2 ống quần"
         };
         for (int i = 0; i < algos.Length; i++)
         {
@@ -3346,67 +4022,60 @@ public class DobotCR10AIKController : MonoBehaviour
             if (GUILayout.Button(algos[i], st, GUILayout.Height(25)))
             {
                 selectedOcclusionAlgorithm = i;
+                showHoleRegionOutlines3D = true;
+                if (detectedHoleCells == null || detectedHoleCells.Count == 0 || holeRegionOutlinesWorld.Count == 0)
+                {
+                    DetectOcclusionAndHoles();
+                }
+                if (detectedHoleCells != null && detectedHoleCells.Count > 0)
+                {
+                    RunOcclusionCompensation();
+                }
             }
         }
-
-        GUILayout.Space(4);
-        string[] algoDesc = {
-            "ℹ️ KDTree K-NN Tangent Plane & PCA (Bước 3 & 4): Tìm K điểm lân cận hợp lệ trong bán kính r <= 5mm, phân tích hiệp phương sai SVD/PCA để ước lượng chính xác cao độ Z và vector pháp tuyến n tại các điểm khuyết tật.",
-            "ℹ️ Thin Plate Spline TPS (Bước 5 P4): Tái tạo bề mặt giải phẫu liên tục C² từ 12 điểm mốc AI (Crotch, Thighs, Knees, Cuffs). Uốn dẻo mượt mà phủ kín toàn bộ các khoảng rỗng lớn của quần.",
-            "ℹ️ Poisson & Laplace PDE: Giải phương trình vi phân Laplace ∇²Z = 0, lan truyền trường pháp tuyến mượt bảo toàn độ dốc tự nhiên của vải.",
-            "ℹ️ Bù Góc Súng: Tự động nghiêng súng 15°-35° và nâng hạ Z thông minh hướng sâu vào rãnh nếp gấp bị che khuất tầm nhìn thẳng.",
-            "ℹ️ Bù Đối Xứng: Lấy hình học mặt ngoài của ống quần đối xứng phản chiếu qua trục đũng để bù đắp sườn bị khuất hoàn toàn."
-        };
-        GUILayout.Label(algoDesc[Mathf.Clamp(selectedOcclusionAlgorithm, 0, 4)], AntigravityUITheme.StyleLabelMuted);
         GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        // Khối 3: Tinh chỉnh thông số
-        GUILayout.Label("3. THÔNG SỐ KỸ THUẬT CỦA THUẬT TOÁN", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("3. THÔNG SỐ", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Khoảng cách hạt điểm vá: {inpaintPointSpacingMm:F1} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
-        inpaintPointSpacingMm = GUILayout.HorizontalSlider(inpaintPointSpacingMm, 1.5f, 6.0f);
+        GUILayout.Label($"Bán kính quét: {occlusionSearchRadiusMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(175));
+        occlusionSearchRadiusMm = GUILayout.HorizontalSlider(occlusionSearchRadiusMm, 12f, 80f);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Cỡ hạt điểm Point Cloud: {inpaintPointSize:F1}", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
-        inpaintPointSize = GUILayout.HorizontalSlider(inpaintPointSize, 1.5f, 6.0f);
+        GUILayout.Label($"Láng giềng K-NN: {occlusionKNeighbors}", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(175));
+        occlusionKNeighbors = Mathf.RoundToInt(GUILayout.HorizontalSlider(occlusionKNeighbors, 8f, 48f));
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Bán kính quét láng giềng: {occlusionSearchRadiusMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
-        occlusionSearchRadiusMm = GUILayout.HorizontalSlider(occlusionSearchRadiusMm, 10f, 60f);
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"Số láng giềng K-NN: {occlusionKNeighbors}", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
-        occlusionKNeighbors = Mathf.RoundToInt(GUILayout.HorizontalSlider(occlusionKNeighbors, 6f, 48f));
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"Góc nghiêng súng tối đa: {maxGunTiltAngleDeg:F0}°", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
+        GUILayout.Label($"Góc nghiêng tối đa: {maxGunTiltAngleDeg:F0}°", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(175));
         maxGunTiltAngleDeg = GUILayout.HorizontalSlider(maxGunTiltAngleDeg, 10f, 45f);
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Độ cao an toàn Z bù: +{occlusionZMarginMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
+        GUILayout.Label($"Nâng Z an toàn: +{occlusionZMarginMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(175));
         occlusionZMarginMm = GUILayout.HorizontalSlider(occlusionZMarginMm, 5f, 30f);
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"Ngưỡng sườn dốc khuất: >{steepSlopeAngleThresholdDeg:F0}°", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(220));
-        steepSlopeAngleThresholdDeg = GUILayout.HorizontalSlider(steepSlopeAngleThresholdDeg, 35f, 75f);
         GUILayout.EndHorizontal();
         GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        // Khối 4: Hiển thị trực quan 3D
-        GUILayout.Label("4. TÙY CHỌN HIỂN THỊ 3D TRÊN KHÔNG GIAN LÀM VIỆC", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("4. HIỂN THỊ", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        showHoleRegionOutlines3D = GUILayout.Toggle(showHoleRegionOutlines3D, " Viền đỏ bao quanh vùng cần vá", AntigravityUITheme.StyleToggle);
+
+        bool prevSolid = renderInpaintedAsSolidMesh;
+        renderInpaintedAsSolidMesh = GUILayout.Toggle(renderInpaintedAsSolidMesh, " Hiển thị lớp vá dạng 3D Mesh đặc", AntigravityUITheme.StyleToggle);
+        if (renderInpaintedAsSolidMesh != prevSolid && compensatedSurfacePointsWorld.Count > 0)
+        {
+            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
+            BuildAndDisplayInpaintedMesh(pl);
+        }
+
         bool prevShowInpainted = showInpaintedSurface3D;
-        showInpaintedSurface3D = GUILayout.Toggle(showInpaintedSurface3D, " ✨ Hiển thị Chùm Điểm Vá 3D (Point Cloud Inpainting)", AntigravityUITheme.StyleToggle);
+        showInpaintedSurface3D = GUILayout.Toggle(showInpaintedSurface3D, " Hiện lớp vá 3D", AntigravityUITheme.StyleToggle);
         if (showInpaintedSurface3D != prevShowInpainted && inpaintedMeshObject != null)
         {
             var mr = inpaintedMeshObject.GetComponent<MeshRenderer>();
@@ -3414,29 +4083,40 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         bool prevHighlight = highlightInpaintedMesh;
-        highlightInpaintedMesh = GUILayout.Toggle(highlightInpaintedMesh, " Màu hạt điểm: Xanh Cyan Nổi Bật / Khaki Tự Nhiên", AntigravityUITheme.StyleToggle);
-        if (highlightInpaintedMesh != prevHighlight && inpaintedMeshObject != null)
+        highlightInpaintedMesh = GUILayout.Toggle(highlightInpaintedMesh, " Tô màu Cyan vùng vá", AntigravityUITheme.StyleToggle);
+        if (highlightInpaintedMesh != prevHighlight && compensatedSurfacePointsWorld.Count > 0)
         {
             PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
             BuildAndDisplayInpaintedMesh(pl);
         }
 
-        showOcclusionHoles3D = GUILayout.Toggle(showOcclusionHoles3D, " Hiện Vị Trí Điểm Khuyết Tật (Hạt Đỏ Cam 3D)", AntigravityUITheme.StyleToggle);
-        showCompensatedSurface3D = GUILayout.Toggle(showCompensatedSurface3D, " Hiện Lưới Bề Mặt Bù Đắp (Hạt Lưới Xanh Neon 3D)", AntigravityUITheme.StyleToggle);
-        showGunTiltVectors3D = GUILayout.Toggle(showGunTiltVectors3D, " Hiện Vector Hướng Súng Phun Bù Góc (Tia Vàng 3D)", AntigravityUITheme.StyleToggle);
+        showGunTiltVectors3D = GUILayout.Toggle(showGunTiltVectors3D, " Hiện tia hướng súng", AntigravityUITheme.StyleToggle);
         GUILayout.EndVertical();
 
-        GUILayout.Space(8);
-        // Khối 5: Thực thi & Cập nhật
-        if (GUILayout.Button("✨ VÁ ĐIỂM VÙNG KHUYẾT 3D (POINT CLOUD INPAINTING)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(34)))
+        GUILayout.Space(6);
+        GUILayout.Label("5. THỰC THI & XUẤT MESH", AntigravityUITheme.StyleSectionLabel);
+        if (GUILayout.Button("Vá kín 100% vùng bị che", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
         {
+            showHoleRegionOutlines3D = true;
+            if (detectedHoleCells.Count == 0) DetectOcclusionAndHoles();
             RunOcclusionCompensation();
         }
         GUILayout.Space(4);
-        if (GUILayout.Button("🎯 CẬP NHẬT & ÁP DỤNG TRỰC TIẾP VÀO QUỸ ĐẠO PHUN", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(32)))
+        if (GUILayout.Button("Chuyển thành 3D Mesh hoàn chỉnh", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(32)))
+        {
+            ConvertRepairedWorkpieceToFull3DMesh();
+        }
+        GUILayout.Space(4);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Xuất Mesh (.OBJ)", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        {
+            ExportRepairedMeshToObj();
+        }
+        if (GUILayout.Button("Áp vào quỹ đạo", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
             ApplyOcclusionCompensationToTrajectory();
         }
+        GUILayout.EndHorizontal();
 
         GUILayout.EndVertical();
     }
@@ -3444,22 +4124,73 @@ public class DobotCR10AIKController : MonoBehaviour
     public void DetectOcclusionAndHoles()
     {
         detectedHolePointsWorld.Clear();
+        detectedHoleCells.Clear();
+        holeRegionOutlinesWorld.Clear();
+        detectedHoleRegionCount = 0;
+
         PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
         if (plyLoader == null)
         {
-            occlusionStatusMsg = "⚠️ Không tìm thấy PLYDirectLoader để lấy dữ liệu đám mây điểm 3D!";
+            occlusionStatusMsg = "Không tìm thấy PLYDirectLoader.";
             return;
         }
 
-        // Xác định vùng bao quanh quần jean
-        float minX = -0.35f, maxX = 0.35f;
-        float minZ = 0.05f, maxZ = 0.90f;
+        plyLoader.GetCellWorldSize(out float cellW, out float cellD);
+        if (cellW <= 1e-6f || cellD <= 1e-6f)
+        {
+            plyLoader.RebuildSurfaceElevationGrid();
+            plyLoader.GetCellWorldSize(out cellW, out cellD);
+        }
+        if (cellW <= 1e-6f || cellD <= 1e-6f)
+        {
+            occlusionStatusMsg = "Chưa nạp file PLY.";
+            return;
+        }
 
+        // Xây dựng đa giác giải phẫu dự phòng đúng thứ tự đỉnh (không tự cắt ở ống trái!)
         List<Vector3> anatomicalPoly = null;
         if (landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
         {
-            minX = float.MaxValue; maxX = float.MinValue;
-            minZ = float.MaxValue; maxZ = float.MinValue;
+            anatomicalPoly = new List<Vector3>
+            {
+                landmarksWorldPos[0],  // Eo trái
+                landmarksWorldPos[1],  // Cạp giữa
+                landmarksWorldPos[2],  // Eo phải
+                landmarksWorldPos[5],  // Đùi phải
+                landmarksWorldPos[7],  // Gối phải
+                landmarksWorldPos[11], // Gấu ngoài phải
+                landmarksWorldPos[10], // Gấu trong phải
+                landmarksWorldPos[3],  // Đáy đũng
+                landmarksWorldPos[9],  // Gấu trong trái
+                landmarksWorldPos[8],  // Gấu ngoài trái
+                landmarksWorldPos[6],  // Gối trái
+                landmarksWorldPos[4]   // Đùi trái
+            };
+        }
+
+        List<Vector3> activePoly = (garmentContourWorld != null && garmentContourWorld.Count > 5)
+            ? garmentContourWorld
+            : anatomicalPoly;
+
+        if (activePoly == null || activePoly.Count < 3)
+        {
+            occlusionStatusMsg = "Chưa có đường bao quần hoặc 12 mốc.";
+            return;
+        }
+
+        // SỬA LỖI QUÉT THIẾU VÙNG: Tính hộp bao (Bounding Box) từ HỢP của garmentContourWorld VÀ landmarksWorldPos
+        // để quét trọn vẹn 100% thân quần (không bị cắt mất phần hông/mép gấu ngoài 12 mốc!)
+        float minX = float.MaxValue, maxX = float.MinValue;
+        float minZ = float.MaxValue, maxZ = float.MinValue;
+        for (int i = 0; i < activePoly.Count; i++)
+        {
+            minX = Mathf.Min(minX, activePoly[i].x);
+            maxX = Mathf.Max(maxX, activePoly[i].x);
+            minZ = Mathf.Min(minZ, activePoly[i].z);
+            maxZ = Mathf.Max(maxZ, activePoly[i].z);
+        }
+        if (landmarksWorldPos != null)
+        {
             for (int i = 0; i < landmarksWorldPos.Count; i++)
             {
                 minX = Mathf.Min(minX, landmarksWorldPos[i].x);
@@ -3467,201 +4198,571 @@ public class DobotCR10AIKController : MonoBehaviour
                 minZ = Mathf.Min(minZ, landmarksWorldPos[i].z);
                 maxZ = Mathf.Max(maxZ, landmarksWorldPos[i].z);
             }
-            minX -= 0.05f; maxX += 0.05f;
-            minZ -= 0.04f; maxZ += 0.04f;
+        }
+        minX -= cellW * 2f; maxX += cellW * 2f;
+        minZ -= cellD * 2f; maxZ += cellD * 2f;
 
-            // Đa giác giải phẫu kín bao quanh toàn bộ quần: Cạp -> Ống phải -> Đáy đũng -> Ống trái
-            anatomicalPoly = new List<Vector3>
+        Vector2Int cMin = plyLoader.WorldToGridCell(minX, minZ);
+        Vector2Int cMax = plyLoader.WorldToGridCell(maxX, maxZ);
+        int gxMin = Mathf.Clamp(Mathf.Min(cMin.x, cMax.x), 0, PLYDirectLoader.GRID_RES - 1);
+        int gxMax = Mathf.Clamp(Mathf.Max(cMin.x, cMax.x), 0, PLYDirectLoader.GRID_RES - 1);
+        int gzMin = Mathf.Clamp(Mathf.Min(cMin.y, cMax.y), 0, PLYDirectLoader.GRID_RES - 1);
+        int gzMax = Mathf.Clamp(Mathf.Max(cMin.y, cMax.y), 0, PLYDirectLoader.GRID_RES - 1);
+
+        // Pass A: Xác định từng ô lưới nằm trong thân quần & tính cao độ vải trung vị thực tế
+        bool[,] insideMask = new bool[PLYDirectLoader.GRID_RES, PLYDirectLoader.GRID_RES];
+        List<float> clothHeights = new List<float>(4096);
+
+        for (int gx = gxMin; gx <= gxMax; gx++)
+        {
+            for (int gz = gzMin; gz <= gzMax; gz++)
             {
-                landmarksWorldPos[0], // Eo trái
-                landmarksWorldPos[1], // Cạp giữa
-                landmarksWorldPos[2], // Eo phải
-                landmarksWorldPos[5], // Đùi phải
-                landmarksWorldPos[7], // Gối phải
-                landmarksWorldPos[11], // Gấu ngoài phải
-                landmarksWorldPos[10], // Gấu trong phải
-                landmarksWorldPos[3],  // Đáy đũng
-                landmarksWorldPos[8],  // Gấu trong trái
-                landmarksWorldPos[9],  // Gấu ngoài trái
-                landmarksWorldPos[6],  // Gối trái
-                landmarksWorldPos[4]   // Đùi trái
-            };
+                Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
+                if (!IsPointInPolygonXZ(wxz.x, wxz.y, activePoly)) continue;
+                insideMask[gx, gz] = true;
+                if (plyLoader.IsRawCellValid(gx, gz))
+                {
+                    clothHeights.Add(plyLoader.GetRawCellY(gx, gz));
+                }
+            }
         }
 
-        float stepM = Mathf.Clamp(inpaintPointSpacingMm, 1.5f, 8.0f) * 0.001f; // Bước lưới lấy theo thông số
+        float tableY = plyLoader.estimatedTableY;
+        if (clothHeights.Count > 10)
+        {
+            clothHeights.Sort();
+            lastGarmentMedianY = clothHeights[clothHeights.Count / 2];
+        }
+        else if (landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+        {
+            float sumLY = 0f;
+            for (int i = 0; i < 12; i++) sumLY += landmarksWorldPos[i].y;
+            lastGarmentMedianY = sumLY / 12f;
+        }
+        else
+        {
+            lastGarmentMedianY = tableY + 0.05f;
+        }
+
+        bool garmentAboveTable = (lastGarmentMedianY - tableY) > 0.010f;
+        lastGarmentMinClothY = garmentAboveTable
+            ? (tableY + Mathf.Clamp((lastGarmentMedianY - tableY) * 0.22f, 0.004f, 0.018f))
+            : (tableY - 0.01f);
+
+        // Pass B: CHỈ tìm các vùng thực sự CÓ LỖ trên bề mặt quần (lưới mịn 480x480 ~3mm):
+        //   1) Ô mất điểm cảm biến thật (!IsRawCellValid)
+        //   2) Ô rơi điểm xuống mặt bàn bên trong thân quần (rawY < lastGarmentMinClothY)
+        //   3) Ô hụt độ sâu đột ngột (>= 4.2cm so với vải kề bên) gây rách/rớt tam giác trong 3D Mesh
+        // KHÔNG gắn nhầm các nếp gấp vải nguyên vẹn (không bị thủng lỗ) là lỗ vá!
+        bool[,] holeMask = new bool[PLYDirectLoader.GRID_RES, PLYDirectLoader.GRID_RES];
         float sumDepthDiffMm = 0f;
         int depthSamples = 0;
+        int rawHoleCells = 0;
+        int dropoutCells = 0;
+        int cliffCells = 0;
 
-        for (float z = minZ; z <= maxZ; z += stepM)
+        for (int gx = gxMin; gx <= gxMax; gx++)
         {
-            for (float x = minX; x <= maxX; x += stepM)
+            for (int gz = gzMin; gz <= gzMax; gz++)
             {
-                // Kiểm tra điểm có nằm trong đa giác giải phẫu hoặc đường bao segment không
-                bool insideGarment = false;
-                if (anatomicalPoly != null && anatomicalPoly.Count >= 12)
-                {
-                    insideGarment = IsPointInPolygonXZ(x, z, anatomicalPoly);
-                }
-                if (!insideGarment && garmentContourWorld != null && garmentContourWorld.Count > 3)
-                {
-                    insideGarment = IsPointInPolygonXZ(x, z, garmentContourWorld);
-                }
-                if (!insideGarment && landmarksWorldPos != null && landmarksWorldPos.Count >= 6)
-                {
-                    // Bao quát vùng đũng quần giữa mốc 3 (đáy đũng), mốc 4 (đùi trái) và mốc 5 (đùi phải)
-                    Vector3 crotch = landmarksWorldPos[3];
-                    Vector3 thighL = landmarksWorldPos[4];
-                    Vector3 thighR = landmarksWorldPos[5];
-                    float crotchMinX = Mathf.Min(thighL.x, thighR.x) - 0.03f;
-                    float crotchMaxX = Mathf.Max(thighL.x, thighR.x) + 0.03f;
-                    float crotchMinZ = Mathf.Min(crotch.z, Mathf.Min(thighL.z, thighR.z)) - 0.05f;
-                    float crotchMaxZ = Mathf.Max(crotch.z, Mathf.Max(thighL.z, thighR.z)) + 0.08f;
-                    if (x >= crotchMinX && x <= crotchMaxX && z >= crotchMinZ && z <= crotchMaxZ)
-                    {
-                        insideGarment = true;
-                    }
-                }
+                if (!insideMask[gx, gz]) continue;
 
-                if (!insideGarment) continue;
+                Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
+                bool isValid = plyLoader.IsRawCellValid(gx, gz);
 
-                // Kiểm tra trực tiếp xem tại vị trí này có điểm quét thực tế từ máy quét Zivid hay không
-                bool hasRawPoint = plyLoader.HasSurfacePointAt(x, z);
-                if (!hasRawPoint)
+                if (!isValid)
                 {
-                    // Lỗ thủng khuyết tật hoặc điểm mù camera không quét tới (Occlusion Hole thực sự)
-                    float estY = 0.020f;
-                    if (plyLoader.SampleSurfaceWorldHeightAndNormal(x, z, out float nY, out _))
-                    {
-                        estY = nY;
-                    }
-                    detectedHolePointsWorld.Add(new Vector3(x, estY, z));
+                    holeMask[gx, gz] = true;
+                    detectedHoleCells.Add(new Vector2Int(gx, gz));
+                    detectedHolePointsWorld.Add(new Vector3(wxz.x, lastGarmentMedianY, wxz.y));
+                    rawHoleCells++;
                 }
                 else
                 {
-                    // Điểm quét đã có, kiểm tra tiếp xem có nằm trên nếp gấp độ dốc quá lớn (Self-occlusion)
-                    if (plyLoader.SampleSurfaceWorldHeightAndNormal(x, z, out float sampleY, out Vector3 sampleNorm))
+                    float rawY = plyLoader.GetRawCellY(gx, gz);
+                    if (garmentAboveTable && rawY < lastGarmentMinClothY)
                     {
-                        float slopeAngle = Vector3.Angle(sampleNorm, Vector3.up);
-                        if (slopeAngle > steepSlopeAngleThresholdDeg)
+                        holeMask[gx, gz] = true;
+                        detectedHoleCells.Add(new Vector2Int(gx, gz));
+                        detectedHolePointsWorld.Add(new Vector3(wxz.x, rawY, wxz.y));
+                        sumDepthDiffMm += Mathf.Max(0f, (lastGarmentMedianY - rawY) * 1000f);
+                        depthSamples++;
+                        dropoutCells++;
+                    }
+                    else
+                    {
+                        // Kiểm tra ô tụt độ cao >= 4.2cm so với ô vải hợp lệ kề bên (sẽ bị cắt rách tam giác trong Mesh3D)
+                        bool isBrokenTriangleLow = false;
+                        const float cliffThreshM = 0.042f;
+                        if (gx > 0 && insideMask[gx - 1, gz] && plyLoader.IsRawCellValid(gx - 1, gz) &&
+                            (plyLoader.GetRawCellY(gx - 1, gz) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
+                        else if (gx < PLYDirectLoader.GRID_RES - 1 && insideMask[gx + 1, gz] && plyLoader.IsRawCellValid(gx + 1, gz) &&
+                            (plyLoader.GetRawCellY(gx + 1, gz) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
+                        else if (gz > 0 && insideMask[gx, gz - 1] && plyLoader.IsRawCellValid(gx, gz - 1) &&
+                            (plyLoader.GetRawCellY(gx, gz - 1) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
+                        else if (gz < PLYDirectLoader.GRID_RES - 1 && insideMask[gx, gz + 1] && plyLoader.IsRawCellValid(gx, gz + 1) &&
+                            (plyLoader.GetRawCellY(gx, gz + 1) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
+
+                        if (isBrokenTriangleLow)
                         {
-                            detectedHolePointsWorld.Add(new Vector3(x, sampleY, z));
-                            sumDepthDiffMm += Mathf.Sin(slopeAngle * Mathf.Deg2Rad) * 15f;
+                            holeMask[gx, gz] = true;
+                            detectedHoleCells.Add(new Vector2Int(gx, gz));
+                            detectedHolePointsWorld.Add(new Vector3(wxz.x, rawY, wxz.y));
+                            sumDepthDiffMm += Mathf.Max(0f, (lastGarmentMedianY - rawY) * 1000f);
                             depthSamples++;
+                            cliffCells++;
                         }
                     }
                 }
             }
         }
 
-        detectedHoleCount = detectedHolePointsWorld.Count;
-        detectedOcclusionAreaCm2 = detectedHoleCount * (stepM * stepM * 10000f);
-        avgCreaseDepthMm = depthSamples > 0 ? (sumDepthDiffMm / depthSamples) : 8.5f;
-        occlusionStatusMsg = $"✅ Quét thành công: Phát hiện {detectedHoleCount} điểm khuất/nếp gấp ({detectedOcclusionAreaCm2:F1} cm²). Sẵn sàng bù đắp!";
+        // Pass C: Trích xuất các ĐƯỜNG VIỀN KÍN MÀU ĐỎ bao quanh các vùng thực sự có lỗ vá
+        ExtractHoleRegionOutlines(plyLoader, holeMask, gxMin, gxMax, gzMin, gzMax, cellW, cellD);
+
+        detectedHoleCount = detectedHoleCells.Count;
+        detectedOcclusionAreaCm2 = detectedHoleCount * (cellW * cellD * 10000f);
+        avgCreaseDepthMm = depthSamples > 0 ? (sumDepthDiffMm / depthSamples) : 0f;
+        occlusionStatusMsg = $"Tìm thấy {detectedHoleRegionCount} vùng lỗ ({rawHoleCells + dropoutCells + cliffCells} ô, {detectedOcclusionAreaCm2:F1} cm²).";
+    }
+
+    /// <summary>
+    /// Trích xuất chính xác các vòng đường viền kín (Closed Contour Loops) bao quanh các vùng thực sự có lỗ vá
+    /// (lọc bỏ hạt nhiễu 1-2 ô khỏi đường viền đỏ cho gọn mắt, nhưng vẫn vá kín 100% mọi ô khuyết!).
+    /// </summary>
+    private void ExtractHoleRegionOutlines(
+        PLYDirectLoader plyLoader,
+        bool[,] holeMask,
+        int gxMin, int gxMax, int gzMin, int gzMax,
+        float cellW, float cellD)
+    {
+        holeRegionOutlinesWorld.Clear();
+        detectedHoleRegionCount = 0;
+
+        int res = PLYDirectLoader.GRID_RES;
+        bool[,] visited = new bool[res, res];
+        bool[,] outlineMask = new bool[res, res];
+        Queue<Vector2Int> bfs = new Queue<Vector2Int>();
+        List<Vector2Int> compCells = new List<Vector2Int>(256);
+
+        // 1. Gom cụm 8-connected và chỉ đưa các vùng lỗ thật (>= 3 ô, ~25mm²) vào đường viền đỏ
+        for (int x = gxMin; x <= gxMax; x++)
+        {
+            for (int z = gzMin; z <= gzMax; z++)
+            {
+                if (!holeMask[x, z] || visited[x, z]) continue;
+                compCells.Clear();
+                visited[x, z] = true;
+                bfs.Enqueue(new Vector2Int(x, z));
+                while (bfs.Count > 0)
+                {
+                    Vector2Int cur = bfs.Dequeue();
+                    compCells.Add(cur);
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        for (int dz = -1; dz <= 1; dz++)
+                        {
+                            if (dx == 0 && dz == 0) continue;
+                            int nx = cur.x + dx;
+                            int nz = cur.y + dz;
+                            if (nx >= gxMin && nx <= gxMax && nz >= gzMin && nz <= gzMax &&
+                                holeMask[nx, nz] && !visited[nx, nz])
+                            {
+                                visited[nx, nz] = true;
+                                bfs.Enqueue(new Vector2Int(nx, nz));
+                            }
+                        }
+                    }
+                }
+
+                if (compCells.Count >= 3)
+                {
+                    detectedHoleRegionCount++;
+                    for (int k = 0; k < compCells.Count; k++)
+                    {
+                        outlineMask[compCells[k].x, compCells[k].y] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Sinh các cạnh biên có hướng (CCW, vùng lỗ nằm bên trái cạnh) trên lưới góc [0..GRID_RES]
+        Dictionary<Vector2Int, List<Vector2Int>> adj = new Dictionary<Vector2Int, List<Vector2Int>>();
+        void AddEdge(Vector2Int a, Vector2Int b)
+        {
+            if (!adj.TryGetValue(a, out List<Vector2Int> list))
+            {
+                list = new List<Vector2Int>(2);
+                adj[a] = list;
+            }
+            list.Add(b);
+        }
+
+        for (int x = gxMin; x <= gxMax; x++)
+        {
+            for (int z = gzMin; z <= gzMax; z++)
+            {
+                if (!outlineMask[x, z]) continue;
+                if (z == 0 || !outlineMask[x, z - 1])
+                    AddEdge(new Vector2Int(x, z), new Vector2Int(x + 1, z));
+                if (x == res - 1 || !outlineMask[x + 1, z])
+                    AddEdge(new Vector2Int(x + 1, z), new Vector2Int(x + 1, z + 1));
+                if (z == res - 1 || !outlineMask[x, z + 1])
+                    AddEdge(new Vector2Int(x + 1, z + 1), new Vector2Int(x, z + 1));
+                if (x == 0 || !outlineMask[x - 1, z])
+                    AddEdge(new Vector2Int(x, z + 1), new Vector2Int(x, z));
+            }
+        }
+
+        Vector2 originXZ = plyLoader.GridCellToWorldXZ(0, 0);
+
+        // 3. Nối các cạnh thành từng vòng khép kín, rút gọn cạnh thẳng hàng và làm mượt nhẹ Chaikin
+        while (adj.Count > 0)
+        {
+            Vector2Int startNode = default;
+            Vector2Int nextNode = default;
+            foreach (var kv in adj)
+            {
+                if (kv.Value.Count > 0)
+                {
+                    startNode = kv.Key;
+                    nextNode = kv.Value[0];
+                    kv.Value.RemoveAt(0);
+                    if (kv.Value.Count == 0) adj.Remove(startNode);
+                    break;
+                }
+            }
+
+            List<Vector2Int> cornerLoop = new List<Vector2Int> { startNode };
+            Vector2Int prev = startNode;
+            Vector2Int curr = nextNode;
+            int guard = 0;
+
+            while (curr != startNode && guard++ < 4096)
+            {
+                cornerLoop.Add(curr);
+                if (!adj.TryGetValue(curr, out List<Vector2Int> nextList) || nextList.Count == 0)
+                    break;
+
+                int pickIdx = 0;
+                if (nextList.Count > 1)
+                {
+                    // Ưu tiên rẽ trái 90° (-dIn.y, dIn.x) để tách gọn các vùng chạm góc chéo
+                    Vector2Int dIn = curr - prev;
+                    Vector2Int leftDir = new Vector2Int(-dIn.y, dIn.x);
+                    for (int k = 0; k < nextList.Count; k++)
+                    {
+                        if (nextList[k] - curr == leftDir)
+                        {
+                            pickIdx = k;
+                            break;
+                        }
+                    }
+                }
+
+                Vector2Int nxt = nextList[pickIdx];
+                nextList.RemoveAt(pickIdx);
+                if (nextList.Count == 0) adj.Remove(curr);
+                prev = curr;
+                curr = nxt;
+            }
+
+            if (cornerLoop.Count < 3) continue;
+
+            // Rút gọn các đỉnh thẳng hàng trên cùng cạnh lưới
+            List<Vector2> simplifiedXZ = new List<Vector2>(cornerLoop.Count);
+            int n = cornerLoop.Count;
+            for (int i = 0; i < n; i++)
+            {
+                Vector2Int pPrev = cornerLoop[(i - 1 + n) % n];
+                Vector2Int pCur = cornerLoop[i];
+                Vector2Int pNext = cornerLoop[(i + 1) % n];
+                Vector2Int d1 = pCur - pPrev;
+                Vector2Int d2 = pNext - pCur;
+                if (d1.x * d2.y - d1.y * d2.x == 0) continue; // Thẳng hàng -> bỏ đỉnh giữa
+
+                float wx = originXZ.x + (pCur.x - 0.5f) * cellW;
+                float wz = originXZ.y + (pCur.y - 0.5f) * cellD;
+                simplifiedXZ.Add(new Vector2(wx, wz));
+            }
+            if (simplifiedXZ.Count < 3) continue;
+
+            // Làm mượt 1 nhịp Chaikin để đường viền đỏ ôm mềm mại quanh vùng cần vá (bớt bậc thang)
+            List<Vector2> smoothXZ = simplifiedXZ;
+            if (simplifiedXZ.Count >= 4 && simplifiedXZ.Count <= 220)
+            {
+                smoothXZ = new List<Vector2>(simplifiedXZ.Count * 2);
+                int m = simplifiedXZ.Count;
+                for (int i = 0; i < m; i++)
+                {
+                    Vector2 a = simplifiedXZ[i];
+                    Vector2 b = simplifiedXZ[(i + 1) % m];
+                    smoothXZ.Add(Vector2.Lerp(a, b, 0.25f));
+                    smoothXZ.Add(Vector2.Lerp(a, b, 0.75f));
+                }
+            }
+
+            // Nâng đường viền đỏ lên bề mặt quần (+4.5mm) để luôn nhìn rõ không bị vải che
+            List<Vector3> worldLoop = new List<Vector3>(smoothXZ.Count);
+            for (int i = 0; i < smoothXZ.Count; i++)
+            {
+                float wx = smoothXZ[i].x;
+                float wz = smoothXZ[i].y;
+                float wy = lastGarmentMedianY;
+                if (plyLoader.TrySampleRawSurfaceAt(wx, wz, out float rY, out _) && rY >= lastGarmentMinClothY)
+                {
+                    wy = rY;
+                }
+                else if (plyLoader.SampleSurfaceWorldHeightAndNormal(wx, wz, out float sY, out _) && sY >= lastGarmentMinClothY)
+                {
+                    wy = sY;
+                }
+                worldLoop.Add(new Vector3(wx, wy + 0.0045f, wz));
+            }
+
+            holeRegionOutlinesWorld.Add(worldLoop);
+        }
     }
 
     public void RunOcclusionCompensation()
     {
-        if (detectedHolePointsWorld == null || detectedHolePointsWorld.Count == 0)
+        if (detectedHoleCells == null || detectedHoleCells.Count == 0)
         {
             DetectOcclusionAndHoles();
         }
-        if (detectedHolePointsWorld.Count == 0)
+        if (detectedHoleCells.Count == 0)
         {
-            occlusionStatusMsg = "✅ Không có lỗ khuyết tật nào cần bù đắp!";
+            occlusionStatusMsg = "Không phát hiện vùng bị che.";
             return;
         }
 
         PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (plyLoader == null)
+        {
+            occlusionStatusMsg = "Không tìm thấy PLYDirectLoader.";
+            return;
+        }
+
         compensatedSurfacePointsWorld.Clear();
         gunTiltNormalsWorld.Clear();
         compensatedHeightGrid.Clear();
         compensatedNormalGrid.Clear();
 
         string[] algoNames = {
-            "KDTree K-NN Tangent Plane & SVD/PCA (Bước 3 & 4 - HUONG_DAN_PIPELINE)",
-            "Thin Plate Spline (TPS) RBF Non-Rigid (Bước 5 P4 - HUONG_DAN_PIPELINE)",
-            "Poisson & Laplacian PDE Propagation",
-            "Adaptive Gun Tilt & Standoff",
-            "Bilateral Leg Symmetry Mirroring"
+            "K-NN MLS",
+            "TPS RBF",
+            "Laplacian PDE",
+            "Bù góc súng",
+            "Đối xứng 2 ống"
         };
 
-        // Tính trục đối xứng giữa 2 ống quần (cho thuật toán 4)
-        float symmetryX = 0f;
-        if (landmarksWorldPos != null && landmarksWorldPos.Count >= 4)
+        int res = PLYDirectLoader.GRID_RES;
+        plyLoader.GetCellWorldSize(out float cellW, out float cellD);
+        HashSet<Vector2Int> holeCellSet = new HashSet<Vector2Int>(detectedHoleCells);
+
+        // Khởi tạo lưới cao độ làm việc từ toàn bộ các ô vải cảm biến gốc hợp lệ (cố định làm điều kiện biên)
+        float[,] filledGrid = new float[res, res];
+        bool[,] filledValid = new bool[res, res];
+        for (int x = 0; x < res; x++)
         {
-            symmetryX = (landmarksWorldPos[1].x + landmarksWorldPos[3].x) * 0.5f;
+            for (int z = 0; z < res; z++)
+            {
+                if (plyLoader.IsRawCellValid(x, z) && !holeCellSet.Contains(new Vector2Int(x, z)))
+                {
+                    float ry = plyLoader.GetRawCellY(x, z);
+                    if (ry >= lastGarmentMinClothY)
+                    {
+                        filledGrid[x, z] = ry;
+                        filledValid[x, z] = true;
+                    }
+                }
+            }
         }
 
-        for (int i = 0; i < detectedHolePointsWorld.Count; i++)
+        // Giải trước PDE 100 vòng SOR nếu dùng Thuật toán 2 (Laplacian PDE)
+        Dictionary<Vector2Int, float> laplacianPdeField = null;
+        if (selectedOcclusionAlgorithm == 2)
         {
-            Vector3 pt = detectedHolePointsWorld[i];
-            float compY = 0.022f;
+            laplacianPdeField = plyLoader.SolveLaplacianPdeOnHoleCells(
+                holeCellSet,
+                iterations: 100,
+                relaxation: Mathf.Clamp(laplacianSmoothingFactor + 0.90f, 0.80f, 1.55f),
+                minClothY: lastGarmentMinClothY);
+        }
+
+        // Trục đối xứng 2D thực của chiếc quần (đi qua waist_center -> crotch, bất biến góc xoay!)
+        Vector2 symOriginXZ = Vector2.zero;
+        Vector2 symAxisXZ = new Vector2(0f, 1f);
+        if (landmarksWorldPos != null && landmarksWorldPos.Count >= 4)
+        {
+            Vector2 wC = new Vector2(landmarksWorldPos[1].x, landmarksWorldPos[1].z);
+            Vector2 cr = new Vector2(landmarksWorldPos[3].x, landmarksWorldPos[3].z);
+            symOriginXZ = cr;
+            Vector2 dir = cr - wC;
+            if (dir.sqrMagnitude > 1e-5f) symAxisXZ = dir.normalized;
+        }
+
+        // Bước 1: Tính cao độ vá ban đầu cho 100% TẤT CẢ các ô bị che theo thuật toán đã chọn
+        Vector3[] perCellHintNormal = new Vector3[detectedHoleCells.Count];
+        for (int i = 0; i < detectedHoleCells.Count; i++)
+        {
+            Vector2Int cell = detectedHoleCells[i];
+            Vector2 wxz = plyLoader.GridCellToWorldXZ(cell.x, cell.y);
+            float compY = lastGarmentMedianY;
             Vector3 compNorm = Vector3.up;
 
             switch (selectedOcclusionAlgorithm)
             {
                 case 0:
-                    // 1. KDTree K-NN Tangent Plane & SVD/PCA (Bước 3 & 4 trong HUONG_DAN_PIPELINE)
-                    compY = CalculateMlsTangentPlaneHeight(plyLoader, pt.x, pt.z, out compNorm);
+                    compY = CalculateMlsTangentPlaneHeight(plyLoader, wxz.x, wxz.y, out compNorm);
                     break;
 
                 case 1:
-                    // 2. Thin Plate Spline (TPS) RBF Surface Inpainting (Bước 5 P4 trong HUONG_DAN_PIPELINE)
-                    compY = CalculateTpsHeightAtPoint(pt.x, pt.z);
-                    compNorm = Vector3.up;
+                    compY = CalculateTpsHeightAtPoint(plyLoader, wxz.x, wxz.y, out compNorm);
                     break;
 
                 case 2:
-                    // 3. Poisson & Laplacian PDE Surface Propagation (Nội suy vòng lân cận)
-                    compY = CalculateLaplacianInpaintedHeight(plyLoader, pt.x, pt.z, out compNorm);
+                    if (laplacianPdeField != null && laplacianPdeField.TryGetValue(cell, out float pdeY))
+                    {
+                        compY = pdeY;
+                    }
+                    else
+                    {
+                        compY = CalculateLaplacianInpaintedHeight(plyLoader, wxz.x, wxz.y, out compNorm);
+                    }
                     break;
 
                 case 3:
-                    // 4. Adaptive Gun Tilt & Crease Standoff Compensation
-                    compY = CalculateMlsTangentPlaneHeight(plyLoader, pt.x, pt.z, out compNorm);
+                    compY = CalculateMlsTangentPlaneHeight(plyLoader, wxz.x, wxz.y, out compNorm);
                     compY += occlusionZMarginMm * 0.001f;
-                    // Nghiêng súng phun hướng sâu vào rãnh nếp gấp
-                    Vector3 tiltAxis = Vector3.Cross(compNorm, Vector3.up);
-                    if (tiltAxis.sqrMagnitude > 1e-4f)
-                    {
-                        tiltAxis.Normalize();
-                        compNorm = Quaternion.AngleAxis(maxGunTiltAngleDeg, tiltAxis) * compNorm;
-                    }
-                    else
-                    {
-                        compNorm = Quaternion.Euler(maxGunTiltAngleDeg * 0.5f, 0f, 0f) * Vector3.up;
-                    }
                     break;
 
                 case 4:
-                    // 5. Bilateral Leg Symmetry Mirroring
-                    float mirrorX = 2f * symmetryX - pt.x;
-                    if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(mirrorX, pt.z, out float mY, out Vector3 mNorm))
+                    Vector2 rel = wxz - symOriginXZ;
+                    float proj = Vector2.Dot(rel, symAxisXZ);
+                    Vector2 foot = symOriginXZ + symAxisXZ * proj;
+                    Vector2 mirrorXZ = 2f * foot - wxz;
+
+                    if (plyLoader.TrySampleRawSurfaceAt(mirrorXZ.x, mirrorXZ.y, out float mY, out _) && mY >= lastGarmentMinClothY)
                     {
-                        compY = mY;
-                        compNorm = new Vector3(-mNorm.x, mNorm.y, mNorm.z);
+                        // Hòa trộn độ cao đối xứng với độ cao cục bộ để triệt tiêu bậc thang tại viền lỗ
+                        float localRefY = CalculateMlsTangentPlaneHeight(plyLoader, wxz.x, wxz.y, out _);
+                        compY = Mathf.Lerp(mY, localRefY, 0.30f);
+                        if (plyLoader.SampleSurfaceWorldHeightAndNormal(mirrorXZ.x, mirrorXZ.y, out _, out Vector3 mNorm))
+                        {
+                            Vector2 nXZ = new Vector2(mNorm.x, mNorm.z);
+                            Vector2 nProj = symAxisXZ * Vector2.Dot(nXZ, symAxisXZ);
+                            Vector2 nMirror = 2f * nProj - nXZ;
+                            compNorm = new Vector3(nMirror.x, mNorm.y, nMirror.y).normalized;
+                        }
                     }
                     else
                     {
-                        compY = CalculateTpsHeightAtPoint(pt.x, pt.z);
-                        compNorm = Vector3.up;
+                        compY = CalculateTpsHeightAtPoint(plyLoader, wxz.x, wxz.y, out compNorm);
                     }
                     break;
             }
 
-            Vector3 compPos = new Vector3(pt.x, compY, pt.z);
+            // Chống rớt độ cao xuống mặt bàn hoặc vọt lố quá biên vải
+            float safeMinY = lastGarmentMinClothY;
+            float safeMaxY = lastGarmentMedianY + 0.085f + (selectedOcclusionAlgorithm == 3 ? occlusionZMarginMm * 0.001f : 0f);
+            compY = Mathf.Clamp(compY, safeMinY, safeMaxY);
+
+            filledGrid[cell.x, cell.y] = compY;
+            filledValid[cell.x, cell.y] = true;
+            perCellHintNormal[i] = compNorm;
+        }
+
+        // Bước 2: Làm mượt biên hài (Harmonic Boundary Stitching) giữ cố định vải gốc — đảm bảo 100% kín khít không nứt mép!
+        int stitchPasses = (selectedOcclusionAlgorithm == 2) ? 2 : (selectedOcclusionAlgorithm == 3 ? 4 : 8);
+        float stitchAlpha = (selectedOcclusionAlgorithm == 3) ? 0.30f : 0.50f;
+        for (int pass = 0; pass < stitchPasses; pass++)
+        {
+            for (int i = 0; i < detectedHoleCells.Count; i++)
+            {
+                Vector2Int c = detectedHoleCells[i];
+                int x = c.x, z = c.y;
+                float sum = 0f;
+                int cnt = 0;
+                if (x > 0 && filledValid[x - 1, z]) { sum += filledGrid[x - 1, z]; cnt++; }
+                if (x < res - 1 && filledValid[x + 1, z]) { sum += filledGrid[x + 1, z]; cnt++; }
+                if (z > 0 && filledValid[x, z - 1]) { sum += filledGrid[x, z - 1]; cnt++; }
+                if (z < res - 1 && filledValid[x, z + 1]) { sum += filledGrid[x, z + 1]; cnt++; }
+                if (cnt > 0)
+                {
+                    filledGrid[x, z] = Mathf.Lerp(filledGrid[x, z], sum / cnt, stitchAlpha);
+                }
+            }
+        }
+
+        // Bước 3: Tính pháp tuyến chính xác từ bề mặt đã điền kín, bơm 100% ô vào PLYDirectLoader
+        for (int i = 0; i < detectedHoleCells.Count; i++)
+        {
+            Vector2Int cell = detectedHoleCells[i];
+            int gx = cell.x, gz = cell.y;
+            Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
+            float compY = filledGrid[gx, gz];
+
+            float yL = (gx > 0 && filledValid[gx - 1, gz]) ? filledGrid[gx - 1, gz] : compY;
+            float yR = (gx < res - 1 && filledValid[gx + 1, gz]) ? filledGrid[gx + 1, gz] : compY;
+            float yD = (gz > 0 && filledValid[gx, gz - 1]) ? filledGrid[gx, gz - 1] : compY;
+            float yU = (gz < res - 1 && filledValid[gx, gz + 1]) ? filledGrid[gx, gz + 1] : compY;
+
+            Vector3 tx = new Vector3(2f * cellW, yR - yL, 0f).normalized;
+            Vector3 tz = new Vector3(0f, yU - yD, 2f * cellD).normalized;
+            Vector3 compNorm = Vector3.Cross(tz, tx).normalized;
+            if (compNorm.y < 0f) compNorm = -compNorm;
+            if (compNorm.sqrMagnitude < 1e-5f) compNorm = Vector3.up;
+
+            if (selectedOcclusionAlgorithm == 3)
+            {
+                Vector3 tiltAxis = Vector3.Cross(compNorm, Vector3.up);
+                if (tiltAxis.sqrMagnitude > 1e-4f)
+                {
+                    tiltAxis.Normalize();
+                    float extraTilt = Mathf.Min(maxGunTiltAngleDeg, Vector3.Angle(compNorm, Vector3.up) * 0.5f + 10f);
+                    compNorm = (Quaternion.AngleAxis(extraTilt, tiltAxis) * Vector3.up).normalized;
+                }
+            }
+            else if (selectedOcclusionAlgorithm == 4 && perCellHintNormal[i].sqrMagnitude > 0.5f)
+            {
+                compNorm = Vector3.Slerp(compNorm, perCellHintNormal[i].normalized, 0.45f).normalized;
+            }
+            if (compNorm.y < 0f) compNorm = -compNorm;
+
+            Vector3 compPos = new Vector3(wxz.x, compY, wxz.y);
             compensatedSurfacePointsWorld.Add(compPos);
             gunTiltNormalsWorld.Add(compNorm);
 
-            Vector2Int key = new Vector2Int(Mathf.RoundToInt(pt.x * 100f), Mathf.RoundToInt(pt.z * 100f));
+            // Lưu lưới độ phân giải mịn ~3mm (key * 333)
+            Vector2Int key = new Vector2Int(Mathf.RoundToInt(wxz.x * 333f), Mathf.RoundToInt(wxz.y * 333f));
             compensatedHeightGrid[key] = compY;
             compensatedNormalGrid[key] = compNorm;
+
+            // Bơm trực tiếp từng ô đã vá kín vào PLYDirectLoader kèm màu RGB tiệp vải gốc
+            Color32 clothCol = plyLoader.SampleSurroundingRawColor(wxz.x, wxz.y, searchCells: 10);
+            plyLoader.InjectSurfaceCell(gx, gz, compY, clothCol);
         }
 
-        // Tạo và hiển thị chùm điểm 3D (Point Cloud) thực thể vá kín lỗ khuyết
+        // Bước 4: Cập nhật cao độ đường viền đỏ ôm sát đúng bề mặt mới vá (+4.5mm)
+        for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+        {
+            List<Vector3> loop = holeRegionOutlinesWorld[r];
+            for (int k = 0; k < loop.Count; k++)
+            {
+                Vector3 p = loop[k];
+                Vector2Int c = plyLoader.WorldToGridCell(p.x, p.z);
+                if (filledValid[c.x, c.y])
+                {
+                    loop[k] = new Vector3(p.x, filledGrid[c.x, c.y] + 0.0045f, p.z);
+                }
+            }
+        }
+
+        // Bước 5: Xây dựng Mesh vá đặc (Solid Triangulated Patch Mesh) & cập nhật WorkpieceSurfaceMesh nếu đang ở chế độ Mesh3D
         BuildAndDisplayInpaintedMesh(plyLoader);
 
-        occlusionStatusMsg = $"✨ Đã vá kín {compensatedSurfacePointsWorld.Count} hạt điểm khuyết tật bằng [{algoNames[selectedOcclusionAlgorithm]}]. Bề mặt quần đã liền mạch 100%!";
+        occlusionStatusMsg = $"Đã vá kín {detectedHoleRegionCount} vùng ({compensatedSurfacePointsWorld.Count} ô) - {algoNames[Mathf.Clamp(selectedOcclusionAlgorithm, 0, 4)]}.";
     }
 
     public void BuildAndDisplayInpaintedMesh(PLYDirectLoader plyLoader)
@@ -3671,7 +4772,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (inpaintedMeshObject == null)
         {
             Transform parentT = (plyLoader != null) ? plyLoader.transform : this.transform;
-            inpaintedMeshObject = new GameObject("InpaintedJeansSurface_PointCloud");
+            inpaintedMeshObject = new GameObject("InpaintedJeansSurface_Mesh");
             inpaintedMeshObject.transform.SetParent(parentT, false);
             inpaintedMeshObject.transform.localPosition = Vector3.zero;
             inpaintedMeshObject.transform.localRotation = Quaternion.identity;
@@ -3682,7 +4783,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
             Shader pcShader = Shader.Find("Custom/PointCloudVertexColor") ?? Shader.Find("Universal Render Pipeline/Particles/Unlit") ?? Shader.Find("Sprites/Default");
             Material mat = new Material(pcShader);
-            mat.name = "Inpainted_PointCloud_Mat";
+            mat.name = "Inpainted_SurfaceMesh_Mat";
             if (mat.HasProperty("_PointSize")) mat.SetFloat("_PointSize", inpaintPointSize);
             mat.SetFloat("_Cull", 0);
             mr.sharedMaterial = mat;
@@ -3697,161 +4798,360 @@ public class DobotCR10AIKController : MonoBehaviour
             renderer.sharedMaterial.SetFloat("_PointSize", inpaintPointSize);
         }
 
-        Color32 clothCol = highlightInpaintedMesh
-            ? new Color32(30, 235, 250, 255)  // Cyan nổi bật để nhận diện vùng vá
-            : new Color32(185, 175, 148, 255); // Khaki tự nhiên tiệp màu với đám mây điểm quần
-
-        // Tạo chùm điểm Point Cloud thực thể (MeshTopology.Points)
+        Color32 cyanHighlight = new Color32(24, 232, 248, 255);
         Mesh mesh = new Mesh();
-        mesh.name = "Inpainted_PointCloud_Points";
         mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
 
-        List<Vector3> verts = new List<Vector3>(compensatedSurfacePointsWorld);
-        List<Color32> cols = new List<Color32>(verts.Count);
-        for (int i = 0; i < verts.Count; i++)
+        if (renderInpaintedAsSolidMesh && plyLoader != null && detectedHoleCells.Count == compensatedSurfacePointsWorld.Count)
         {
-            cols.Add(clothCol);
+            // CHẾ ĐỘ 3D MESH ĐẶC (Solid Triangulated Patch Mesh + 1-ring khâu mép liền kín không khe hở!)
+            mesh.name = "Inpainted_SolidPatch_Triangles";
+            int res = PLYDirectLoader.GRID_RES;
+            int[,] vertIdx = new int[res, res];
+            bool[,] isHoleCell = new bool[res, res];
+            for (int x = 0; x < res; x++)
+                for (int z = 0; z < res; z++)
+                    vertIdx[x, z] = -1;
+
+            List<Vector3> localVerts = new List<Vector3>(detectedHoleCells.Count * 2);
+            List<Color32> cols = new List<Color32>(detectedHoleCells.Count * 2);
+            float zLift = highlightInpaintedMesh ? 0.0012f : 0.0005f;
+
+            // Thêm toàn bộ đỉnh của các ô bị che đã vá
+            for (int i = 0; i < detectedHoleCells.Count; i++)
+            {
+                Vector2Int c = detectedHoleCells[i];
+                Vector3 wp = compensatedSurfacePointsWorld[i];
+                wp.y += zLift;
+                isHoleCell[c.x, c.y] = true;
+                vertIdx[c.x, c.y] = localVerts.Count;
+                localVerts.Add(inpaintedMeshObject.transform.InverseTransformPoint(wp));
+                Color32 pointCol = highlightInpaintedMesh
+                    ? cyanHighlight
+                    : plyLoader.SampleSurroundingRawColor(wp.x, wp.z, searchCells: 10);
+                cols.Add(pointCol);
+            }
+
+            // Thêm vành biên 1-ring các ô cảm biến gốc kề quanh lỗ để tam giác vá khâu kín 100% vào mặt quần thật!
+            for (int i = 0; i < detectedHoleCells.Count; i++)
+            {
+                Vector2Int c = detectedHoleCells[i];
+                float holeY = compensatedSurfacePointsWorld[i].y;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        if (dx == 0 && dz == 0) continue;
+                        int nx = c.x + dx;
+                        int nz = c.y + dz;
+                        if (nx < 0 || nx >= res || nz < 0 || nz >= res) continue;
+                        if (vertIdx[nx, nz] >= 0) continue;
+                        if (!plyLoader.IsRawCellValid(nx, nz)) continue;
+
+                        float ry = plyLoader.GetRawCellY(nx, nz);
+                        if (Mathf.Abs(ry - holeY) > 0.085f) continue;
+
+                        Vector2 nXZ = plyLoader.GridCellToWorldXZ(nx, nz);
+                        Vector3 wp = new Vector3(nXZ.x, ry + zLift * 0.5f, nXZ.y);
+                        vertIdx[nx, nz] = localVerts.Count;
+                        localVerts.Add(inpaintedMeshObject.transform.InverseTransformPoint(wp));
+
+                        Color32 rimCol = cyanHighlight;
+                        if (!highlightInpaintedMesh)
+                        {
+                            if (!plyLoader.TrySampleRawSurfaceAt(nXZ.x, nXZ.y, out _, out rimCol))
+                                rimCol = plyLoader.SampleSurroundingRawColor(nXZ.x, nXZ.y, searchCells: 6);
+                        }
+                        cols.Add(rimCol);
+                    }
+                }
+            }
+
+            // Nối tam giác (2 tam giác mỗi ô 2x2 có ít nhất 1 đỉnh thuộc vùng vá)
+            List<int> tris = new List<int>(detectedHoleCells.Count * 6);
+            for (int x = 0; x < res - 1; x++)
+            {
+                for (int z = 0; z < res - 1; z++)
+                {
+                    int v00 = vertIdx[x, z];
+                    int v10 = vertIdx[x + 1, z];
+                    int v01 = vertIdx[x, z + 1];
+                    int v11 = vertIdx[x + 1, z + 1];
+
+                    if (v00 >= 0 && v01 >= 0 && v10 >= 0 &&
+                        (isHoleCell[x, z] || isHoleCell[x, z + 1] || isHoleCell[x + 1, z]))
+                    {
+                        tris.Add(v00); tris.Add(v01); tris.Add(v10);
+                    }
+                    if (v10 >= 0 && v01 >= 0 && v11 >= 0 &&
+                        (isHoleCell[x + 1, z] || isHoleCell[x, z + 1] || isHoleCell[x + 1, z + 1]))
+                    {
+                        tris.Add(v10); tris.Add(v01); tris.Add(v11);
+                    }
+                }
+            }
+
+            mesh.SetVertices(localVerts);
+            mesh.SetColors(cols);
+            mesh.SetTriangles(tris, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            filter.sharedMesh = mesh;
+
+            // Gắn MeshCollider cho lớp vá 3D để Raycast và va chạm nhận diện chính xác
+            MeshCollider mc = inpaintedMeshObject.GetComponent<MeshCollider>();
+            if (mc == null) mc = inpaintedMeshObject.AddComponent<MeshCollider>();
+            mc.sharedMesh = null;
+            mc.sharedMesh = mesh;
+        }
+        else
+        {
+            // CHẾ ĐỘ HẠT ĐIỂM POINT CLOUD (Tùy chọn phụ)
+            mesh.name = "Inpainted_PointCloud_Points";
+            int count = compensatedSurfacePointsWorld.Count;
+            List<Vector3> localVerts = new List<Vector3>(count);
+            List<Color32> cols = new List<Color32>(count);
+
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 wp = compensatedSurfacePointsWorld[i];
+                localVerts.Add(inpaintedMeshObject.transform.InverseTransformPoint(wp));
+                Color32 pointCol = highlightInpaintedMesh
+                    ? cyanHighlight
+                    : (plyLoader != null ? plyLoader.SampleSurroundingRawColor(wp.x, wp.z) : new Color32(130, 140, 155, 255));
+                cols.Add(pointCol);
+            }
+
+            int[] indices = new int[count];
+            for (int i = 0; i < count; i++) indices[i] = i;
+
+            mesh.SetVertices(localVerts);
+            mesh.SetColors(cols);
+            mesh.SetIndices(indices, MeshTopology.Points, 0);
+            mesh.RecalculateBounds();
+            filter.sharedMesh = mesh;
         }
 
-        int[] indices = new int[verts.Count];
-        for (int i = 0; i < verts.Count; i++) indices[i] = i;
-
-        mesh.SetVertices(verts);
-        mesh.SetColors(cols);
-        mesh.SetIndices(indices, MeshTopology.Points, 0);
-
-        filter.sharedMesh = mesh;
-
-        // Bơm các điểm bù đắp vào lưới tra cứu độ cao của PLYDirectLoader
-        if (plyLoader != null)
+        // Nếu phôi đang hiển thị ở chế độ 3D Mesh -> tự động dựng lại WorkpieceSurfaceMesh liền kín 100%!
+        if (plyLoader != null && plyLoader.renderMode == PLYDirectLoader.WorkpieceRenderMode.Mesh3D)
         {
-            for (int i = 0; i < compensatedSurfacePointsWorld.Count; i++)
-            {
-                Vector3 p = compensatedSurfacePointsWorld[i];
-                plyLoader.InjectSurfacePoint(p.x, p.y, p.z, clothCol);
-            }
-            if (plyLoader.renderMode == PLYDirectLoader.WorkpieceRenderMode.Mesh3D)
-            {
-                plyLoader.RefreshSurfaceMeshFromGrid();
-            }
+            plyLoader.RefreshSurfaceMeshFromGrid();
         }
     }
 
-    private float CalculateTpsHeightAtPoint(float x, float z)
+    /// <summary>
+    /// Chuyển đổi toàn bộ phôi quần (đám mây điểm + 100% các vùng bị che đã vá) thành 1 khối 3D Surface Mesh hoàn chỉnh,
+    /// kín lỗ, có pháp tuyến mượt và gắn MeshCollider sẵn sàng cho sinh quỹ đạo & xuất file .OBJ.
+    /// </summary>
+    public void ConvertRepairedWorkpieceToFull3DMesh()
     {
-        if (landmarksWorldPos == null || landmarksWorldPos.Count == 0) return 0.022f;
-
-        float sumY = 0f;
-        float sumWeight = 0f;
-        for (int i = 0; i < landmarksWorldPos.Count; i++)
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (plyLoader == null)
         {
-            float dx = x - landmarksWorldPos[i].x;
-            float dz = z - landmarksWorldPos[i].z;
-            float distSq = dx * dx + dz * dz;
-            float w = 1f / (distSq + 0.002f);
-            sumY += landmarksWorldPos[i].y * w;
-            sumWeight += w;
+            occlusionStatusMsg = "Không tìm thấy PLYDirectLoader.";
+            return;
         }
-        return sumWeight > 0f ? (sumY / sumWeight) : 0.022f;
+
+        // Đảm bảo đã phát hiện & điền kín 100% vùng bị che trước khi dựng Mesh tổng
+        if (detectedHoleCells.Count == 0)
+        {
+            DetectOcclusionAndHoles();
+        }
+        if (detectedHoleCells.Count > 0 && compensatedSurfacePointsWorld.Count != detectedHoleCells.Count)
+        {
+            RunOcclusionCompensation();
+        }
+        else if (detectedHoleCells.Count > 0)
+        {
+            // Bơm lại toàn bộ ô đã vá vào lưới để bảo đảm đồng bộ tuyệt đối
+            for (int i = 0; i < detectedHoleCells.Count; i++)
+            {
+                Vector2Int cell = detectedHoleCells[i];
+                Vector3 wp = compensatedSurfacePointsWorld[i];
+                Color32 col = plyLoader.SampleSurroundingRawColor(wp.x, wp.z, searchCells: 10);
+                plyLoader.InjectSurfaceCell(cell.x, cell.y, wp.y, col);
+            }
+        }
+
+        renderInpaintedAsSolidMesh = true;
+        plyLoader.SetRenderMode(PLYDirectLoader.WorkpieceRenderMode.Mesh3D);
+        GameObject meshObj = plyLoader.ConvertPointCloudToSurfaceMesh(applyPinHoleFill: true);
+        plyLoader.SetVisible(true);
+
+        int vCount = 0, tCount = 0;
+        if (meshObj != null)
+        {
+            MeshFilter mf = meshObj.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+            {
+                vCount = mf.sharedMesh.vertexCount;
+                tCount = mf.sharedMesh.triangles.Length / 3;
+            }
+        }
+
+        // Cập nhật lớp patch đồng bộ (nếu highlight cyan bật thì hiện đè nổi bật; nếu tắt thì WorkpieceSurfaceMesh đã chứa sẵn liền khối)
+        if (compensatedSurfacePointsWorld.Count > 0)
+        {
+            BuildAndDisplayInpaintedMesh(plyLoader);
+        }
+
+        occlusionStatusMsg = $"Đã tạo 3D Mesh: {vCount:N0} đỉnh, {tCount:N0} tam giác.";
+        Debug.Log($"[CR10A 3D Mesh] {occlusionStatusMsg}");
+    }
+
+    /// <summary>
+    /// Xuất 3D Surface Mesh đã vá kín toàn bộ vùng bị che ra file chuẩn Wavefront .OBJ
+    /// </summary>
+    public void ExportRepairedMeshToObj()
+    {
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (plyLoader == null)
+        {
+            occlusionStatusMsg = "Không tìm thấy PLYDirectLoader.";
+            return;
+        }
+
+        // Đảm bảo đã chuyển sang 3D Mesh hoàn chỉnh trước khi xuất
+        if (plyLoader.renderMode != PLYDirectLoader.WorkpieceRenderMode.Mesh3D || compensatedSurfacePointsWorld.Count == 0)
+        {
+            ConvertRepairedWorkpieceToFull3DMesh();
+        }
+
+        string sample = !string.IsNullOrEmpty(plyLoader.currentLoadedSampleName)
+            ? plyLoader.currentLoadedSampleName
+            : (string.IsNullOrEmpty(selectedSampleName) ? "garment" : selectedSampleName);
+        string outPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "output_drawing", $"{sample}_repaired_mesh.obj"));
+        string saved = plyLoader.ExportSurfaceMeshToObj(outPath);
+
+        if (!string.IsNullOrEmpty(saved))
+        {
+            occlusionStatusMsg = $"Đã xuất OBJ: output_drawing/{Path.GetFileName(saved)}";
+            Debug.Log($"[CR10A Export OBJ] Saved repaired 3D mesh to: {saved}");
+        }
+        else
+        {
+            occlusionStatusMsg = "Xuất file .OBJ thất bại.";
+        }
+    }
+
+    private float CalculateTpsHeightAtPoint(PLYDirectLoader plyLoader, float x, float z, out Vector3 normalOut)
+    {
+        normalOut = Vector3.up;
+        float radiusM = Mathf.Max(0.035f, occlusionSearchRadiusMm * 0.001f * 1.5f);
+        List<Vector3> ctrlPts = plyLoader != null
+            ? plyLoader.CollectRawSurfaceNeighbors(x, z, radiusM, Mathf.Clamp(occlusionKNeighbors, 8, 16), lastGarmentMinClothY)
+            : null;
+
+        if (ctrlPts != null && ctrlPts.Count >= 6)
+        {
+            if (TrajectoryEvaluationEngine.EvaluateTrueTpsSurface(ctrlPts, x, z, out float tpsY, out Vector3 tpsNorm))
+            {
+                float minY = float.MaxValue, maxY = float.MinValue;
+                for (int i = 0; i < ctrlPts.Count; i++) { minY = Mathf.Min(minY, ctrlPts[i].y); maxY = Mathf.Max(maxY, ctrlPts[i].y); }
+                normalOut = tpsNorm;
+                return Mathf.Clamp(tpsY, minY - 0.015f, maxY + 0.015f);
+            }
+        }
+
+        // Fallback về TPS trên 12 mốc giải phẫu nếu lỗ quá lớn không có điểm cảm biến trong bán kính tìm kiếm
+        if (landmarksWorldPos != null && landmarksWorldPos.Count >= 4)
+        {
+            if (TrajectoryEvaluationEngine.EvaluateTrueTpsSurface(landmarksWorldPos, x, z, out float lmY, out Vector3 lmNorm))
+            {
+                normalOut = lmNorm;
+                return lmY;
+            }
+        }
+        return lastGarmentMedianY;
     }
 
     private float CalculateLaplacianInpaintedHeight(PLYDirectLoader plyLoader, float x, float z, out Vector3 norm)
     {
         norm = Vector3.up;
-        if (plyLoader == null) return 0.022f;
+        if (plyLoader == null) return lastGarmentMedianY;
 
-        float radius = occlusionSearchRadiusMm * 0.001f;
-        float sumY = 0f;
-        float sumWeight = 0f;
-        Vector3 sumNorm = Vector3.zero;
+        float radius = Mathf.Max(0.03f, occlusionSearchRadiusMm * 0.001f);
+        List<Vector3> rawNeighbors = plyLoader.CollectRawSurfaceNeighbors(x, z, radius * 1.6f, Mathf.Max(12, occlusionKNeighbors), lastGarmentMinClothY);
+        if (rawNeighbors.Count == 0)
+            return CalculateTpsHeightAtPoint(plyLoader, x, z, out norm);
 
-        for (int ring = 1; ring <= 3; ring++)
+        float sumY = 0f, sumW = 0f;
+        for (int i = 0; i < rawNeighbors.Count; i++)
         {
-            float r = radius * (ring / 3f);
-            for (int a = 0; a < 8; a++)
-            {
-                float ang = a * Mathf.PI * 0.25f;
-                float sx = x + Mathf.Cos(ang) * r;
-                float sz = z + Mathf.Sin(ang) * r;
-                if (plyLoader.SampleSurfaceWorldHeightAndNormal(sx, sz, out float ny, out Vector3 sn))
-                {
-                    float w = 1f / (r * r + 1e-4f);
-                    sumY += ny * w;
-                    sumNorm += sn * w;
-                    sumWeight += w;
-                }
-            }
+            float dx = rawNeighbors[i].x - x;
+            float dz = rawNeighbors[i].z - z;
+            float w = 1f / (dx * dx + dz * dz + 1e-5f);
+            sumY += rawNeighbors[i].y * w;
+            sumW += w;
         }
 
-        if (sumWeight > 0f)
-        {
-            norm = sumNorm.normalized;
-            return sumY / sumWeight;
-        }
-        return CalculateTpsHeightAtPoint(x, z);
+        CalculateMlsTangentPlaneHeight(plyLoader, x, z, out norm);
+        return sumW > 0f ? (sumY / sumW) : rawNeighbors[0].y;
     }
 
     private float CalculateMlsTangentPlaneHeight(PLYDirectLoader plyLoader, float x, float z, out Vector3 norm)
     {
         norm = Vector3.up;
-        if (plyLoader == null) return 0.022f;
+        if (plyLoader == null) return lastGarmentMedianY;
 
-        float radius = occlusionSearchRadiusMm * 0.001f;
-        List<Vector3> neighbors = new List<Vector3>();
-
-        for (int dx = -2; dx <= 2; dx++)
-        {
-            for (int dz = -2; dz <= 2; dz++)
-            {
-                if (dx == 0 && dz == 0) continue;
-                float sx = x + dx * (radius * 0.45f);
-                float sz = z + dz * (radius * 0.45f);
-                if (plyLoader.SampleSurfaceWorldHeightAndNormal(sx, sz, out float ny, out Vector3 sn))
-                {
-                    neighbors.Add(new Vector3(sx, ny, sz));
-                    if (neighbors.Count >= occlusionKNeighbors) break;
-                }
-            }
-            if (neighbors.Count >= occlusionKNeighbors) break;
-        }
-
+        float radius = Mathf.Max(0.03f, occlusionSearchRadiusMm * 0.001f);
+        // Thu thập K điểm cảm biến gốc đối xứng mọi hướng quanh (x, z) với bán kính tự mở rộng & lọc điểm mặt bàn
+        List<Vector3> neighbors = plyLoader.CollectRawSurfaceNeighbors(x, z, radius, occlusionKNeighbors, lastGarmentMinClothY);
         if (neighbors.Count < 3)
         {
-            return CalculateLaplacianInpaintedHeight(plyLoader, x, z, out norm);
+            return CalculateTpsHeightAtPoint(plyLoader, x, z, out norm);
         }
 
-        // Fit mặt phẳng tiếp xúc bằng Moving Least Squares (Z = a*X + b*Z + c)
-        float avgX = 0f, avgY = 0f, avgZ = 0f;
+        // Độ rộng nhân Gauss thích ứng theo khoảng cách tới láng giềng xa nhất (không bị =0 khi lỗ lớn > 5cm!)
+        float maxDistSq = 1e-4f;
         for (int i = 0; i < neighbors.Count; i++)
         {
-            avgX += neighbors[i].x;
-            avgY += neighbors[i].y;
-            avgZ += neighbors[i].z;
+            float dx = neighbors[i].x - x;
+            float dz = neighbors[i].z - z;
+            maxDistSq = Mathf.Max(maxDistSq, dx * dx + dz * dz);
         }
-        avgX /= neighbors.Count;
-        avgY /= neighbors.Count;
-        avgZ /= neighbors.Count;
+        float h2 = Mathf.Max(1e-4f, maxDistSq * 0.55f);
+
+        float wSum = 0f, avgX = 0f, avgY = 0f, avgZ = 0f;
+        float[] weights = new float[neighbors.Count];
+        for (int i = 0; i < neighbors.Count; i++)
+        {
+            float dx = neighbors[i].x - x;
+            float dz = neighbors[i].z - z;
+            float w = Mathf.Exp(-(dx * dx + dz * dz) / h2);
+            weights[i] = w;
+            wSum += w;
+            avgX += w * neighbors[i].x;
+            avgY += w * neighbors[i].y;
+            avgZ += w * neighbors[i].z;
+        }
+        if (wSum < 1e-8f) return lastGarmentMedianY;
+        avgX /= wSum; avgY /= wSum; avgZ /= wSum;
 
         float sxx = 0f, sxz = 0f, szz = 0f, sxy = 0f, szy = 0f;
         for (int i = 0; i < neighbors.Count; i++)
         {
+            float w = weights[i];
             float rx = neighbors[i].x - avgX;
             float rz = neighbors[i].z - avgZ;
             float ry = neighbors[i].y - avgY;
-            sxx += rx * rx;
-            sxz += rx * rz;
-            szz += rz * rz;
-            sxy += rx * ry;
-            szy += rz * ry;
+            sxx += w * rx * rx;
+            sxz += w * rx * rz;
+            szz += w * rz * rz;
+            sxy += w * rx * ry;
+            szy += w * rz * ry;
         }
 
         float det = sxx * szz - sxz * sxz;
-        if (Mathf.Abs(det) > 1e-7f)
+        if (Mathf.Abs(det) > 1e-10f)
         {
             float a = (sxy * szz - szy * sxz) / det;
             float b = (szy * sxx - sxy * sxz) / det;
             norm = new Vector3(-a, 1f, -b).normalized;
-            return avgY + a * (x - avgX) + b * (z - avgZ);
+            float yEst = avgY + a * (x - avgX) + b * (z - avgZ);
+            float minY = float.MaxValue, maxY = float.MinValue;
+            for (int i = 0; i < neighbors.Count; i++) { minY = Mathf.Min(minY, neighbors[i].y); maxY = Mathf.Max(maxY, neighbors[i].y); }
+            return Mathf.Clamp(yEst, minY - 0.015f, maxY + 0.015f);
         }
 
         return avgY;
@@ -3874,10 +5174,23 @@ public class DobotCR10AIKController : MonoBehaviour
 
     public bool SampleCompensatedSurface(float worldX, float worldZ, out float worldY, out Vector3 normalWorld)
     {
-        Vector2Int key = new Vector2Int(Mathf.RoundToInt(worldX * 100f), Mathf.RoundToInt(worldZ * 100f));
+        Vector2Int key = new Vector2Int(Mathf.RoundToInt(worldX * 333f), Mathf.RoundToInt(worldZ * 333f));
         if (compensatedHeightGrid.TryGetValue(key, out worldY) && compensatedNormalGrid.TryGetValue(key, out normalWorld))
         {
             return true;
+        }
+        // Kiểm tra thêm 8 ô lân cận (±3mm) để không bị hụt điểm giữa các bước lưới
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                if (dx == 0 && dz == 0) continue;
+                Vector2Int nk = new Vector2Int(key.x + dx, key.y + dz);
+                if (compensatedHeightGrid.TryGetValue(nk, out worldY) && compensatedNormalGrid.TryGetValue(nk, out normalWorld))
+                {
+                    return true;
+                }
+            }
         }
         worldY = 0.020f;
         normalWorld = Vector3.up;
@@ -3888,7 +5201,7 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         if (waypoints == null || waypoints.Count == 0)
         {
-            occlusionStatusMsg = "⚠️ Chưa có quỹ đạo nào để áp dụng bù đắp! Hãy vẽ nét hoặc nạp mẫu trước.";
+            occlusionStatusMsg = "Chưa có quỹ đạo để áp dụng.";
             return;
         }
         if (compensatedSurfacePointsWorld.Count == 0)
@@ -3897,6 +5210,7 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         float radiusM = occlusionSearchRadiusMm * 0.001f;
+        float standoffM = customDrawZOffsetMm * 0.001f;
         int modifiedCount = 0;
         float[] seedJoints = null;
 
@@ -3905,7 +5219,6 @@ public class DobotCR10AIKController : MonoBehaviour
             WaypointData wp = waypoints[i];
             Vector3 p = wp.targetPosWorld_m;
 
-            // Tìm điểm bù đắp gần nhất
             float minDist = float.MaxValue;
             int bestIdx = -1;
             for (int k = 0; k < compensatedSurfacePointsWorld.Count; k++)
@@ -3922,30 +5235,36 @@ public class DobotCR10AIKController : MonoBehaviour
 
             if (bestIdx >= 0 && minDist <= radiusM)
             {
-                float compY = compensatedSurfacePointsWorld[bestIdx].y;
-                Vector3 compN = gunTiltNormalsWorld[bestIdx];
+                Vector3 surfP = new Vector3(p.x, compensatedSurfacePointsWorld[bestIdx].y, p.z);
+                Vector3 compN = gunTiltNormalsWorld[bestIdx].normalized;
 
-                wp.targetPosWorld_m.y = compY + customDrawZOffsetMm * 0.001f;
+                // P_TCP = P_surface + d * normal (đúng hình học 3D theo pháp tuyến!)
+                wp.targetPosWorld_m = surfP + compN * standoffM;
                 wp.microNormal = compN;
 
                 if (globalReference != null)
                 {
-                    Vector3 localM = globalReference.InverseTransformPoint(wp.targetPosWorld_m);
-                    wp.targetPosGlobal_mm = localM * 1000f;
+                    wp.targetPosGlobal_mm = globalReference.InverseTransformPoint(wp.targetPosWorld_m) * 1000f;
                 }
 
-                // Bù góc súng theo pháp tuyến nghiêng nếu có
-                if (selectedOcclusionAlgorithm == 3 || Vector3.Angle(compN, Vector3.up) > 8f)
-                {
-                    wp.pitch_deg = Mathf.Clamp(-compN.z * maxGunTiltAngleDeg, -maxGunTiltAngleDeg, maxGunTiltAngleDeg);
-                    wp.yaw_deg = Mathf.Clamp(compN.x * maxGunTiltAngleDeg, -maxGunTiltAngleDeg, maxGunTiltAngleDeg);
-                }
+                // Tính góc định hướng 6-DOF chuẩn z_tool = -normal
+                Vector3 normRobot = globalReference != null
+                    ? globalReference.InverseTransformDirection(compN).normalized
+                    : new Vector3(-compN.z, -compN.x, compN.y).normalized;
+                Vector3 tanW = (i + 1 < waypoints.Count) ? (waypoints[i + 1].targetPosWorld_m - p) : Vector3.forward;
+                Vector3 tanRobot = globalReference != null
+                    ? globalReference.InverseTransformDirection(tanW).normalized
+                    : new Vector3(-tanW.z, -tanW.x, tanW.y).normalized;
+                Vector3 rpy = DobotCR10AKinematics.SurfaceNormalToRobotRpyDeg(normRobot, tanRobot, maxGunTiltAngleDeg);
+                wp.roll_deg = rpy.x;
+                wp.pitch_deg = rpy.y;
+                wp.yaw_deg = rpy.z;
 
-                // Giải Động học Nghịch IK cho điểm vừa cập nhật
                 Quaternion flangeRot = GetWaypointFlangeRotation(wp);
                 var sols = DobotCR10AKinematics.SolveTcpPose(
                     wp.targetPosGlobal_mm, flangeRot, seedJoints, toolLength,
-                    useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY
+                    useAdaptiveTilt: true, maxTiltDeg: maxGunTiltAngleDeg,
+                    toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY
                 );
 
                 if (sols != null && sols.Count > 0)
@@ -3964,20 +5283,310 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        occlusionStatusMsg = $"🎯 Đã áp dụng bù đắp vào {modifiedCount}/{waypoints.Count} điểm quỹ đạo. Quỹ đạo robot đã ôm sát nếp gấp khuất!";
+        RunDiagnostics();
+        occlusionStatusMsg = $"Đã áp dụng vào {modifiedCount}/{waypoints.Count} điểm quỹ đạo.";
         Debug.Log($"[CR10A Occlusion] Đã cập nhật bù đắp vào {modifiedCount} waypoints.");
     }
 
     // =========================================================================
-    // BẢNG VẼ QUẦN JEAN 2D TIÊU CHUẨN (TƯỢNG TRƯNG) -> ÁNH XẠ PHI CỨNG LÊN 3D
+    // BẢNG VẼ TRÊN ẢNH THỰC TẾ TỪ CAMERA (2D -> 3D)
     // =========================================================================
+    public void SetRealCameraImageFromPath(string imagePath, string sampleName = "")
+    {
+        if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath)) return;
+        try
+        {
+            byte[] data = File.ReadAllBytes(imagePath);
+            Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (tex.LoadImage(data))
+            {
+                tex.filterMode = FilterMode.Bilinear;
+                tex.wrapMode = TextureWrapMode.Clamp;
+                ReleaseRealCameraFileTexture();
+                realCameraFileTex = tex;
+                explicitRealCameraImagePath = imagePath;
+                if (!string.IsNullOrEmpty(sampleName))
+                {
+                    realCameraLoadedSample = Path.GetFileNameWithoutExtension(sampleName).Trim();
+                }
+                else
+                {
+                    realCameraLoadedSample = GetActiveCloudSampleName();
+                }
+            }
+            else
+            {
+                if (Application.isPlaying) Destroy(tex);
+                else DestroyImmediate(tex);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[CR10A Camera2D] Không thể nạp ảnh camera {imagePath}: {ex.Message}");
+        }
+    }
+
+    public void RefreshRealCameraImageForCurrentSample()
+    {
+        realCameraLoadedSample = "";
+        explicitRealCameraImagePath = "";
+        TryLoadRealCameraImageForSample(GetActiveCloudSampleName());
+    }
+
+    private string GetActiveCloudSampleName()
+    {
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        string active = (plyLoader != null && !string.IsNullOrEmpty(plyLoader.currentLoadedSampleName))
+            ? plyLoader.currentLoadedSampleName
+            : selectedSampleName;
+        if (active == "full_cloud_world") active = "pcl_25";
+        return string.IsNullOrEmpty(active) ? "" : Path.GetFileNameWithoutExtension(active).Trim();
+    }
+
+    private void TryLoadRealCameraImageForSample(string sampleName)
+    {
+        string clean = string.IsNullOrEmpty(sampleName) ? "" : Path.GetFileNameWithoutExtension(sampleName).Trim();
+        if (clean == "full_cloud_world") clean = "pcl_25";
+        realCameraLoadedSample = clean;
+
+        if (!string.IsNullOrEmpty(explicitRealCameraImagePath) && File.Exists(explicitRealCameraImagePath))
+        {
+            string expStem = Path.GetFileNameWithoutExtension(explicitRealCameraImagePath);
+            if (string.IsNullOrEmpty(clean) || expStem.Equals(clean, StringComparison.OrdinalIgnoreCase))
+            {
+                if (realCameraFileTex != null) return;
+                SetRealCameraImageFromPath(explicitRealCameraImagePath, clean);
+                if (realCameraFileTex != null) return;
+            }
+        }
+
+        List<string> candidates = new List<string>();
+        if (!string.IsNullOrEmpty(clean))
+        {
+            string numPart = clean.StartsWith("pcl_", StringComparison.OrdinalIgnoreCase) ? clean.Substring(4) : clean;
+            string repoRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "..", ".."));
+            string unityRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+
+            candidates.Add(Path.Combine(repoRoot, "ai_src", "dataset", "_2D", clean + ".png"));
+            candidates.Add(Path.Combine(repoRoot, "ai_src", "dataset", "_2D", clean + ".jpg"));
+            candidates.Add(Path.Combine(repoRoot, "ai_src", "dataset", "_2D", "image_" + numPart + ".png"));
+            candidates.Add(Path.Combine(repoRoot, "dataset", "_2D", clean + ".png"));
+            candidates.Add(Path.Combine(repoRoot, "dataset", "_2D", "image_" + numPart + ".png"));
+            candidates.Add(Path.Combine(unityRoot, "dataset", "_2D", clean + ".png"));
+            candidates.Add(Path.Combine(unityRoot, "dataset", "_2D", "image_" + numPart + ".png"));
+
+            if (!string.IsNullOrEmpty(customPlyPath))
+            {
+                try
+                {
+                    string plyDir = Path.GetDirectoryName(customPlyPath);
+                    if (!string.IsNullOrEmpty(plyDir))
+                    {
+                        string sibling2D = Path.GetFullPath(Path.Combine(plyDir, "..", "_2D"));
+                        candidates.Add(Path.Combine(sibling2D, clean + ".png"));
+                        candidates.Add(Path.Combine(sibling2D, "image_" + numPart + ".png"));
+                    }
+                }
+                catch { }
+            }
+        }
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (File.Exists(candidates[i]))
+            {
+                SetRealCameraImageFromPath(candidates[i], clean);
+                if (realCameraFileTex != null) return;
+            }
+        }
+
+        // Không có file PNG rời -> nhường sang ảnh RGB trích xuất trực tiếp từ Zivid Point Cloud (.ply)
+        ReleaseRealCameraFileTexture();
+        explicitRealCameraImagePath = "";
+    }
+
+    private Texture2D GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out string sourceLabel)
+    {
+        plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        string activeSample = GetActiveCloudSampleName();
+        if (realCameraLoadedSample != activeSample)
+        {
+            TryLoadRealCameraImageForSample(activeSample);
+        }
+
+        if (realCameraFileTex != null)
+        {
+            nativeW = realCameraFileTex.width;
+            nativeH = realCameraFileTex.height;
+            sourceLabel = string.IsNullOrEmpty(activeSample)
+                ? $"Ảnh Camera Zivid ({nativeW}x{nativeH})"
+                : $"Ảnh Camera Zivid: {activeSample} ({nativeW}x{nativeH})";
+            return realCameraFileTex;
+        }
+
+        if (plyLoader != null)
+        {
+            plyLoader.EnsureCameraTextureReady();
+            if (plyLoader.cameraRgbTexture != null)
+            {
+                nativeW = plyLoader.cameraImageWidth > 0 ? plyLoader.cameraImageWidth : plyLoader.cameraRgbTexture.width;
+                nativeH = plyLoader.cameraImageHeight > 0 ? plyLoader.cameraImageHeight : plyLoader.cameraRgbTexture.height;
+                string tag = plyLoader.hasOrganizedCameraFrame ? "Ảnh Camera RGB" : "Ảnh Thực Tế Camera (3D)";
+                sourceLabel = string.IsNullOrEmpty(activeSample)
+                    ? $"{tag} ({nativeW}x{nativeH})"
+                    : $"{tag}: {activeSample}";
+                return plyLoader.cameraRgbTexture;
+            }
+        }
+
+        nativeW = 0;
+        nativeH = 0;
+        sourceLabel = "Chưa có ảnh camera. Bấm 'Chụp cam' hoặc nạp file .PLY.";
+        return null;
+    }
+
+    private Vector2[] GetActiveCanvasLandmarks12UV(PLYDirectLoader plyLoader, int nativeW, int nativeH, bool isRealCamera, out bool hasValidRealLandmarks)
+    {
+        hasValidRealLandmarks = false;
+        if (!isRealCamera)
+        {
+            return GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+        }
+
+        string activeSample = GetActiveCloudSampleName();
+        if (landmarks3D == null || landmarks3D.Count != 12 ||
+            (!string.IsNullOrEmpty(activeSample) && loadedLandmarksSampleName != activeSample))
+        {
+            return null;
+        }
+
+        bool isOrganizedPixelSpace = (realCameraFileTex != null) || (plyLoader != null && plyLoader.hasOrganizedCameraFrame);
+        if (isOrganizedPixelSpace && nativeW > 1 && nativeH > 1)
+        {
+            bool hasPixels = false;
+            for (int i = 0; i < 12; i++)
+            {
+                if (landmarks3D[i].pixel_u > 0 || landmarks3D[i].pixel_v > 0) { hasPixels = true; break; }
+            }
+            if (hasPixels)
+            {
+                Vector2[] uvs = new Vector2[12];
+                for (int i = 0; i < 12; i++)
+                {
+                    uvs[i] = new Vector2(
+                        Mathf.Clamp01(landmarks3D[i].pixel_u / (float)(nativeW - 1)),
+                        Mathf.Clamp01(landmarks3D[i].pixel_v / (float)(nativeH - 1))
+                    );
+                }
+                hasValidRealLandmarks = true;
+                return uvs;
+            }
+        }
+
+        if (plyLoader != null && landmarksWorldPos != null && landmarksWorldPos.Count == 12)
+        {
+            Vector2[] uvs = new Vector2[12];
+            int ok = 0;
+            for (int i = 0; i < 12; i++)
+            {
+                if (plyLoader.TryWorldToCameraUV(landmarksWorldPos[i], out uvs[i])) ok++;
+            }
+            if (ok == 12)
+            {
+                hasValidRealLandmarks = true;
+                return uvs;
+            }
+        }
+
+        return null;
+    }
+
+    private static Vector2 WarpUV2D(Vector2 uv, Vector2[] src12, Vector2[] dst12)
+    {
+        if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return uv;
+
+        Vector2 srcCenter = Vector2.zero;
+        Vector2 dstCenter = Vector2.zero;
+        for (int i = 0; i < 12; i++)
+        {
+            srcCenter += src12[i];
+            dstCenter += dst12[i];
+        }
+        srcCenter /= 12f;
+        dstCenter /= 12f;
+
+        float suu = 0f, suv = 0f, svv = 0f;
+        Vector2 suDst = Vector2.zero;
+        Vector2 svDst = Vector2.zero;
+        for (int i = 0; i < 12; i++)
+        {
+            float du = src12[i].x - srcCenter.x;
+            float dv = src12[i].y - srcCenter.y;
+            Vector2 dP = dst12[i] - dstCenter;
+            suu += du * du;
+            suv += du * dv;
+            svv += dv * dv;
+            suDst += du * dP;
+            svDst += dv * dP;
+        }
+
+        float det = suu * svv - suv * suv;
+        Vector2 colU = Vector2.zero;
+        Vector2 colV = Vector2.zero;
+        if (Mathf.Abs(det) > 1e-6f)
+        {
+            colU = (svv * suDst - suv * svDst) / det;
+            colV = (-suv * suDst + suu * svDst) / det;
+        }
+
+        Vector2 affinePos = dstCenter + (uv.x - srcCenter.x) * colU + (uv.y - srcCenter.y) * colV;
+
+        Vector2 residualSum = Vector2.zero;
+        float weightSum = 0f;
+        float sigma2 = 0.025f;
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 affI = dstCenter + (src12[i].x - srcCenter.x) * colU + (src12[i].y - srcCenter.y) * colV;
+            Vector2 resI = dst12[i] - affI;
+            float d2 = (uv - src12[i]).sqrMagnitude;
+            float w = 1f / (d2 + 0.0015f) + Mathf.Exp(-d2 / sigma2);
+            residualSum += w * resI;
+            weightSum += w;
+        }
+
+        Vector2 result = (weightSum > 1e-6f) ? (affinePos + residualSum / weightSum) : affinePos;
+        return new Vector2(Mathf.Clamp01(result.x), Mathf.Clamp01(result.y));
+    }
+
+    private void WarpStrokesInPlace(List<List<Vector2>> strokes, Vector2[] src12, Vector2[] dst12)
+    {
+        if (strokes == null || src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return;
+        for (int s = 0; s < strokes.Count; s++)
+        {
+            var st = strokes[s];
+            if (st == null) continue;
+            for (int p = 0; p < st.Count; p++)
+            {
+                st[p] = WarpUV2D(st[p], src12, dst12);
+            }
+        }
+    }
+
     private void DrawCanonicalJeans2DCanvasSection(float width)
     {
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         GUILayout.BeginHorizontal();
-        GUILayout.Label("0. VẼ QUỸ ĐẠO TRÊN QUẦN 2D TIÊU CHUẨN ➔ ÁNH XẠ 3D", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("VẼ MẪU PHUN 2D -> 3D", AntigravityUITheme.StyleSectionLabel);
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button(showCanonicalDrawPanel ? "Thu Gọn" : "Mở Bảng Vẽ 2D", AntigravityUITheme.StyleButton, GUILayout.Width(95), GUILayout.Height(20)))
+        AiServerClient camClient = EnsureAiClient();
+        bool prevGuiEnabled = GUI.enabled;
+        GUI.enabled = prevGuiEnabled && camClient != null && !camClient.isProcessing;
+        if (GUILayout.Button("Chụp cam", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(76), GUILayout.Height(20)))
+        {
+            camClient.CapturePreview();
+        }
+        GUI.enabled = prevGuiEnabled;
+        if (GUILayout.Button(showCanonicalDrawPanel ? "Thu gọn" : "Mở", AntigravityUITheme.StyleButton, GUILayout.Width(68), GUILayout.Height(20)))
         {
             showCanonicalDrawPanel = !showCanonicalDrawPanel;
         }
@@ -3991,11 +5600,30 @@ public class DobotCR10AIKController : MonoBehaviour
 
         EnsureCanonicalJeansCanvasInitialized();
 
-        GUILayout.Label("Giữ Chuột Trái kéo trên hình Quần 2D bên dưới để vẽ đường phun. Khi bấm [ÁP DỤNG & ÁNH XẠ LÊN 3D], đường vẽ sẽ tự động biến dạng theo 12 điểm mốc và ôm sát bề mặt lồi lõm 3D của đám mây điểm!", AntigravityUITheme.StyleLabelMuted);
+        Texture2D activeCamTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out string camSourceLabel);
+        canvasUsingRealCamera = (activeCamTex != null);
+        Vector2[] curLandmarksUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, canvasUsingRealCamera, out bool hasRealLandmarks);
 
-        // Khung Canvas 2D Quần Jean Tiêu Chuẩn (260 x 300 px)
-        float canvasW = Mathf.Min(width - 12f, 270f);
-        float canvasH = 300f;
+        GUILayout.Label(camSourceLabel, canvasUsingRealCamera ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelMuted);
+
+        // Khung Canvas 2D theo đúng tỷ lệ ảnh thực tế từ camera (không làm méo ảnh)
+        float maxCanvasW = Mathf.Clamp(width - 24f, 260f, 360f);
+        float canvasW = maxCanvasW;
+        float canvasH = canvasW * 0.65f;
+        if (activeCamTex != null && activeCamTex.width > 0 && activeCamTex.height > 0)
+        {
+            float aspect = (float)activeCamTex.height / activeCamTex.width;
+            canvasH = canvasW * aspect;
+            if (canvasH > 360f)
+            {
+                canvasH = 360f;
+                canvasW = canvasH / Mathf.Max(0.1f, aspect);
+            }
+            else if (canvasH < 150f)
+            {
+                canvasH = 150f;
+            }
+        }
 
         GUILayout.BeginHorizontal();
         GUILayout.FlexibleSpace();
@@ -4003,13 +5631,22 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.FlexibleSpace();
         GUILayout.EndHorizontal();
 
-        // Vẽ nền Quần 2D Tiêu Chuẩn
-        if (canonicalJeansBgTex != null)
+        // Vẽ ảnh thực tế từ camera lên Canvas 2D
+        if (activeCamTex != null)
         {
-            GUI.DrawTexture(canvasRect, canonicalJeansBgTex, ScaleMode.StretchToFill);
+            GUI.DrawTexture(canvasRect, activeCamTex, ScaleMode.StretchToFill);
+        }
+        else
+        {
+            DrawGuiSolidRect(canvasRect, new Color(0.08f, 0.10f, 0.14f, 1f));
+            GUI.Label(
+                new Rect(canvasRect.x + 12f, canvasRect.y + canvasRect.height * 0.42f, canvasRect.width - 24f, 44f),
+                "Chưa có ảnh thực tế từ camera.\nBấm 'Chụp cam' hoặc nạp file .PLY.",
+                AntigravityUITheme.StyleLabelMuted
+            );
         }
 
-        // Xử lý sự kiện chuột vẽ trực tiếp trên Canvas 2D
+        // Xử lý sự kiện chuột vẽ trực tiếp trên ảnh Camera 2D
         Event ev = Event.current;
         if (ev != null && canvasRect.Contains(ev.mousePosition))
         {
@@ -4020,14 +5657,19 @@ public class DobotCR10AIKController : MonoBehaviour
 
             if (ev.type == EventType.MouseDown && ev.button == 0)
             {
+                hasInitializedDefaultStrokes = true;
                 currentDrawingStroke = new List<Vector2> { normUV };
                 customDrawnStrokes.Add(currentDrawingStroke);
+                if (hasRealLandmarks && curLandmarksUV != null)
+                {
+                    strokesReferenceLandmarksUV = (Vector2[])curLandmarksUV.Clone();
+                }
                 isDrawingOnCanvas = true;
                 ev.Use();
             }
             else if (ev.type == EventType.MouseDrag && ev.button == 0 && isDrawingOnCanvas && currentDrawingStroke != null)
             {
-                if (currentDrawingStroke.Count == 0 || Vector2.Distance(currentDrawingStroke[currentDrawingStroke.Count - 1], normUV) >= 0.012f)
+                if (currentDrawingStroke.Count == 0 || Vector2.Distance(currentDrawingStroke[currentDrawingStroke.Count - 1], normUV) >= 0.010f)
                 {
                     currentDrawingStroke.Add(normUV);
                 }
@@ -4046,37 +5688,41 @@ public class DobotCR10AIKController : MonoBehaviour
             currentDrawingStroke = null;
         }
 
-        // Vẽ 12 điểm mốc chuẩn lên Canvas 2D (Tự động co giãn bám theo kích thước Size quần tượng trưng)
-        Vector2[] curLandmarksUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
-        for (int i = 0; i < curLandmarksUV.Length; i++)
+        // Vẽ 12 điểm mốc AI đúng vị trí thực tế trên ảnh Camera 2D
+        if (curLandmarksUV != null && curLandmarksUV.Length == 12)
         {
-            Vector2 uv = curLandmarksUV[i];
-            Vector2 ptScreen = new Vector2(canvasRect.x + uv.x * canvasRect.width, canvasRect.y + uv.y * canvasRect.height);
-            DrawGuiSolidRect(new Rect(ptScreen.x - 3f, ptScreen.y - 3f, 6f, 6f), new Color(1f, 0.75f, 0.1f, 0.95f));
+            for (int i = 0; i < curLandmarksUV.Length; i++)
+            {
+                Vector2 uv = curLandmarksUV[i];
+                Vector2 ptScreen = new Vector2(canvasRect.x + uv.x * canvasRect.width, canvasRect.y + uv.y * canvasRect.height);
+                DrawGuiSolidRect(new Rect(ptScreen.x - 4f, ptScreen.y - 4f, 8f, 8f), new Color(0.05f, 0.05f, 0.08f, 0.9f));
+                DrawGuiSolidRect(new Rect(ptScreen.x - 2.5f, ptScreen.y - 2.5f, 5f, 5f), new Color(1f, 0.80f, 0.1f, 0.98f));
+            }
         }
 
-        // Vẽ các nét vẽ của người dùng lên Canvas 2D
+        // Vẽ các nét vẽ của người dùng lên ảnh Camera 2D (có viền tối tương phản cao)
         int totalStrokePts = 0;
         for (int s = 0; s < customDrawnStrokes.Count; s++)
         {
             var stroke = customDrawnStrokes[s];
             if (stroke == null || stroke.Count == 0) continue;
             totalStrokePts += stroke.Count;
-            Color strokeCol = (s % 2 == 0) ? new Color(0.1f, 0.95f, 1f, 0.95f) : new Color(0.25f, 1f, 0.45f, 0.95f);
+            Color strokeCol = (s % 2 == 0) ? new Color(0.1f, 0.95f, 1f, 0.98f) : new Color(0.25f, 1f, 0.45f, 0.98f);
+            Color haloCol = new Color(0.02f, 0.06f, 0.12f, 0.85f);
             for (int p = 0; p < stroke.Count - 1; p++)
             {
                 Vector2 p0 = new Vector2(canvasRect.x + stroke[p].x * canvasRect.width, canvasRect.y + stroke[p].y * canvasRect.height);
                 Vector2 p1 = new Vector2(canvasRect.x + stroke[p + 1].x * canvasRect.width, canvasRect.y + stroke[p + 1].y * canvasRect.height);
-                DrawGuiLine2D(p0, p1, strokeCol, 2.5f);
+                DrawGuiLine2D(p0, p1, haloCol, 4.2f);
+                DrawGuiLine2D(p0, p1, strokeCol, 2.4f);
             }
             Vector2 startPt = new Vector2(canvasRect.x + stroke[0].x * canvasRect.width, canvasRect.y + stroke[0].y * canvasRect.height);
             DrawGuiSolidRect(new Rect(startPt.x - 3f, startPt.y - 3f, 6f, 6f), Color.yellow);
         }
 
         GUILayout.Space(4);
-        // Hàng chọn Mẫu cần phun theo Size (Khi đổi Size: KHÔNG reset mẫu, mẫu tự co giãn, hình quần 2D đổi kích thước)
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Mẫu phun: SIZE {activeSprayTemplateSize} | Quần nhận diện: {detectedJeansSize}", AntigravityUITheme.StyleLabelGreen, GUILayout.Width(250));
+        GUILayout.Label($"Size mẫu: {activeSprayTemplateSize} | Nhận diện: {detectedJeansSize}", AntigravityUITheme.StyleLabelGreen, GUILayout.Width(210));
         foreach (string sz in new[] { "S", "M", "L" })
         {
             GUIStyle st = activeSprayTemplateSize == sz ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
@@ -4087,19 +5733,24 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        // Hàng nút Mẫu Vẽ & Xóa Nét
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button($"Mẫu Râu Mèo + Đùi ({activeSprayTemplateSize})", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        if (GUILayout.Button("Râu mèo + Đùi", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
         {
             LoadPresetWhiskersAndThighOn2DCanvas();
-            customDrawStatusMsg = "Đã nạp Mẫu Râu Mèo + Đùi lên Quần 2D. Bấm [ÁP DỤNG & ÁNH XẠ LÊN 3D] để cập nhật đường phun.";
+            if (customDrawnStrokes.Count > 0)
+            {
+                customDrawStatusMsg = "Đã nạp mẫu Râu mèo + Đùi lên ảnh camera.";
+            }
         }
-        if (GUILayout.Button("Mẫu Zigzag 2 Ống", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        if (GUILayout.Button("Zigzag 2 ống", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
         {
             LoadPresetZigzag2LegsOn2DCanvas();
-            customDrawStatusMsg = "Đã nạp Mẫu Zigzag 2 Ống lên Quần 2D. Bấm [ÁP DỤNG & ÁNH XẠ LÊN 3D] để cập nhật đường phun.";
+            if (customDrawnStrokes.Count > 0)
+            {
+                customDrawStatusMsg = "Đã nạp mẫu Zigzag 2 ống lên ảnh camera.";
+            }
         }
-        if (GUILayout.Button("↩ Xóa Nét Cuối", AntigravityUITheme.StyleButton, GUILayout.Width(92), GUILayout.Height(22)))
+        if (GUILayout.Button("Hoàn tác", AntigravityUITheme.StyleButton, GUILayout.Width(68), GUILayout.Height(22)))
         {
             hasInitializedDefaultStrokes = true;
             if (customDrawnStrokes.Count > 0)
@@ -4111,37 +5762,32 @@ public class DobotCR10AIKController : MonoBehaviour
                 ClearAll2DAnd3DTrajectoryLines();
             }
         }
-        if (GUILayout.Button("🗑 Xóa Trắng", AntigravityUITheme.StyleButton, GUILayout.Width(80), GUILayout.Height(22)))
+        if (GUILayout.Button("Xóa hết", AntigravityUITheme.StyleButton, GUILayout.Width(62), GUILayout.Height(22)))
         {
             ClearAll2DAnd3DTrajectoryLines();
         }
         GUILayout.EndHorizontal();
 
-        // =====================================================================
-        // KHỐI QUẢN LÝ MẪU PHUN (CHỌN THƯ MỤC XUẤT/IMPORT & FILE JSON TÙY BIẾN)
-        // =====================================================================
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("💾 QUẢN LÝ MẪU PHUN (CHỌN THƯ MỤC XUẤT / IMPORT FILE JSON)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("LƯU / NẠP MẪU (.JSON)", AntigravityUITheme.StyleSectionLabel);
 
-        // Hàng 1: Chọn thư mục xuất / import mẫu
         GUILayout.BeginHorizontal();
         GUILayout.Label("Thư mục:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(58));
         sprayTemplateDirectory = GUILayout.TextField(sprayTemplateDirectory, AntigravityUITheme.StyleTextField, GUILayout.Height(22));
-        if (GUILayout.Button("📂 Chọn Thư Mục...", AntigravityUITheme.StyleButton, GUILayout.Width(130), GUILayout.Height(22)))
+        if (GUILayout.Button("Chọn...", AntigravityUITheme.StyleButton, GUILayout.Width(66), GUILayout.Height(22)))
         {
             ChooseSprayTemplateDirectory();
         }
         GUILayout.EndHorizontal();
 
-        // Hàng 2: Tên file & Nút Xuất / Import File
         GUILayout.BeginHorizontal();
-        GUILayout.Label("Tên File:", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(58));
+        GUILayout.Label("Tên file:", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(58));
         saveTemplateFileName = GUILayout.TextField(saveTemplateFileName, AntigravityUITheme.StyleTextField, GUILayout.Width(110), GUILayout.Height(24));
-        if (GUILayout.Button("💾 Xuất Mẫu (.json)...", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24)))
+        if (GUILayout.Button("Lưu mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24)))
         {
             ExportSprayTemplateWithDialog();
         }
-        if (GUILayout.Button("📂 Import Mẫu (.json)...", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        if (GUILayout.Button("Nạp mẫu", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
         {
             ImportSprayTemplateWithDialog();
         }
@@ -4154,7 +5800,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (availableSprayTemplateFiles != null && availableSprayTemplateFiles.Count > 0)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Mẫu có sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(75));
+            GUILayout.Label("Có sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(52));
             int maxShow = Mathf.Min(availableSprayTemplateFiles.Count, 3);
             for (int f = 0; f < maxShow; f++)
             {
@@ -4170,14 +5816,13 @@ public class DobotCR10AIKController : MonoBehaviour
 
         preserveCustomDrawingAcrossSamples = GUILayout.Toggle(
             preserveCustomDrawingAcrossSamples,
-            " Giữ & Tự động áp dụng mẫu vẽ cho mọi mẫu phôi 3D",
+            " Giữ mẫu vẽ khi đổi phôi",
             AntigravityUITheme.StyleToggle
         );
         GUILayout.EndVertical();
 
-        // Thanh chỉnh độ cao đầu phun trên mặt vải 3D (0mm = áp sát mặt vải, 20mm = khoảng cách súng phun)
         GUILayout.BeginHorizontal();
-        GUILayout.Label($"Độ cao bám mặt 3D (+Z): {customDrawZOffsetMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(190));
+        GUILayout.Label($"Độ cao Z: {customDrawZOffsetMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
         float newSliderZ = GUILayout.HorizontalSlider(customDrawZOffsetMm, 0f, 50f);
         if (Mathf.Abs(newSliderZ - customDrawZOffsetMm) > 0.05f)
         {
@@ -4187,30 +5832,23 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Áp Sát Mặt Quần (0 mm)", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        if (GUILayout.Button("0 mm", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
         {
             customDrawZOffsetMm = 0f;
             ApplyCanonical2DDrawingTo3DTrajectory();
         }
-        if (GUILayout.Button("Khoảng Phun Chuẩn (20 mm)", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        if (GUILayout.Button("20 mm", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
         {
             customDrawZOffsetMm = 20f;
             ApplyCanonical2DDrawingTo3DTrajectory();
         }
-        GUILayout.EndHorizontal();
-
-        // Nút Bật/Tắt Đường Dự Kiến Phun 3D (Cyan Polyline)
-        GUILayout.BeginHorizontal();
-        string cyanToggleText = showGizmos ? "👁️ Đang HIỆN Đường Dự Kiến Phun (Cyan) - [Nhấn Để TẮT]" : "👁️ Đang ẨN Đường Dự Kiến Phun (Cyan) - [Nhấn Để HIỆN]";
-        GUIStyle cyanToggleStyle = showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-        if (GUILayout.Button(cyanToggleText, cyanToggleStyle, GUILayout.Height(28)))
+        if (GUILayout.Button(showGizmos ? "Ẩn đường 3D" : "Hiện đường 3D", showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
         {
             showGizmos = !showGizmos;
         }
         GUILayout.EndHorizontal();
 
-        // Nút ÁP DỤNG & ÁNH XẠ LÊN 3D
-        if (GUILayout.Button($"🎯 ÁP DỤNG & ÁNH XẠ LÊN BỀ MẶT 3D ({customDrawnStrokes.Count} nét / {totalStrokePts} điểm)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(32)))
+        if (GUILayout.Button($"Áp dụng lên 3D ({customDrawnStrokes.Count} nét)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
         {
             ApplyCanonical2DDrawingTo3DTrajectory();
         }
@@ -4264,10 +5902,10 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             sprayTemplateDirectory = chosen;
             RefreshAvailableSprayTemplates();
-            customDrawStatusMsg = $"📁 Đã chọn thư mục mẫu phun: {chosen}";
+            customDrawStatusMsg = $"Thư mục: {chosen}";
         }
 #else
-        customDrawStatusMsg = $"📁 Thư mục hiện hành: {cur}";
+        customDrawStatusMsg = $"Thư mục: {cur}";
 #endif
     }
 
@@ -4275,7 +5913,7 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         if (customDrawnStrokes == null || customDrawnStrokes.Count == 0)
         {
-            customDrawStatusMsg = "⚠️ Chưa có nét vẽ nào trên quần để xuất thành Mẫu!";
+            customDrawStatusMsg = "Chưa có nét vẽ để lưu.";
             return;
         }
 
@@ -4319,7 +5957,7 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         if (customDrawnStrokes == null || customDrawnStrokes.Count == 0)
         {
-            customDrawStatusMsg = "⚠️ Chưa có nét vẽ nào trên quần để xuất thành Mẫu!";
+            customDrawStatusMsg = "Chưa có nét vẽ để lưu.";
             return;
         }
 
@@ -4340,13 +5978,21 @@ public class DobotCR10AIKController : MonoBehaviour
                 strokes = new List<Stroke2D>()
             };
 
+            Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+            bool usingRealCam = (camTex != null);
+            Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, usingRealCam, out bool hasRealLm);
+            Vector2[] canonLmUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+
             foreach (var st in customDrawnStrokes)
             {
                 if (st == null || st.Count == 0) continue;
                 var strokeObj = new Stroke2D();
                 foreach (var pt in st)
                 {
-                    strokeObj.points.Add(new StrokePoint2D(pt.x, pt.y));
+                    Vector2 outPt = (usingRealCam && hasRealLm && camLmUV != null)
+                        ? WarpUV2D(pt, camLmUV, canonLmUV)
+                        : pt;
+                    strokeObj.points.Add(new StrokePoint2D(outPt.x, outPt.y));
                 }
                 template.strokes.Add(strokeObj);
             }
@@ -4354,12 +6000,12 @@ public class DobotCR10AIKController : MonoBehaviour
             string json = JsonUtility.ToJson(template, true);
             File.WriteAllText(fullPath, json);
             RefreshAvailableSprayTemplates();
-            customDrawStatusMsg = $"💾 Đã xuất Mẫu phun thành công: {Path.GetFileName(fullPath)} ({template.strokes.Count} nét, SIZE {activeSprayTemplateSize})!";
+            customDrawStatusMsg = $"Đã lưu mẫu: {Path.GetFileName(fullPath)} ({template.strokes.Count} nét, Size {activeSprayTemplateSize})";
             Debug.Log($"[CR10A SprayTemplate] Đã xuất mẫu phun vào {fullPath}");
         }
         catch (Exception ex)
         {
-            customDrawStatusMsg = $"❌ Lỗi khi xuất mẫu phun: {ex.Message}";
+            customDrawStatusMsg = $"Lỗi lưu mẫu: {ex.Message}";
             Debug.LogError($"[CR10A SprayTemplate] Lỗi xuất: {ex.Message}");
         }
     }
@@ -4413,7 +6059,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
             if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
             {
-                customDrawStatusMsg = $"⚠️ Không tìm thấy file mẫu phun JSON trong {dir}";
+                customDrawStatusMsg = $"Không tìm thấy file JSON trong {dir}";
                 return;
             }
 
@@ -4443,6 +6089,20 @@ public class DobotCR10AIKController : MonoBehaviour
                     RebuildCanonicalJeansTexture();
                 }
 
+                Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+                bool usingRealCam = (camTex != null);
+                Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, usingRealCam, out bool hasRealLm);
+                if (usingRealCam && hasRealLm && camLmUV != null)
+                {
+                    Vector2[] srcCanonUV = GetCanonicalLandmarks12UV(string.IsNullOrEmpty(template.size) ? activeSprayTemplateSize : template.size);
+                    WarpStrokesInPlace(customDrawnStrokes, srcCanonUV, camLmUV);
+                    strokesReferenceLandmarksUV = (Vector2[])camLmUV.Clone();
+                }
+                else
+                {
+                    strokesReferenceLandmarksUV = null;
+                }
+
                 if (template.zOffsetMm > 0f) customDrawZOffsetMm = template.zOffsetMm;
                 saveTemplateFileName = Path.GetFileNameWithoutExtension(fullPath);
                 sprayTemplateDirectory = Path.GetDirectoryName(fullPath);
@@ -4451,17 +6111,17 @@ public class DobotCR10AIKController : MonoBehaviour
                 // Tự động chiếu ngay lên đám mây điểm 3D hiện hành
                 ApplyCanonical2DDrawingTo3DTrajectory();
 
-                customDrawStatusMsg = $"📂 Đã import Mẫu [{Path.GetFileName(fullPath)}] ({customDrawnStrokes.Count} nét, SIZE {activeSprayTemplateSize}) & tự động ánh xạ lên 3D!";
+                customDrawStatusMsg = $"Đã nạp mẫu {Path.GetFileName(fullPath)} ({customDrawnStrokes.Count} nét, Size {activeSprayTemplateSize})";
                 Debug.Log($"[CR10A SprayTemplate] Đã import mẫu từ {fullPath}");
             }
             else
             {
-                customDrawStatusMsg = $"⚠️ File mẫu {Path.GetFileName(fullPath)} không có nét vẽ hợp lệ!";
+                customDrawStatusMsg = $"File {Path.GetFileName(fullPath)} không có nét vẽ.";
             }
         }
         catch (Exception ex)
         {
-            customDrawStatusMsg = $"❌ Lỗi khi import mẫu: {ex.Message}";
+            customDrawStatusMsg = $"Lỗi nạp mẫu: {ex.Message}";
             Debug.LogError($"[CR10A SprayTemplate] Lỗi import: {ex.Message}");
         }
     }
@@ -4481,13 +6141,13 @@ public class DobotCR10AIKController : MonoBehaviour
         string prevSize = activeSprayTemplateSize;
         activeSprayTemplateSize = newSize;
 
-        // 1. Tự động co giãn toàn bộ các nét vẽ hiện tại theo kích thước size mới (KHÔNG RESET)
-        if (customDrawnStrokes != null && customDrawnStrokes.Count > 0)
+        // 1. Chỉ co giãn nét vẽ theo khung quần tượng trưng khi không dùng ảnh camera thực tế
+        if (!canvasUsingRealCamera && customDrawnStrokes != null && customDrawnStrokes.Count > 0)
         {
             ScaleCustomDrawnStrokesBetweenSizes(prevSize, newSize);
         }
 
-        // 2. Tái tạo hình ảnh quần 2D tượng trưng theo đúng kích thước size mới (S/M/L)
+        // 2. Tái tạo hình ảnh dự phòng theo size mới (S/M/L)
         RebuildCanonicalJeansTexture();
 
         // 3. Tự động ánh xạ lại nét vẽ lên bề mặt 3D
@@ -4496,7 +6156,8 @@ public class DobotCR10AIKController : MonoBehaviour
             ApplyCanonical2DDrawingTo3DTrajectory();
         }
 
-        customDrawStatusMsg = $"📏 Đã đổi Mẫu phun: SIZE {prevSize} ➔ SIZE {newSize}. Nét vẽ & quần 2D đã tự co giãn theo size mới!";
+        customDrawStatusMsg = $"Đã đổi mẫu phun: Size {prevSize} -> Size {newSize}.";
+        SaveAllSettings();
         Debug.Log($"[CR10A Size] {customDrawStatusMsg}");
     }
 
@@ -4565,6 +6226,7 @@ public class DobotCR10AIKController : MonoBehaviour
         isDrawingOnCanvas = false;
         currentDrawingStroke = null;
         customDrawnStrokes.Clear();
+        strokesReferenceLandmarksUV = null;
 
         isPlaying = false;
         isMovingToManualTarget = false;
@@ -4573,7 +6235,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (waypoints != null) waypoints.Clear();
         ClearInkTrail();
         currentWaypointIndex = 0;
-        customDrawStatusMsg = "✅ Đã xóa trắng toàn bộ các nét vẽ 2D và đường quỹ đạo 3D trên quần!";
+        customDrawStatusMsg = "Đã xóa toàn bộ nét vẽ 2D và quỹ đạo 3D.";
     }
 
     private void EnsureCanonicalJeansCanvasInitialized()
@@ -4584,14 +6246,26 @@ public class DobotCR10AIKController : MonoBehaviour
             whitePixelTex.SetPixel(0, 0, Color.white);
             whitePixelTex.Apply();
         }
-        if (canonicalJeansBgTex == null)
-        {
-            canonicalJeansBgTex = BuildCanonicalJeans2DTexture(260, 300, activeSprayTemplateSize);
-        }
         if (!hasInitializedDefaultStrokes)
         {
-            hasInitializedDefaultStrokes = true;
-            LoadPresetWhiskersAndThighOn2DCanvas();
+            string activeSample = GetActiveCloudSampleName();
+            if (!string.IsNullOrEmpty(activeSample) &&
+                (landmarks3D == null || landmarks3D.Count < 12 || loadedLandmarksSampleName != activeSample))
+            {
+                LoadLandmarksAndSegmentationForSample(activeSample);
+            }
+
+            Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+            if (camTex != null)
+            {
+                canvasUsingRealCamera = true;
+                Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, true, out bool hasRealLm);
+                hasInitializedDefaultStrokes = true;
+                if (hasRealLm && camLmUV != null)
+                {
+                    LoadPresetWhiskersAndThighOn2DCanvas();
+                }
+            }
         }
     }
 
@@ -4782,6 +6456,38 @@ public class DobotCR10AIKController : MonoBehaviour
         }
     }
 
+    private void ProjectCanonicalPresetStrokesOntoActiveCanvas()
+    {
+        Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        canvasUsingRealCamera = (camTex != null);
+        if (!canvasUsingRealCamera)
+        {
+            strokesReferenceLandmarksUV = null;
+            return;
+        }
+
+        string activeSample = GetActiveCloudSampleName();
+        if (!string.IsNullOrEmpty(activeSample) &&
+            (landmarks3D == null || landmarks3D.Count < 12 || loadedLandmarksSampleName != activeSample))
+        {
+            LoadLandmarksAndSegmentationForSample(activeSample);
+        }
+
+        Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, true, out bool hasRealLm);
+        if (hasRealLm && camLmUV != null)
+        {
+            Vector2[] srcCanonUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+            WarpStrokesInPlace(customDrawnStrokes, srcCanonUV, camLmUV);
+            strokesReferenceLandmarksUV = (Vector2[])camLmUV.Clone();
+        }
+        else
+        {
+            customDrawnStrokes.Clear();
+            strokesReferenceLandmarksUV = null;
+            customDrawStatusMsg = "Ảnh camera chưa có 12 mốc AI. Hãy vẽ trực tiếp bằng chuột lên ảnh hoặc bấm Chụp + AI.";
+        }
+    }
+
     public void LoadPresetWhiskersAndThighOn2DCanvas()
     {
         customDrawnStrokes.Clear();
@@ -4838,6 +6544,8 @@ public class DobotCR10AIKController : MonoBehaviour
             }
             customDrawnStrokes.Add(passR);
         }
+
+        ProjectCanonicalPresetStrokesOntoActiveCanvas();
     }
 
     public void LoadPresetZigzag2LegsOn2DCanvas()
@@ -4878,44 +6586,56 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
         customDrawnStrokes.Add(zigR);
+
+        ProjectCanonicalPresetStrokesOntoActiveCanvas();
     }
 
     /// <summary>
-    /// Ánh xạ phi cứng toàn bộ các nét vẽ trên Quần 2D Tiêu Chuẩn [0, 1] x [0, 1] sang bề mặt thực 3D
-    /// của đám mây điểm phôi đang nạp (bằng nội suy 12 mốc giải phẫu + truy vấn độ cao thực Z(x,y) & pháp tuyến
-    /// của Point Cloud 3D), sau đó giải Động học Nghịch 6-DOF và cập nhật ngay quỹ đạo vận hành!
+    /// Ánh xạ toàn bộ các nét vẽ trên ảnh Camera 2D thực tế [0, 1] x [0, 1] trực tiếp lên bề mặt 3D
+    /// của đám mây điểm Zivid đang nạp (ưu tiên ánh xạ trực tiếp pixel RGB-D -> 3D, hỗ trợ bù đắp bề mặt
+    /// & dự phòng nội suy 12 mốc giải phẫu), sau đó giải Động học Nghịch 6-DOF và cập nhật ngay quỹ đạo vận hành!
     /// </summary>
     public void ApplyCanonical2DDrawingTo3DTrajectory()
     {
         if (customDrawnStrokes == null || customDrawnStrokes.Count == 0)
         {
-            customDrawStatusMsg = "⚠️ Bạn chưa vẽ đường nào trên Quần 2D! Hãy dùng chuột vẽ hoặc chọn Mẫu có sẵn.";
+            customDrawStatusMsg = "Chưa có nét vẽ trên ảnh camera 2D.";
             return;
         }
 
-        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
-        string activeCloudSample = (plyLoader != null && !string.IsNullOrEmpty(plyLoader.currentLoadedSampleName))
-            ? plyLoader.currentLoadedSampleName
-            : selectedSampleName;
-        if (activeCloudSample == "full_cloud_world") activeCloudSample = "pcl_25";
+        Texture2D activeCamTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        canvasUsingRealCamera = (activeCamTex != null);
 
-        if (landmarks3D == null || landmarks3D.Count < 12 || loadedLandmarksSampleName != activeCloudSample)
+        string activeCloudSample = GetActiveCloudSampleName();
+        if (!string.IsNullOrEmpty(activeCloudSample) &&
+            (landmarks3D == null || landmarks3D.Count < 12 || loadedLandmarksSampleName != activeCloudSample))
         {
             LoadLandmarksAndSegmentationForSample(activeCloudSample);
         }
 
-        // 1. Lấy 12 điểm mốc nguồn (Quần 2D Tiêu Chuẩn theo Size) và 12 điểm mốc đích 3D (Robot Global mm)
-        Vector2[] srcUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+        Vector2[] camLandmarksUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, canvasUsingRealCamera, out bool hasRealLandmarks);
+        bool has12Landmarks = (landmarks3D != null && landmarks3D.Count == 12 &&
+            (string.IsNullOrEmpty(activeCloudSample) || loadedLandmarksSampleName == activeCloudSample));
+
+        if (!canvasUsingRealCamera && !has12Landmarks)
+        {
+            customDrawStatusMsg = "Chưa có ảnh camera hoặc 12 mốc của phôi này. Chụp Zivid hoặc nạp .PLY trước.";
+            return;
+        }
+
+        // Chuẩn bị 12 điểm mốc nguồn/đích cho nhánh dự phòng (khi 1 pixel thiếu chiều sâu hoặc chế độ canonical)
+        Vector2[] srcUV = (canvasUsingRealCamera && hasRealLandmarks && camLandmarksUV != null)
+            ? camLandmarksUV
+            : GetCanonicalLandmarks12UV(activeSprayTemplateSize);
         Vector3[] dstRobotMm = new Vector3[12];
         for (int i = 0; i < 12; i++)
         {
-            if (landmarks3D != null && i < landmarks3D.Count)
+            if (has12Landmarks && i < landmarks3D.Count)
             {
                 dstRobotMm[i] = new Vector3(landmarks3D[i].x_mm, landmarks3D[i].y_mm, landmarks3D[i].z_mm);
             }
             else
             {
-                // Fallback chuẩn nếu mẫu chưa có mốc
                 dstRobotMm[i] = new Vector3(
                     Mathf.Lerp(430f, 1080f, srcUV[i].y),
                     Mathf.Lerp(320f, -320f, srcUV[i].x),
@@ -4924,8 +6644,6 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        // 2. Xây dựng hàm nội suy phi cứng 12 điểm mốc (Radial Basis / Thin Plate Spline 3D)
-        //     kết hợp truy vấn trực tiếp cao độ Z_surface(x,y) và vector pháp tuyến n(x,y) trên 3D Point Cloud!
         List<WaypointData> mappedWaypoints = new List<WaypointData>();
         float cumDistMm = 0f;
         Vector3 prevPosMm = Vector3.zero;
@@ -4939,37 +6657,71 @@ public class DobotCR10AIKController : MonoBehaviour
             if (stroke == null || stroke.Count == 0) continue;
 
             // Nội suy làm mịn các điểm dọc nét vẽ để robot di chuyển êm
-            List<Vector2> resampledStroke = ResampleStroke2D(stroke, 0.022f);
+            List<Vector2> resampledStroke = ResampleStroke2D(stroke, 0.018f);
 
             for (int p = 0; p < resampledStroke.Count; p++)
             {
                 Vector2 uv = resampledStroke[p];
 
-                // Ánh xạ (u, v) từ Quần 2D Tiêu Chuẩn sang (X_mm, Y_mm, Z_TPS_mm) bằng nội suy phi cứng 12 mốc
-                Vector3 warpedMm = WarpCanonicalUVTo3DLandmarks(uv, srcUV, dstRobotMm);
-
-                // Chiếu điểm (X_mm, Y_mm) trực tiếp lên bề mặt 3D thực tế của Đám Mây Điểm Zivid (PLYDirectLoader)
-                Vector3 approxWorld = globalReference != null
-                    ? globalReference.TransformPoint(warpedMm * 0.001f)
-                    : new Vector3(-warpedMm.y * 0.001f, warpedMm.z * 0.001f, 1.100f - warpedMm.x * 0.001f);
-
-                float surfaceZ_mm = warpedMm.z;
+                Vector3 approxWorld = Vector3.zero;
+                float surfaceZ_mm = 20f;
                 Vector3 surfaceNormalWorld = Vector3.up;
+                bool mappedDirectFromCamera = false;
+
+                if (canvasUsingRealCamera && plyLoader != null &&
+                    plyLoader.TrySampleCameraUVToWorld(uv, out Vector3 camSurfWorld, out Vector3 camSurfNormal))
+                {
+                    approxWorld = camSurfWorld;
+                    surfaceZ_mm = Mathf.Max(14f, camSurfWorld.y * 1000f);
+                    surfaceNormalWorld = camSurfNormal;
+                    mappedDirectFromCamera = true;
+                }
+                else if (has12Landmarks)
+                {
+                    Vector3 warpedMm = WarpCanonicalUVTo3DLandmarks(uv, srcUV, dstRobotMm);
+                    approxWorld = globalReference != null
+                        ? globalReference.TransformPoint(warpedMm * 0.001f)
+                        : new Vector3(-warpedMm.y * 0.001f, warpedMm.z * 0.001f, 1.100f - warpedMm.x * 0.001f);
+                    surfaceZ_mm = warpedMm.z;
+                }
+                else
+                {
+                    continue;
+                }
+
                 if (SampleCompensatedSurface(approxWorld.x, approxWorld.z, out float compY, out Vector3 compNorm))
                 {
-                    // Ưu tiên sử dụng cao độ và pháp tuyến đã được bù đắp chỗ khuất / khuyết tật
-                    surfaceZ_mm = Mathf.Max(14f, compY * 1000f);
-                    surfaceNormalWorld = compNorm;
+                    if (!mappedDirectFromCamera || Mathf.Abs(compY - approxWorld.y) < 0.08f)
+                    {
+                        surfaceZ_mm = Mathf.Max(14f, compY * 1000f);
+                        surfaceNormalWorld = compNorm;
+                    }
                 }
-                else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(approxWorld.x, approxWorld.z, out float cloudWorldY, out Vector3 cloudNormal))
+                else if (!mappedDirectFromCamera && plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(approxWorld.x, approxWorld.z, out float cloudWorldY, out Vector3 cloudNormal))
                 {
-                    // Độ cao bề mặt thực tế từ đám mây điểm 3D (chuyển từ mét sang mm)
                     surfaceZ_mm = Mathf.Max(14f, cloudWorldY * 1000f);
                     surfaceNormalWorld = cloudNormal;
                 }
+                if (surfaceNormalWorld.y < 0f) surfaceNormalWorld = -surfaceNormalWorld;
+                surfaceNormalWorld.Normalize();
 
-                float finalZ_mm = Mathf.Clamp(surfaceZ_mm + customDrawZOffsetMm, 18f, 380f);
-                Vector3 targetMm = new Vector3(warpedMm.x, warpedMm.y, finalZ_mm);
+                // Giới hạn góc nghiêng pháp tuyến <= θ_max (ràng buộc công nghệ phun)
+                float maxTiltAllowed = sprayTechParams != null ? sprayTechParams.maxTiltDeg : maxGunTiltAngleDeg;
+                float tiltDeg = Vector3.Angle(surfaceNormalWorld, Vector3.up);
+                if (tiltDeg > maxTiltAllowed && maxTiltAllowed > 0.1f)
+                {
+                    Vector3 rotAx = Vector3.Cross(Vector3.up, surfaceNormalWorld);
+                    if (rotAx.sqrMagnitude > 1e-6f)
+                        surfaceNormalWorld = (Quaternion.AngleAxis(maxTiltAllowed, rotAx.normalized) * Vector3.up).normalized;
+                }
+
+                // P_TCP = P_surface + d * n_surface (Lùi khoảng cách d dọc đúng vector pháp tuyến 3D!)
+                Vector3 surfWorld = new Vector3(approxWorld.x, surfaceZ_mm * 0.001f, approxWorld.z);
+                Vector3 tcpWorld = surfWorld + surfaceNormalWorld * (customDrawZOffsetMm * 0.001f);
+                Vector3 targetMm = globalReference != null
+                    ? globalReference.InverseTransformPoint(tcpWorld) * 1000f
+                    : new Vector3((1.100f - tcpWorld.z) * 1000f, -tcpWorld.x * 1000f, tcpWorld.y * 1000f);
+                targetMm.z = Mathf.Clamp(targetMm.z, 18f, 450f);
 
                 // Giới hạn an toàn bán kính làm việc của Dobot CR10A
                 if (targetMm.magnitude > 1145f)
@@ -4979,6 +6731,7 @@ public class DobotCR10AIKController : MonoBehaviour
                     targetMm.y *= scale;
                 }
 
+                Vector3 prevPosForTangent = prevPosMm;
                 if (wpIndex > 0)
                 {
                     cumDistMm += Vector3.Distance(prevPosMm, targetMm);
@@ -4993,13 +6746,19 @@ public class DobotCR10AIKController : MonoBehaviour
                 wp.targetPosGlobal_mm = targetMm;
                 wp.targetPosWorld_m = globalReference != null
                     ? globalReference.TransformPoint(targetMm * 0.001f)
-                    : new Vector3(-targetMm.y * 0.001f, targetMm.z * 0.001f, 1.100f - targetMm.x * 0.001f);
+                    : tcpWorld;
                 wp.microNormal = surfaceNormalWorld;
 
-                // Tính góc nghiêng vi mô của súng theo pháp tuyến bề mặt 3D
-                wp.roll_deg = 180f;
-                wp.pitch_deg = Mathf.Clamp(-surfaceNormalWorld.z * 18f, -12f, 12f);
-                wp.yaw_deg = 0f;
+                // Tính góc định hướng 6-DOF đầy đủ từ pháp tuyến 3D: z_tool = -n_surface
+                Vector3 normRobot = globalReference != null
+                    ? globalReference.InverseTransformDirection(surfaceNormalWorld).normalized
+                    : new Vector3(-surfaceNormalWorld.z, -surfaceNormalWorld.x, surfaceNormalWorld.y).normalized;
+                Vector3 tanRobot = (p > 0) ? (targetMm - prevPosForTangent) : new Vector3(1f, 0f, 0f);
+                if (tanRobot.sqrMagnitude < 1e-4f) tanRobot = new Vector3(1f, 0f, 0f);
+                Vector3 rpyDeg = DobotCR10AKinematics.SurfaceNormalToRobotRpyDeg(normRobot, tanRobot, maxTiltAllowed);
+                wp.roll_deg = rpyDeg.x;
+                wp.pitch_deg = rpyDeg.y;
+                wp.yaw_deg = rpyDeg.z;
 
                 Quaternion flangeRot = GetWaypointFlangeRotation(wp);
                 var sols = DobotCR10AKinematics.SolveTcpPose(
@@ -5041,16 +6800,22 @@ public class DobotCR10AIKController : MonoBehaviour
         if (mappedWaypoints.Count > 0)
         {
             isPlaying = false;
+            isMovingToManualTarget = false;
+            isMovingToHome = false;
+            paintingStarted = false;
             SetSprayState(false);
             ClearInkTrail();
             waypoints = mappedWaypoints;
             MarkSprayTransitions();
             currentWaypointIndex = 0;
             showGizmos = true;
-            ApplyWaypoint(0);
             RunDiagnostics();
+            if (robotManual != null)
+            {
+                robotManual.ikStatus = $"Đã nạp quỹ đạo 2D->3D ({waypoints.Count} điểm). Nhấn CHẠY để bắt đầu.";
+            }
 
-            customDrawStatusMsg = $"✅ Đã ánh xạ 2D ➔ 3D thành công: {waypoints.Count} điểm 3D (Giải IK: {solvedCount}/{waypoints.Count}, Dài: {cumDistMm:F0} mm)!";
+            customDrawStatusMsg = $"Đã ánh xạ 2D -> 3D: {waypoints.Count} điểm (IK: {solvedCount}/{waypoints.Count}, dài {cumDistMm:F0} mm). Bấm Chạy để vận hành.";
             Debug.Log($"[CR10A 2D->3D] {customDrawStatusMsg}");
         }
     }
@@ -5149,7 +6914,7 @@ public class DobotCR10AIKController : MonoBehaviour
     // =========================================================================
     // NẠP & ĐỒNG BỘ 12 ĐIỂM MỐC GIẢI PHẪU 3D + ĐƯỜNG BAO SEGMENTATION 3D
     // =========================================================================
-    public void LoadLandmarksAndSegmentationForSample(string sampleName, bool autoSwitchSprayTemplate = false)
+    public void LoadLandmarksAndSegmentationForSample(string sampleName, bool autoSwitchSprayTemplate = false, string exactJsonPath = null)
     {
         if (string.IsNullOrEmpty(sampleName)) sampleName = "pcl_25";
         string clean = Path.GetFileNameWithoutExtension(sampleName).Trim();
@@ -5158,13 +6923,9 @@ public class DobotCR10AIKController : MonoBehaviour
 
         string[] candidatePaths = new string[]
         {
+            exactJsonPath ?? "",
             Path.Combine(Application.dataPath, "..", "output_drawing", $"{clean}_landmarks_seg.json"),
-            Path.Combine(Application.dataPath, "..", "..", "output_drawing", $"{clean}_landmarks_seg.json"),
-            $"/home/nhan/RB3t_PJ/ai_src/step3_3d_trajectory/outputs/{clean}_landmarks_seg.json",
-            Path.Combine(Application.dataPath, "..", "output_drawing", "pcl_25_landmarks_seg.json"),
-            "/home/nhan/RB3t_PJ/ai_src/step3_3d_trajectory/outputs/pcl_25_landmarks_seg.json",
-            Path.Combine(Application.dataPath, "..", "output_drawing", "pcl_101_landmarks_seg.json"),
-            "/home/nhan/RB3t_PJ/ai_src/step3_3d_trajectory/outputs/pcl_101_landmarks_seg.json"
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "step3_3d_trajectory", "outputs", $"{clean}_landmarks_seg.json")
         };
 
         string foundPath = null;
@@ -5177,7 +6938,12 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        if (string.IsNullOrEmpty(foundPath)) return;
+        if (string.IsNullOrEmpty(foundPath))
+        {
+            landmarks3D.Clear(); landmarksWorldPos.Clear(); garmentContourWorld.Clear();
+            sprayZoneLeftWorld.Clear(); sprayZoneRightWorld.Clear(); loadedLandmarksSampleName = "";
+            return;
+        }
 
         try
         {
@@ -5215,17 +6981,33 @@ public class DobotCR10AIKController : MonoBehaviour
                 ? payload.detected_size
                 : ClassifyJeansSizeKMeans(detectedInseamMm, detectedOutseamMm);
 
+            if (preserveCustomDrawingAcrossSamples && customDrawnStrokes != null && customDrawnStrokes.Count > 0 &&
+                strokesReferenceLandmarksUV != null && strokesReferenceLandmarksUV.Length == 12)
+            {
+                Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyForWarp, out int nw, out int nh, out _);
+                if (camTex != null)
+                {
+                    Vector2[] newCamLmUV = GetActiveCanvasLandmarks12UV(plyForWarp, nw, nh, true, out bool hasNewLm);
+                    if (hasNewLm && newCamLmUV != null)
+                    {
+                        WarpStrokesInPlace(customDrawnStrokes, strokesReferenceLandmarksUV, newCamLmUV);
+                        strokesReferenceLandmarksUV = (Vector2[])newCamLmUV.Clone();
+                    }
+                }
+            }
+
             if (autoSwitchSprayTemplate)
             {
                 SwitchSprayTemplateToSize(detectedJeansSize);
             }
-            else if (preserveCustomDrawingAcrossSamples && customDrawnStrokes != null && customDrawnStrokes.Count > 0)
+            else if (string.IsNullOrEmpty(exactJsonPath) && preserveCustomDrawingAcrossSamples && customDrawnStrokes != null && customDrawnStrokes.Count > 0)
             {
                 ApplyCanonical2DDrawingTo3DTrajectory();
             }
 
             if (autoInpaintHolesOnLoad)
             {
+                DetectOcclusionAndHoles();
                 RunOcclusionCompensation();
             }
         }
@@ -5302,19 +7084,16 @@ public class DobotCR10AIKController : MonoBehaviour
             ApplyCanonical2DDrawingTo3DTrajectory();
         }
 
-        sizeDetectionSummary = $"Nhận diện [{loadedLandmarksSampleName}] ➔ SIZE {size} (Inseam {detectedInseamMm:F0} mm, Outseam {detectedOutseamMm:F0} mm). Mẫu phun: SIZE {prev} ➔ SIZE {size}";
-        customDrawStatusMsg = $"📏 Đã nhận diện SIZE {size}. Nét vẽ & quần 2D đã tự co giãn theo size mới!";
+        sizeDetectionSummary = $"[{loadedLandmarksSampleName}] Size {size} (Inseam {detectedInseamMm:F0}, Outseam {detectedOutseamMm:F0} mm)";
+        customDrawStatusMsg = $"Đã nhận diện Size {size}.";
         Debug.Log($"[CR10A Size] {sizeDetectionSummary}");
     }
 
     private void DrawJeansSizeDetectionSummaryBox()
     {
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("📏 KẾT QUẢ NHẬN DIỆN SIZE QUẦN (K-MEANS 3 CỤM)", AntigravityUITheme.StyleSectionLabel);
-        GUILayout.Label($"SIZE QUẦN NHẬN DIỆN: [ {detectedJeansSize} ]   |   MẪU CẦN PHUN ĐANG DÙNG: [ SIZE {activeSprayTemplateSize} ]", AntigravityUITheme.StyleLabelGreen);
-        GUILayout.Label($"Inseam: {detectedInseamMm:F0} mm | Outseam: {detectedOutseamMm:F0} mm | Eo: {detectedWaistMm:F0} mm | Gấu: {detectedCuffMm:F0} mm | Diện tích: {detectedAreaCm2:F0} cm²", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.Label($"Ngưỡng: S < {SizeInseamT1Mm:F0} mm ≤ M < {SizeInseamT2Mm:F0} mm ≤ L (Inseam); Outseam < {SizeOutseamT1Mm:F0} mm ➔ S", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.Label(hasTriggeredSizeAutoSwitch ? sizeDetectionSummary : "Mặc định: Mẫu cần phun SIZE S (chưa nhận diện)", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.Label($"Size nhận diện: {detectedJeansSize} | Mẫu phun: {activeSprayTemplateSize}", AntigravityUITheme.StyleLabelGreen);
+        GUILayout.Label($"Inseam: {detectedInseamMm:F0} mm | Outseam: {detectedOutseamMm:F0} mm | Eo: {detectedWaistMm:F0} mm", AntigravityUITheme.StyleLabelCyan);
         GUILayout.EndVertical();
     }
 
@@ -5420,9 +7199,9 @@ public class DobotCR10AIKController : MonoBehaviour
             }
             if (minGy < float.MaxValue)
             {
-                Rect segBadge = new Rect(bestSegPt.x - 110f, bestSegPt.y - 24f, 235f, 19f);
+                Rect segBadge = new Rect(bestSegPt.x - 85f, bestSegPt.y - 24f, 185f, 19f);
                 DrawGuiSolidRect(segBadge, new Color(0.02f, 0.22f, 0.12f, 0.92f));
-                GUI.Label(new Rect(segBadge.x + 5f, segBadge.y + 1f, segBadge.width, 18f), $"🟢 SEGMENT QUẦN JEAN ({loadedLandmarksSampleName})", AntigravityUITheme.StyleLabelGreen);
+                GUI.Label(new Rect(segBadge.x + 6f, segBadge.y + 1f, segBadge.width, 18f), $"SEGMENT ({loadedLandmarksSampleName})", AntigravityUITheme.StyleLabelGreen);
             }
         }
 
@@ -5521,6 +7300,179 @@ public class DobotCR10AIKController : MonoBehaviour
                 }
             }
         }
+
+        // 5. Vẽ ĐƯỜNG VIỀN MÀU ĐỎ BAO QUANH TỪNG VÙNG CẦN VÁ trực tiếp lên GAME VIEW
+        if (showHoleRegionOutlines3D && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
+        {
+            Color redOutlineHalo = new Color(0.24f, 0.01f, 0.01f, 0.94f);
+            Color redOutlineCore = new Color(1.00f, 0.10f, 0.08f, 1.00f);
+
+            float topGy = float.MaxValue;
+            Vector2 badgeAnchor = Vector2.zero;
+
+            for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+            {
+                List<Vector3> loop = holeRegionOutlinesWorld[r];
+                if (loop == null || loop.Count < 3) continue;
+
+                DrawWorldLoopInGUI(cam, loop, redOutlineHalo, 4.8f, true);
+                DrawWorldLoopInGUI(cam, loop, redOutlineCore, 2.8f, true);
+
+                for (int k = 0; k < loop.Count; k += Mathf.Max(1, loop.Count / 6))
+                {
+                    Vector3 sp = cam.WorldToScreenPoint(loop[k]);
+                    if (sp.z <= 0.05f) continue;
+                    float gy = Screen.height - sp.y;
+                    if (gy < topGy)
+                    {
+                        topGy = gy;
+                        badgeAnchor = new Vector2(sp.x, gy);
+                    }
+                }
+            }
+
+            if (interfaceTab == 7 && topGy < float.MaxValue)
+            {
+                string[] algoBadges = { "K-NN MLS", "TPS RBF", "Laplacian PDE", "Gun Tilt", "Đối xứng" };
+                string aTag = algoBadges[Mathf.Clamp(selectedOcclusionAlgorithm, 0, algoBadges.Length - 1)];
+                Rect bRect = new Rect(badgeAnchor.x - 120f, Mathf.Max(WorkbenchHeaderHeight + 6f, badgeAnchor.y - 26f), 255f, 20f);
+                DrawGuiSolidRect(bRect, new Color(0.28f, 0.03f, 0.03f, 0.93f));
+                GUI.Label(new Rect(bRect.x + 6f, bRect.y + 1f, bRect.width - 8f, 18f),
+                    $"VÙNG VÁ: {detectedHoleRegionCount} vùng ({detectedHoleCount} ô) [{aTag}]", AntigravityUITheme.StyleLabelRed);
+            }
+        }
+
+        // 5b. Tia hướng súng phun bù góc (Vàng) khi mở Tab Vá lỗ
+        if (showGunTiltVectors3D && interfaceTab == 7 &&
+            compensatedSurfacePointsWorld != null && compensatedSurfacePointsWorld.Count > 0)
+        {
+            int cCount = compensatedSurfacePointsWorld.Count;
+            int drawStep = Mathf.Max(1, cCount / 400);
+            Color tiltYellow = new Color(1.00f, 0.88f, 0.15f, 0.90f);
+
+            for (int i = 0; i < cCount; i += drawStep)
+            {
+                if (i >= gunTiltNormalsWorld.Count || (i % (drawStep * 5) != 0)) continue;
+                Vector3 wp = compensatedSurfacePointsWorld[i];
+                Vector3 sp = cam.WorldToScreenPoint(wp);
+                if (sp.z <= 0.05f) continue;
+                Vector3 tipW = wp + gunTiltNormalsWorld[i] * 0.032f;
+                Vector3 spTip = cam.WorldToScreenPoint(tipW);
+                if (spTip.z > 0.05f)
+                {
+                    DrawGuiLine2D(new Vector2(sp.x, Screen.height - sp.y), new Vector2(spTip.x, Screen.height - spTip.y), tiltYellow, 1.8f);
+                }
+            }
+        }
+
+        // 6. Khi đang ở bảng Hiệu chuẩn Camera: vẽ hệ trục XYZ của Camera (X Đỏ, Y Xanh lá, Z Xanh dương) + trục chiếu xuống bàn
+        if (ShouldDrawCameraAxes3D())
+        {
+            DrawCameraCalibrationAxesInGUI(cam);
+        }
+    }
+
+    private void Draw3DAxisArrowInGUI(Camera cam, Vector3 startW, Vector3 endW, Color axisCol, string label, float width = 3.2f)
+    {
+        Vector3 s0 = cam.WorldToScreenPoint(startW);
+        Vector3 s1 = cam.WorldToScreenPoint(endW);
+        if (s0.z <= 0.05f || s1.z <= 0.05f) return;
+
+        Vector2 p0 = new Vector2(s0.x, Screen.height - s0.y);
+        Vector2 p1 = new Vector2(s1.x, Screen.height - s1.y);
+        Vector2 dir = p1 - p0;
+        float len = dir.magnitude;
+        if (len < 2f) return;
+        dir /= len;
+
+        // Viền tối tương phản + thân trục sáng màu
+        DrawGuiLine2D(p0, p1, new Color(0.03f, 0.04f, 0.06f, 0.90f), width + 2.2f);
+        DrawGuiLine2D(p0, p1, axisCol, width);
+
+        // Mũi tên 2 cánh ở đầu trục
+        Vector2 perp = new Vector2(-dir.y, dir.x);
+        float headLen = Mathf.Clamp(len * 0.22f, 8f, 14f);
+        float headW = headLen * 0.48f;
+        Vector2 wingA = p1 - dir * headLen + perp * headW;
+        Vector2 wingB = p1 - dir * headLen - perp * headW;
+        DrawGuiLine2D(p1, wingA, axisCol, Mathf.Max(2.2f, width * 0.8f));
+        DrawGuiLine2D(p1, wingB, axisCol, Mathf.Max(2.2f, width * 0.8f));
+
+        if (!string.IsNullOrEmpty(label))
+        {
+            float bw = Mathf.Max(46f, label.Length * 7.5f + 10f);
+            Rect lRect = new Rect(p1.x + 6f, p1.y - 10f, bw, 18f);
+            DrawGuiSolidRect(lRect, new Color(0.05f, 0.07f, 0.11f, 0.90f));
+            GUIStyle st = new GUIStyle(AntigravityUITheme.StyleLabelCyan)
+            {
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter
+            };
+            st.normal.textColor = axisCol;
+            GUI.Label(lRect, label, st);
+        }
+    }
+
+    private void DrawCameraCalibrationAxesInGUI(Camera cam)
+    {
+        CalibrationManager calib = EnsureCalibrationManager();
+        if (calib == null) return;
+
+        Color colX = new Color(1.00f, 0.24f, 0.22f, 1.0f); // Đỏ: +X_cam
+        Color colY = new Color(0.22f, 0.95f, 0.42f, 1.0f); // Xanh lá: +Y_cam
+        Color colZ = new Color(0.24f, 0.68f, 1.00f, 1.0f); // Xanh dương: +Z_cam (quang trục)
+
+        // 1. Hệ trục XYZ tại đúng tâm quang học Camera (X, Y = 320 mm; Z = 400 mm)
+        Vector3 originW = calib.CameraMmToUnityWorld(Vector3.zero, globalReference);
+        Vector3 tipXW = calib.CameraMmToUnityWorld(new Vector3(320f, 0f, 0f), globalReference);
+        Vector3 tipYW = calib.CameraMmToUnityWorld(new Vector3(0f, 320f, 0f), globalReference);
+        Vector3 tipZW = calib.CameraMmToUnityWorld(new Vector3(0f, 0f, 400f), globalReference);
+
+        // Tia quang học từ tâm Camera xuống mặt bàn
+        float zTableMm = Mathf.Clamp(calib.camPosRobotZ_mm - calib.tableHeightMm, 400f, 2600f);
+        Vector3 tableHitW = calib.CameraMmToUnityWorld(new Vector3(0f, 0f, zTableMm), globalReference);
+        Vector3 sOrig = cam.WorldToScreenPoint(originW);
+        Vector3 sHit = cam.WorldToScreenPoint(tableHitW);
+        if (sOrig.z > 0.05f && sHit.z > 0.05f)
+        {
+            DrawGuiLine2D(
+                new Vector2(sOrig.x, Screen.height - sOrig.y),
+                new Vector2(sHit.x, Screen.height - sHit.y),
+                new Color(0.25f, 0.72f, 1.0f, 0.42f), 1.6f);
+        }
+
+        Draw3DAxisArrowInGUI(cam, originW, tipXW, colX, "+X_cam", 3.4f);
+        Draw3DAxisArrowInGUI(cam, originW, tipYW, colY, "+Y_cam", 3.4f);
+        Draw3DAxisArrowInGUI(cam, originW, tipZW, colZ, "+Z_cam", 3.4f);
+
+        if (sOrig.z > 0.05f)
+        {
+            Vector2 po = new Vector2(sOrig.x, Screen.height - sOrig.y);
+            DrawGuiSolidRect(new Rect(po.x - 5f, po.y - 5f, 10f, 10f), new Color(1f, 0.92f, 0.25f, 1f));
+            Rect camTag = new Rect(po.x - 58f, po.y - 26f, 116f, 18f);
+            DrawGuiSolidRect(camTag, new Color(0.06f, 0.09f, 0.14f, 0.92f));
+            GUI.Label(new Rect(camTag.x + 4f, camTag.y, camTag.width - 8f, 18f), "GỐC CAMERA", AntigravityUITheme.StyleLabelYellow);
+        }
+
+        // 2. Hệ trục XY chiếu lên mặt bàn tại tâm quang học (giúp thấy rõ hướng X_cam / Y_cam ngay cả khi zoom sát phôi!)
+        Vector3 projXW = calib.CameraMmToUnityWorld(new Vector3(160f, 0f, zTableMm), globalReference);
+        Vector3 projYW = calib.CameraMmToUnityWorld(new Vector3(0f, 160f, zTableMm), globalReference);
+        Draw3DAxisArrowInGUI(cam, tableHitW, projXW, new Color(1.0f, 0.35f, 0.30f, 0.85f), "X_cam", 2.4f);
+        Draw3DAxisArrowInGUI(cam, tableHitW, projYW, new Color(0.30f, 0.95f, 0.48f, 0.85f), "Y_cam", 2.4f);
+        if (sHit.z > 0.05f)
+        {
+            Vector2 ph = new Vector2(sHit.x, Screen.height - sHit.y);
+            DrawGuiSolidRect(new Rect(ph.x - 4f, ph.y - 4f, 8f, 8f), colZ);
+        }
+
+        // 3. Hệ trục tham chiếu Gốc Robot (nhỏ gọn) để đối chiếu trực tiếp Cam -> Robot
+        Vector3 robOrigW = globalReference != null ? globalReference.TransformPoint(Vector3.zero) : new Vector3(0f, 0f, calib.robotGlobalOriginZ_mm * 0.001f);
+        Vector3 robXW = globalReference != null ? globalReference.TransformPoint(new Vector3(0.22f, 0f, 0f)) : robOrigW + new Vector3(0f, 0f, -0.22f);
+        Vector3 robYW = globalReference != null ? globalReference.TransformPoint(new Vector3(0f, 0.22f, 0f)) : robOrigW + new Vector3(-0.22f, 0f, 0f);
+        Vector3 robZW = globalReference != null ? globalReference.TransformPoint(new Vector3(0f, 0f, 0.22f)) : robOrigW + new Vector3(0f, 0.22f, 0f);
+        Draw3DAxisArrowInGUI(cam, robOrigW, robXW, new Color(1.0f, 0.45f, 0.45f, 0.85f), "X_rob", 2.2f);
+        Draw3DAxisArrowInGUI(cam, robOrigW, robYW, new Color(0.45f, 1.0f, 0.55f, 0.85f), "Y_rob", 2.2f);
+        Draw3DAxisArrowInGUI(cam, robOrigW, robZW, new Color(0.45f, 0.78f, 1.0f, 0.85f), "Z_rob", 2.2f);
     }
 
     private void DrawWorldLoopInGUI(Camera cam, List<Vector3> worldPts, Color col, float thickness, bool closedLoop)
@@ -5625,6 +7577,54 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
+        // 3b. Vẽ ĐƯỜNG VIỀN MÀU ĐỎ bao quanh các vùng cần vá trong Scene View (luôn hiện dù chưa sinh quỹ đạo)
+        if (showHoleRegionOutlines3D && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
+        {
+            Gizmos.color = new Color(1.0f, 0.10f, 0.08f, 1.0f);
+            for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+            {
+                List<Vector3> loop = holeRegionOutlinesWorld[r];
+                if (loop == null || loop.Count < 3) continue;
+                for (int k = 0; k < loop.Count - 1; k++)
+                    Gizmos.DrawLine(loop[k], loop[k + 1]);
+                Gizmos.DrawLine(loop[loop.Count - 1], loop[0]);
+            }
+        }
+
+        // 3c. Vẽ Vector bù góc súng (Tia Vàng) trong Scene View
+        if (showGunTiltVectors3D && compensatedSurfacePointsWorld != null && compensatedSurfacePointsWorld.Count > 0)
+        {
+            Gizmos.color = new Color(1.0f, 0.88f, 0.15f, 0.95f);
+            for (int i = 0; i < compensatedSurfacePointsWorld.Count; i += 4)
+            {
+                if (i < gunTiltNormalsWorld.Count)
+                {
+                    Gizmos.DrawRay(compensatedSurfacePointsWorld[i], gunTiltNormalsWorld[i] * 0.035f);
+                }
+            }
+        }
+
+        // 3d. Vẽ hệ trục XYZ của Camera trong Scene View khi đang hiệu chuẩn
+        if (ShouldDrawCameraAxes3D())
+        {
+            CalibrationManager calibG = calibrationManager != null ? calibrationManager : FindAnyObjectByType<CalibrationManager>();
+            if (calibG != null)
+            {
+                Vector3 oW = calibG.CameraMmToUnityWorld(Vector3.zero, globalReference);
+                Vector3 xW = calibG.CameraMmToUnityWorld(new Vector3(320f, 0f, 0f), globalReference);
+                Vector3 yW = calibG.CameraMmToUnityWorld(new Vector3(0f, 320f, 0f), globalReference);
+                Vector3 zW = calibG.CameraMmToUnityWorld(new Vector3(0f, 0f, 400f), globalReference);
+                float zTab = Mathf.Clamp(calibG.camPosRobotZ_mm - calibG.tableHeightMm, 400f, 2600f);
+                Vector3 hitW = calibG.CameraMmToUnityWorld(new Vector3(0f, 0f, zTab), globalReference);
+
+                Gizmos.color = Color.red; Gizmos.DrawLine(oW, xW);
+                Gizmos.color = Color.green; Gizmos.DrawLine(oW, yW);
+                Gizmos.color = Color.blue; Gizmos.DrawLine(oW, zW);
+                Gizmos.color = new Color(0.25f, 0.72f, 1f, 0.45f); Gizmos.DrawLine(oW, hitW);
+                Gizmos.color = Color.yellow; Gizmos.DrawSphere(oW, 0.018f);
+            }
+        }
+
         if (!showGizmos || waypoints == null || waypoints.Count == 0) return;
 
         // 4. Vẽ toàn bộ đường đa giác 3D (Polyline) đè lên đám mây điểm phôi (Chỉ vẽ đoạn CÓ PHUN)
@@ -5650,32 +7650,6 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             Gizmos.color = Color.red;
             Gizmos.DrawSphere(tcpTransform.position, 0.006f);
-        }
-
-        // 7. Vẽ các điểm/lỗ khuyết tật & chỗ khuất phát hiện (Hạt Đỏ Cam)
-        if (showOcclusionHoles3D && detectedHolePointsWorld != null && detectedHolePointsWorld.Count > 0)
-        {
-            Gizmos.color = new Color(1.0f, 0.22f, 0.15f, 0.85f);
-            for (int i = 0; i < detectedHolePointsWorld.Count; i++)
-            {
-                Gizmos.DrawSphere(detectedHolePointsWorld[i], 0.005f);
-            }
-        }
-
-        // 8. Vẽ bề mặt đã bù đắp 3D (Lưới Xanh Neon) & Vector bù góc súng (Tia Vàng)
-        if (showCompensatedSurface3D && compensatedSurfacePointsWorld != null && compensatedSurfacePointsWorld.Count > 0)
-        {
-            Gizmos.color = new Color(0.12f, 0.95f, 0.45f, 0.90f);
-            for (int i = 0; i < compensatedSurfacePointsWorld.Count; i++)
-            {
-                Gizmos.DrawWireCube(compensatedSurfacePointsWorld[i], new Vector3(0.012f, 0.002f, 0.012f));
-                if (showGunTiltVectors3D && i < gunTiltNormalsWorld.Count)
-                {
-                    Gizmos.color = new Color(1.0f, 0.88f, 0.15f, 0.95f);
-                    Gizmos.DrawRay(compensatedSurfacePointsWorld[i], gunTiltNormalsWorld[i] * 0.035f);
-                    Gizmos.color = new Color(0.12f, 0.95f, 0.45f, 0.90f);
-                }
-            }
         }
     }
 
@@ -5736,8 +7710,9 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             if (c.GetComponent<FixedRigCamera>() != null)
             {
-                c.depth = -1;
+                c.depth = -2;
                 c.tag = "Untagged";
+                if (c.targetTexture == null) c.enabled = false;
             }
             else if (targetCam == null && c.name == "Camera")
             {
@@ -5772,5 +7747,659 @@ public class DobotCR10AIKController : MonoBehaviour
         if (client == null) client = FindAnyObjectByType<AiServerClient>();
         if (client == null) client = gameObject.AddComponent<AiServerClient>();
         return client;
+    }
+
+    // =========================================================================
+    // CARD 8: ĐÁNH GIÁ CHỈ TIÊU, SO SÁNH P1/P3/P4, MÔ PHỎNG PHUN GAUSS & KHUÔN 3D
+    // =========================================================================
+
+    private List<List<Vector2>> BuildDefaultCanonicalStrokesForSize(string size)
+    {
+        var strokes = new List<List<Vector2>>();
+        int nWhiskers = 2, nPasses = 2;
+        float vTop = 0.47f, vBot = 0.76f, passSpacing = 0.036f;
+        if (size == "M") { nWhiskers = 2; nPasses = 3; vTop = 0.46f; vBot = 0.80f; passSpacing = 0.032f; }
+        else if (size == "L") { nWhiskers = 3; nPasses = 4; vTop = 0.45f; vBot = 0.84f; passSpacing = 0.026f; }
+
+        for (int w = 0; w < nWhiskers; w++)
+        {
+            float vBase = 0.41f + w * 0.04f;
+            var whiskerL = new List<Vector2>();
+            for (int k = 0; k <= 8; k++)
+            {
+                float t = (float)k / 8f;
+                whiskerL.Add(new Vector2(Mathf.Lerp(0.28f, 0.42f, t), vBase + 0.02f * (t - 0.5f)));
+            }
+            strokes.Add(whiskerL);
+        }
+        for (int p = 0; p < nPasses; p++)
+        {
+            float uOff = (p - (nPasses - 1) * 0.5f) * passSpacing;
+            var passL = new List<Vector2>();
+            for (int k = 0; k <= 14; k++)
+            {
+                float t = (p % 2 == 0) ? ((float)k / 14f) : (1f - (float)k / 14f);
+                passL.Add(new Vector2(Mathf.Lerp(0.35f, 0.33f, t) + uOff, Mathf.Lerp(vTop, vBot, t)));
+            }
+            strokes.Add(passL);
+        }
+        for (int w = 0; w < nWhiskers; w++)
+        {
+            float vBase = 0.41f + w * 0.04f;
+            var whiskerR = new List<Vector2>();
+            for (int k = 0; k <= 8; k++)
+            {
+                float t = (float)k / 8f;
+                whiskerR.Add(new Vector2(Mathf.Lerp(0.58f, 0.72f, t), vBase - 0.02f * (t - 0.5f)));
+            }
+            strokes.Add(whiskerR);
+        }
+        for (int p = 0; p < nPasses; p++)
+        {
+            float uOff = (p - (nPasses - 1) * 0.5f) * passSpacing;
+            var passR = new List<Vector2>();
+            for (int k = 0; k <= 14; k++)
+            {
+                float t = (p % 2 == 0) ? ((float)k / 14f) : (1f - (float)k / 14f);
+                passR.Add(new Vector2(Mathf.Lerp(0.65f, 0.67f, t) + uOff, Mathf.Lerp(vTop, vBot, t)));
+            }
+            strokes.Add(passR);
+        }
+        return strokes;
+    }
+
+    /// <summary>
+    /// Chuyển nét vẽ hiện tại (trên ảnh camera thực tế) về không gian chuẩn Canonical UV [0, 1]x[0, 1]
+    /// để truyền chính xác cho các bộ sinh quỹ đạo P3 (12 mốc) và P4 (ICP + TPS).
+    /// Nếu người dùng chưa vẽ nét nào thì tự sinh bộ nét Râu mèo + Đùi chuẩn.
+    /// </summary>
+    private List<List<Vector2>> GetCanonicalTemplateStrokesForMethods()
+    {
+        if (customDrawnStrokes == null || customDrawnStrokes.Count == 0)
+        {
+            return BuildDefaultCanonicalStrokesForSize(activeSprayTemplateSize);
+        }
+
+        Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        bool usingRealCam = (camTex != null);
+        Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, usingRealCam, out bool hasRealLm);
+        Vector2[] canonLmUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+
+        var canonicalList = new List<List<Vector2>>(customDrawnStrokes.Count);
+        for (int s = 0; s < customDrawnStrokes.Count; s++)
+        {
+            var srcStroke = customDrawnStrokes[s];
+            if (srcStroke == null || srcStroke.Count < 2) continue;
+            var dstStroke = new List<Vector2>(srcStroke.Count);
+            for (int p = 0; p < srcStroke.Count; p++)
+            {
+                Vector2 pt = srcStroke[p];
+                if (usingRealCam && hasRealLm && camLmUV != null)
+                {
+                    pt = WarpUV2D(pt, camLmUV, canonLmUV);
+                }
+                dstStroke.Add(pt);
+            }
+            canonicalList.Add(dstStroke);
+        }
+
+        return canonicalList.Count > 0 ? canonicalList : BuildDefaultCanonicalStrokesForSize(activeSprayTemplateSize);
+    }
+
+    public void GenerateAndApplyMethodTrajectory(string method)
+    {
+        EnsureCanonicalJeansCanvasInitialized();
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        string activeSample = GetActiveCloudSampleName();
+        if (string.IsNullOrEmpty(activeSample)) activeSample = selectedSampleName;
+
+        if (landmarksWorldPos == null || landmarksWorldPos.Count < 12 ||
+            (!string.IsNullOrEmpty(activeSample) && loadedLandmarksSampleName != activeSample))
+        {
+            LoadLandmarksAndSegmentationForSample(activeSample);
+        }
+        if (landmarksWorldPos == null || landmarksWorldPos.Count < 12)
+        {
+            comparisonStatusMsg = $"Chưa có 12 mốc AI cho phôi [{activeSample}]. Hãy bấm 'Chụp + AI' hoặc 'Nhận diện AI' trước.";
+            return;
+        }
+
+        List<List<Vector2>> canonicalStrokes = GetCanonicalTemplateStrokesForMethods();
+        List<WaypointData> generated = null;
+        float tGen = 0f;
+        float regRes = 0f;
+
+        if (method == "P1")
+        {
+            generated = TrajectoryEvaluationEngine.GenerateP1Zigzag(this, plyLoader, sprayTechParams, out tGen);
+        }
+        else if (method == "P3")
+        {
+            generated = TrajectoryEvaluationEngine.GenerateP3LandmarkTemplate(this, plyLoader, canonicalStrokes, activeSprayTemplateSize, sprayTechParams, out tGen);
+        }
+        else
+        {
+            generated = TrajectoryEvaluationEngine.GenerateP4RegistrationTpsIcp(this, plyLoader, canonicalStrokes, activeSprayTemplateSize, sprayTechParams, out regRes, out tGen);
+        }
+
+        if (generated != null && generated.Count > 0)
+        {
+            isPlaying = false;
+            isMovingToManualTarget = false;
+            isMovingToHome = false;
+            paintingStarted = false;
+            SetSprayState(false);
+            ClearInkTrail();
+            waypoints = generated;
+            MarkSprayTransitions();
+            currentWaypointIndex = 0;
+            showGizmos = true;
+            RunDiagnostics();
+
+            if (robotManual != null)
+            {
+                robotManual.ikStatus = $"Đã sinh quỹ đạo [{method}] ({waypoints.Count} điểm). Nhấn CHẠY để bắt đầu.";
+            }
+
+            if (showDepositionHeatmap3D)
+            {
+                TrajectoryEvaluationEngine.SimulateGaussianDepositionAndHeatmap(
+                    waypoints, this, plyLoader, sprayTechParams, true, ref depositionHeatmapObj, out _, out _, out _);
+            }
+
+            int solvedCnt = 0;
+            for (int i = 0; i < waypoints.Count; i++) if (waypoints[i].isSolved) solvedCnt++;
+
+            string warnP4 = (method == "P4" && regRes > sprayTechParams.registrationResidualThresholdMm)
+                ? $" [Cảnh báo dư={regRes:F1}mm]"
+                : (method == "P4" ? $", dư={regRes:F2} mm" : "");
+            comparisonStatusMsg = $"Đã sinh [{method}]: {waypoints.Count} điểm (IK {solvedCnt}/{waypoints.Count}, {tGen * 1000f:F0} ms{warnP4}). Bấm Chạy để vận hành.";
+        }
+        else
+        {
+            comparisonStatusMsg = $"Không sinh được điểm nào cho [{method}] trên phôi [{activeSample}]. Kiểm tra lại 12 mốc AI hoặc biên trừ hao.";
+        }
+    }
+
+    public void RunAllMethodsComparison()
+    {
+        EnsureCanonicalJeansCanvasInitialized();
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        string activeSample = GetActiveCloudSampleName();
+        if (string.IsNullOrEmpty(activeSample)) activeSample = selectedSampleName;
+
+        if (landmarksWorldPos == null || landmarksWorldPos.Count < 12 ||
+            (!string.IsNullOrEmpty(activeSample) && loadedLandmarksSampleName != activeSample))
+        {
+            LoadLandmarksAndSegmentationForSample(activeSample);
+        }
+        if (landmarksWorldPos == null || landmarksWorldPos.Count < 12)
+        {
+            comparisonStatusMsg = $"Chưa có 12 mốc AI cho [{activeSample}] để so sánh P1 / P3 / P4.";
+            return;
+        }
+
+        comparisonResults.Clear();
+        List<List<Vector2>> canonicalStrokes = GetCanonicalTemplateStrokesForMethods();
+
+        var wpP1 = TrajectoryEvaluationEngine.GenerateP1Zigzag(this, plyLoader, sprayTechParams, out float t1);
+        var wpP3 = TrajectoryEvaluationEngine.GenerateP3LandmarkTemplate(this, plyLoader, canonicalStrokes, activeSprayTemplateSize, sprayTechParams, out float t3);
+        var wpP4 = TrajectoryEvaluationEngine.GenerateP4RegistrationTpsIcp(this, plyLoader, canonicalStrokes, activeSprayTemplateSize, sprayTechParams, out float res4, out float t4);
+
+        // Dùng P4 làm đường chuẩn tham chiếu nội bộ nếu chưa nạp ground truth riêng
+        var refGt = (wpP4 != null && wpP4.Count > 0) ? wpP4 : wpP3;
+
+        GameObject dummyHm = null;
+        var r1 = TrajectoryEvaluationEngine.EvaluateTrajectory("P1_Zigzag", wpP1, refGt, this, plyLoader, sprayTechParams, t1, 0f, 4.5f, false, ref dummyHm);
+        var r3 = TrajectoryEvaluationEngine.EvaluateTrajectory("P3_12Moc", wpP3, refGt, this, plyLoader, sprayTechParams, t3, 0f, 4.0f, false, ref dummyHm);
+        var r4 = TrajectoryEvaluationEngine.EvaluateTrajectory("P4_ICP_TPS", wpP4, refGt, this, plyLoader, sprayTechParams, t4, res4, 3.5f, showDepositionHeatmap3D, ref depositionHeatmapObj);
+
+        comparisonResults.Add(r1);
+        comparisonResults.Add(r3);
+        comparisonResults.Add(r4);
+
+        // Chọn phương án điểm cao nhất làm tóm tắt
+        var best = r1;
+        if (r3.weightedScore > best.weightedScore) best = r3;
+        if (r4.weightedScore > best.weightedScore) best = r4;
+        comparisonStatusMsg = $"Tốt nhất [{selectedSampleName}]: {best.methodName} ({best.weightedScore:F1}/100).";
+    }
+
+    private void DrawEvaluationAndSprayCard(float width)
+    {
+        GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
+        GUILayout.Label("ĐÁNH GIÁ & PHUN GAUSS", AntigravityUITheme.StyleCardHeader);
+
+        GUILayout.Space(4);
+        GUILayout.Label("1. THÔNG SỐ SÚNG PHUN", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Khoảng cách d: {sprayTechParams.standoffMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.standoffMm = GUILayout.HorizontalSlider(sprayTechParams.standoffMm, 15f, 250f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Bề rộng vệt w: {sprayTechParams.sprayWidthMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.sprayWidthMm = GUILayout.HorizontalSlider(sprayTechParams.sprayWidthMm, 25f, 150f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Chồng lấn r: {sprayTechParams.overlapRatio * 100f:F0}%", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.overlapRatio = GUILayout.HorizontalSlider(sprayTechParams.overlapRatio, 0.1f, 0.75f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Độ lệch chuẩn σ: {sprayTechParams.gaussSigmaMm:F1} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.gaussSigmaMm = GUILayout.HorizontalSlider(sprayTechParams.gaussSigmaMm, 8f, 45f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Nghiêng tối đa: {sprayTechParams.maxTiltDeg:F0}°", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.maxTiltDeg = GUILayout.HorizontalSlider(sprayTechParams.maxTiltDeg, 10f, 45f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Biên trừ hao e: {sprayTechParams.borderMarginMm:F0} mm", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(170));
+        sprayTechParams.borderMarginMm = GUILayout.HorizontalSlider(sprayTechParams.borderMarginMm, 5f, 35f);
+        GUILayout.EndHorizontal();
+
+        float stepS = sprayTechParams.sprayWidthMm * (1f - sprayTechParams.overlapRatio);
+        float ripplePct = TrajectoryEvaluationEngine.ComputeGaussRipplePercent(sprayTechParams.gaussSigmaMm, stepS);
+        GUILayout.Label($"Bước s = {stepS:F1} mm | Dao động Gauss = {ripplePct:F2}%", ripplePct <= 5f ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelYellow);
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("2. SO SÁNH P1 / P3 / P4", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Chạy so sánh", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+        {
+            RunAllMethodsComparison();
+        }
+        if (GUILayout.Button("Xuất CSV", AntigravityUITheme.StyleButton, GUILayout.Width(95), GUILayout.Height(28)))
+        {
+            if (comparisonResults.Count == 0) RunAllMethodsComparison();
+            string exportDir = Path.Combine(Application.dataPath, "..", "output_drawing");
+            string csvPath = TrajectoryEvaluationEngine.ExportComparisonCsv(comparisonResults, exportDir);
+            comparisonStatusMsg = $"Đã xuất: {Path.GetFileName(csvPath)}";
+        }
+        GUILayout.EndHorizontal();
+
+        bool prevHm = showDepositionHeatmap3D;
+        showDepositionHeatmap3D = GUILayout.Toggle(showDepositionHeatmap3D, " Hiện Heatmap phun Gauss 3D", AntigravityUITheme.StyleToggle);
+        if (showDepositionHeatmap3D != prevHm)
+        {
+            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
+            if (showDepositionHeatmap3D && waypoints.Count >= 2)
+            {
+                TrajectoryEvaluationEngine.SimulateGaussianDepositionAndHeatmap(
+                    waypoints, this, pl, sprayTechParams, true, ref depositionHeatmapObj, out _, out _, out _);
+            }
+            else if (depositionHeatmapObj != null)
+            {
+                depositionHeatmapObj.SetActive(false);
+            }
+        }
+
+        GUILayout.Label(comparisonStatusMsg, AntigravityUITheme.StyleLabelCyan);
+
+        if (comparisonResults.Count > 0)
+        {
+            GUILayout.Space(4);
+            for (int i = 0; i < comparisonResults.Count; i++)
+            {
+                var r = comparisonResults[i];
+                GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle());
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"{r.methodName} ({r.waypointCount} wp)", AntigravityUITheme.StyleLabelCyan);
+                GUILayout.FlexibleSpace();
+                GUILayout.Label($"{r.weightedScore:F1}/100 [{(r.passedGate ? "ĐẠT" : "KIỂM TRA")}]",
+                    r.passedGate ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelYellow);
+                GUILayout.EndHorizontal();
+
+                GUILayout.Label($"E_geo={r.eGeoMeanMm:F2}mm | E_d={r.eDMeanMm:F2}mm | E_θ={r.eThetaMeanDeg:F1}°", AntigravityUITheme.StyleLabelMuted);
+                GUILayout.Label($"E_T={r.eTPercent:F1}% | Phủ={r.coveragePercent:F1}% | Tràn={r.oversprayPercent:F1}% | t={r.tCycleSec:F1}s", AntigravityUITheme.StyleLabelMuted);
+
+                string tag = r.methodName.StartsWith("P1") ? "P1" : (r.methodName.StartsWith("P3") ? "P3" : "P4");
+                if (GUILayout.Button($"Nạp {tag}", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+                {
+                    GenerateAndApplyMethodTrajectory(tag);
+                }
+                GUILayout.EndVertical();
+            }
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("3. KIỂM CHỨNG 3D", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        bool prevTbl = showPhysicalWorktable;
+        showPhysicalWorktable = GUILayout.Toggle(showPhysicalWorktable, " Hiện bàn thao tác (Collider)", AntigravityUITheme.StyleToggle);
+        if (showPhysicalWorktable != prevTbl)
+        {
+            if (showPhysicalWorktable)
+            {
+                PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
+                worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, pl != null ? pl.estimatedTableY : 0f);
+            }
+            else if (worktableObj != null)
+            {
+                worktableObj.SetActive(false);
+            }
+        }
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Bật khuôn đứng 3D", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+        {
+            showStandingMold3D = true;
+            var moldWps = TrajectoryEvaluationEngine.GenerateStandingMold3DReachTest(this, sprayTechParams, ref standingMoldObj, out standingMoldReachSummary);
+            if (moldWps.Count > 0)
+            {
+                isPlaying = false;
+                isMovingToManualTarget = false;
+                isMovingToHome = false;
+                paintingStarted = false;
+                SetSprayState(false);
+                ClearInkTrail();
+                waypoints = moldWps;
+                MarkSprayTransitions();
+                currentWaypointIndex = 0;
+                showGizmos = true;
+                RunDiagnostics();
+                if (robotManual != null)
+                {
+                    robotManual.ikStatus = $"Đã nạp quỹ đạo khuôn đứng 3D ({waypoints.Count} điểm). Nhấn CHẠY để bắt đầu.";
+                }
+            }
+        }
+        if (showStandingMold3D && GUILayout.Button("Ẩn khuôn", AntigravityUITheme.StyleButton, GUILayout.Width(86), GUILayout.Height(28)))
+        {
+            showStandingMold3D = false;
+            if (standingMoldObj != null) standingMoldObj.SetActive(false);
+            RunDiagnostics();
+        }
+        GUILayout.EndHorizontal();
+
+        if (!string.IsNullOrEmpty(standingMoldReachSummary))
+        {
+            GUILayout.Label(standingMoldReachSummary, AntigravityUITheme.StyleLabelGreen);
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.EndVertical();
+    }
+
+    // =========================================================================
+    // CARD 9: HIỆU CHỈNH VỊ TRÍ CAMERA & QUY ĐỔI TỌA ĐỘ CAMERA -> ROBOT
+    // =========================================================================
+
+    private bool DrawCalibNumericSliderRow(string label, ref float value, float min, float max, float stepSmall, float stepBig, string unit)
+    {
+        bool changed = false;
+        GUILayout.BeginHorizontal();
+        GUILayout.Label(label, AntigravityUITheme.StyleLabelCyan, GUILayout.Width(96));
+
+        string txt = value.ToString("F1", CultureInfo.InvariantCulture);
+        string newTxt = GUILayout.TextField(txt, AntigravityUITheme.StyleTextField, GUILayout.Width(60));
+        if (newTxt != txt && float.TryParse(newTxt, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed))
+        {
+            value = Mathf.Clamp(parsed, min, max);
+            changed = true;
+        }
+        GUILayout.Label(unit, AntigravityUITheme.StyleLabelMuted, GUILayout.Width(24));
+
+        if (GUILayout.Button($"-{stepBig:0}", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { value = Mathf.Clamp(value - stepBig, min, max); changed = true; }
+        if (GUILayout.Button($"-{stepSmall:0}", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { value = Mathf.Clamp(value - stepSmall, min, max); changed = true; }
+        float sVal = GUILayout.HorizontalSlider(value, min, max);
+        if (Mathf.Abs(sVal - value) > 0.05f) { value = Mathf.Round(sVal * 10f) / 10f; changed = true; }
+        if (GUILayout.Button($"+{stepSmall:0}", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { value = Mathf.Clamp(value + stepSmall, min, max); changed = true; }
+        if (GUILayout.Button($"+{stepBig:0}", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { value = Mathf.Clamp(value + stepBig, min, max); changed = true; }
+        GUILayout.EndHorizontal();
+        return changed;
+    }
+
+    private Vector3 DrawVector3InputRow(string rowLabel, Vector3 vec)
+    {
+        GUILayout.BeginHorizontal();
+        GUILayout.Label(rowLabel, AntigravityUITheme.StyleLabelCyan, GUILayout.Width(96));
+
+        GUILayout.Label("X", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(14));
+        string sx = GUILayout.TextField(vec.x.ToString("F1", CultureInfo.InvariantCulture), AntigravityUITheme.StyleTextField, GUILayout.Width(64));
+        if (float.TryParse(sx, NumberStyles.Float, CultureInfo.InvariantCulture, out float vx)) vec.x = vx;
+
+        GUILayout.Label("Y", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(14));
+        string sy = GUILayout.TextField(vec.y.ToString("F1", CultureInfo.InvariantCulture), AntigravityUITheme.StyleTextField, GUILayout.Width(64));
+        if (float.TryParse(sy, NumberStyles.Float, CultureInfo.InvariantCulture, out float vy)) vec.y = vy;
+
+        GUILayout.Label("Z", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(14));
+        string sz = GUILayout.TextField(vec.z.ToString("F1", CultureInfo.InvariantCulture), AntigravityUITheme.StyleTextField, GUILayout.Width(64));
+        if (float.TryParse(sz, NumberStyles.Float, CultureInfo.InvariantCulture, out float vz)) vec.z = vz;
+
+        GUILayout.EndHorizontal();
+        return vec;
+    }
+
+    private void DrawCameraCalibrationCard(float width)
+    {
+        CalibrationManager calib = EnsureCalibrationManager();
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        RobotCameraController rcc = EnsureCameraController();
+        FixedRigCamera rigCam = rcc != null ? rcc.EnsureFixedRigCamera(createIfMissing: false) : FindAnyObjectByType<FixedRigCamera>();
+
+        GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
+        GUILayout.Label("HIỆU CHUẨN CAMERA", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label(calib.calibrationStatus, calib.isCalibrationValid ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelYellow);
+
+        GUILayout.Space(6);
+        GUILayout.Label("0. GÓC NHÌN & MÔ PHỎNG CAMERA ZIVID", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        GUIStyle povBtnSt = (rcc != null && rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Xem góc Camera", povBtnSt, GUILayout.Height(26))) { if (rcc != null) rcc.ToggleZividCameraView(); }
+        GUIStyle pipBtnSt = (rcc != null && rcc.showZividPipWindow && !rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Khung PiP", pipBtnSt, GUILayout.Height(26))) { if (rcc != null) rcc.ToggleZividPip(); }
+        if (GUILayout.Button("Về 3/4", AntigravityUITheme.StyleButton, GUILayout.Width(64), GUILayout.Height(26))) { if (rcc != null) rcc.SetPresetPerspective(); }
+        GUILayout.EndHorizontal();
+
+        showCameraAxesInCalibration = GUILayout.Toggle(showCameraAxesInCalibration, " Hiện trục XYZ Camera (X: Đỏ, Y: Xanh lá, Z: Xanh dương)", AntigravityUITheme.StyleToggle);
+
+        if (rigCam != null)
+        {
+            bool prevRigVis = rigCam.showRuntimeRigVisual;
+            bool prevFovVis = rigCam.showRuntimeFovFrustum;
+            rigCam.showRuntimeRigVisual = GUILayout.Toggle(rigCam.showRuntimeRigVisual, " Hiện mô hình Camera Zivid & giá treo 3D", AntigravityUITheme.StyleToggle);
+            if (rigCam.showRuntimeRigVisual)
+            {
+                rigCam.showRuntimeFovFrustum = GUILayout.Toggle(rigCam.showRuntimeFovFrustum, " Hiện vùng nhìn FOV & trục quang học", AntigravityUITheme.StyleToggle);
+            }
+            bool fovChanged = DrawCalibNumericSliderRow("FOV ống kính", ref rigCam.cameraFovDeg, 25f, 75f, 1f, 5f, "°");
+            if (fovChanged)
+            {
+                rigCam.ApplyTransform();
+            }
+            if (fovChanged || rigCam.showRuntimeRigVisual != prevRigVis || rigCam.showRuntimeFovFrustum != prevFovVis)
+            {
+                rigCam.SaveRigVisualSettings();
+            }
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("1. VỊ TRÍ & GÓC CAMERA (ROBOT)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        bool poseChanged = false;
+        poseChanged |= DrawCalibNumericSliderRow("Tx (X)", ref calib.camPosRobotX_mm, -500f, 1600f, 1f, 10f, "mm");
+        poseChanged |= DrawCalibNumericSliderRow("Ty (Y)", ref calib.camPosRobotY_mm, -800f, 800f, 1f, 10f, "mm");
+        poseChanged |= DrawCalibNumericSliderRow("Tz (Cao)", ref calib.camPosRobotZ_mm, 500f, 2500f, 1f, 10f, "mm");
+
+        GUILayout.Space(2);
+        poseChanged |= DrawCalibNumericSliderRow("Roll", ref calib.camRotRollDeg, -45f, 45f, 1f, 5f, "°");
+        poseChanged |= DrawCalibNumericSliderRow("Pitch", ref calib.camRotPitchDeg, -45f, 45f, 1f, 5f, "°");
+        poseChanged |= DrawCalibNumericSliderRow("Yaw", ref calib.camRotYawDeg, -180f, 180f, 1f, 15f, "°");
+
+        GUILayout.Space(2);
+        poseChanged |= DrawCalibNumericSliderRow("Z bàn", ref calib.tableHeightMm, -150f, 300f, 1f, 10f, "mm");
+        poseChanged |= DrawCalibNumericSliderRow("Z gốc Rob", ref calib.robotGlobalOriginZ_mm, 500f, 1800f, 5f, 25f, "mm");
+
+        if (poseChanged)
+        {
+            calib.RebuildMatrixFromPoseParams(syncScene: true, reloadPointCloud: false);
+        }
+
+        GUILayout.Space(4);
+        bool prevUse = calib.useCalibratedTransform;
+        calib.useCalibratedTransform = GUILayout.Toggle(calib.useCalibratedTransform, " Áp dụng ma trận 4x4 khi nạp .PLY", AntigravityUITheme.StyleToggle);
+        if (calib.useCalibratedTransform != prevUse)
+        {
+            calib.SavePoseParamsToPrefs();
+            if (plyLoader != null) plyLoader.ReloadFullPointCloud();
+        }
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Áp dụng & Tải lại", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
+        {
+            calib.RebuildMatrixFromPoseParams(syncScene: true, reloadPointCloud: true);
+            RunDiagnostics();
+        }
+        if (GUILayout.Button("Mặc định", AntigravityUITheme.StyleButton, GUILayout.Width(90), GUILayout.Height(26)))
+        {
+            calib.ResetToNominalRig(reloadCloud: true);
+            RunDiagnostics();
+        }
+        GUILayout.EndHorizontal();
+
+        float rigHeightCm = calib.camPosRobotZ_mm * 0.1f;
+        float rigDistCm = Mathf.Abs(calib.robotGlobalOriginZ_mm - calib.camPosRobotX_mm) * 0.1f;
+        GUILayout.Label($"Giá treo: Cao {rigHeightCm:F1} cm | Cách trục {rigDistCm:F1} cm | Lệch Y {calib.camPosRobotY_mm * 0.1f:F1} cm", AntigravityUITheme.StyleLabelMuted);
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("2. MA TRẬN 4x4 (CAM -> ROBOT, mm)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        double[,] M = calib.GetCameraToRobotMatrix();
+        for (int r = 0; r < 4; r++)
+        {
+            string rowStr = string.Format(CultureInfo.InvariantCulture,
+                "[ {0,7:F4}  {1,7:F4}  {2,7:F4} | {3,7:F1} ]",
+                M[r, 0], M[r, 1], M[r, 2], M[r, 3]);
+            GUILayout.Label(rowStr, r < 3 ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelMuted);
+        }
+
+        GUILayout.Space(3);
+        string prevJsonPath = calib.calibrationJsonPath;
+        calib.calibrationJsonPath = GUILayout.TextField(calib.calibrationJsonPath, AntigravityUITheme.StyleTextField);
+        if (calib.calibrationJsonPath != prevJsonPath) calib.SavePoseParamsToPrefs();
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Nạp JSON", AntigravityUITheme.StyleButton, GUILayout.Height(25)))
+        {
+            string resolved = calib.ResolveCalibrationPath(calib.calibrationJsonPath);
+            calib.LoadCalibrationFromJson(resolved);
+        }
+        if (GUILayout.Button("Lưu JSON", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(25)))
+        {
+            calib.ExportCalibrationTemplateJson();
+        }
+        GUILayout.EndHorizontal();
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("3. KIỂM CHỨNG & BÙ LỆCH (CAM -> ROBOT)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        Vector3 prevVerifyCam = calib.verifyCameraPointMm;
+        calib.verifyCameraPointMm = DrawVector3InputRow("Điểm Cam:", calib.verifyCameraPointMm);
+        Vector3 livePredRob = calib.CameraMmToRobotMm(calib.verifyCameraPointMm);
+        GUILayout.Label($"Quy đổi Robot: X={livePredRob.x:F1}  Y={livePredRob.y:F1}  Z={livePredRob.z:F1} mm", AntigravityUITheme.StyleLabelGreen);
+
+        Vector3 prevVerifyRob = calib.verifyRobotTouchedMm;
+        calib.verifyRobotTouchedMm = DrawVector3InputRow("TCP chạm:", calib.verifyRobotTouchedMm);
+        if (calib.verifyCameraPointMm != prevVerifyCam || calib.verifyRobotTouchedMm != prevVerifyRob)
+        {
+            calib.SavePoseParamsToPrefs();
+        }
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Lấy TCP", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        {
+            if (tcpTransform != null)
+            {
+                Vector3 tcpRobMm = globalReference != null
+                    ? globalReference.InverseTransformPoint(tcpTransform.position) * 1000f
+                    : tcpTransform.position * 1000f;
+                calib.verifyRobotTouchedMm = tcpRobMm;
+                calib.SavePoseParamsToPrefs();
+            }
+        }
+        if (GUILayout.Button("Tính sai số", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        {
+            calib.RunTouchPointVerification();
+        }
+        if (GUILayout.Button("Bù tịnh tiến", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24)))
+        {
+            calib.AutoCompensateTranslationFromTouchPoint();
+        }
+        GUILayout.EndHorizontal();
+        GUILayout.Label(calib.touchVerificationSummary, AntigravityUITheme.StyleLabelCyan);
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("4. HIỆU CHUẨN ĐA ĐIỂM (>= 3 CẶP)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("+ Thêm cặp", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
+        {
+            calib.AddCurrentVerifyPairToList();
+        }
+        if (GUILayout.Button("Giải 4x4 (SVD)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24)))
+        {
+            calib.SolveRigidCalibrationFromPairs();
+        }
+        if (GUILayout.Button("Xóa", AntigravityUITheme.StyleButton, GUILayout.Width(50), GUILayout.Height(24)))
+        {
+            calib.calibrationPairs.Clear();
+            calib.SavePoseParamsToPrefs();
+            calib.multiPointCalibStatus = "Đã xóa danh sách.";
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label(calib.multiPointCalibStatus, AntigravityUITheme.StyleLabelCyan);
+        for (int i = 0; i < calib.calibrationPairs.Count; i++)
+        {
+            var pr = calib.calibrationPairs[i];
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"{pr.label}: ({pr.cameraMm.x:F0},{pr.cameraMm.y:F0},{pr.cameraMm.z:F0}) -> ({pr.robotMm.x:F0},{pr.robotMm.y:F0},{pr.robotMm.z:F0}) | {pr.residualMm:F1}mm",
+                AntigravityUITheme.StyleLabelMuted);
+            if (GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(20), GUILayout.Height(18)))
+            {
+                calib.calibrationPairs.RemoveAt(i);
+                calib.SavePoseParamsToPrefs();
+                break;
+            }
+            GUILayout.EndHorizontal();
+        }
+        GUILayout.EndVertical();
+
+        GUILayout.Space(6);
+        GUILayout.Label("5. NGÂN SÁCH SAI SỐ (<= 5 mm)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        bool budgetChanged = false;
+        budgetChanged |= DrawCalibNumericSliderRow("Cam-Bàn", ref calib.cameraToTableRmsMm, 0f, 5f, 0.1f, 0.5f, "mm");
+        budgetChanged |= DrawCalibNumericSliderRow("Tay-Mắt t", ref calib.handEyeTransErrorMm, 0f, 5f, 0.1f, 0.5f, "mm");
+        budgetChanged |= DrawCalibNumericSliderRow("Tay-Mắt r", ref calib.handEyeRotErrorDeg, 0f, 3f, 0.1f, 0.5f, "°");
+        budgetChanged |= DrawCalibNumericSliderRow("TCP", ref calib.tcpCalibrationErrorMm, 0f, 5f, 0.1f, 0.5f, "mm");
+        budgetChanged |= DrawCalibNumericSliderRow("Biên AI", ref calib.garmentEdgeErrorMm, 0f, 5f, 0.1f, 0.5f, "mm");
+        if (budgetChanged) calib.SavePoseParamsToPrefs();
+
+        float rss = calib.GetTotalErrorBudgetRssMm();
+        float wc = calib.GetTotalErrorBudgetWorstCaseMm();
+        GUILayout.Label($"RSS = {rss:F2} mm | Xấu nhất = {wc:F2} mm",
+            rss <= 5f ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelRed);
+        GUILayout.EndVertical();
+
+        GUILayout.EndVertical();
     }
 }

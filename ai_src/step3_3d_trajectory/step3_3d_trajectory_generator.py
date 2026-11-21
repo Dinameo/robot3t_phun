@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 BƯỚC 3, 4 & 5: CHIẾU 2D-SANG-3D, ƯỚC LƯỢNG PHÁP TUYẾN BỀ MẶT & TỰ ĐỘNG SINH QUỸ ĐẠO PHUN 3D
@@ -28,7 +28,7 @@ import numpy as np
 from ultralytics import YOLO
 
 import sys
-sys.path.append("/home/nhan/RB3t_PJ/ai_src/step1_auto_label")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "step1_auto_label"))
 from step1_auto_labeling_3d import AutoLabeling3D
 
 
@@ -41,13 +41,19 @@ class Step3TrajectoryPipeline3D:
 
     def __init__(
         self,
-        seg_weight="/home/nhan/RB3t_PJ/ai_src/step2_train_yolo/weights/best_yolo11_seg.pt",
-        pose_weight="/home/nhan/RB3t_PJ/ai_src/step2_train_yolo/weights/best_yolo11_pose.pt",
+        seg_weight=None,
+        pose_weight=None,
         standoff_mm=150.0,
         spray_cone_sigma_mm=22.0,
         base_speed_mms=220.0,
         feather_speed_mms=450.0,
     ):
+        weights_dir = Path(__file__).resolve().parents[1] / "step2_train_yolo" / "weights"
+        seg_weight = Path(seg_weight) if seg_weight else weights_dir / "best_yolo11_seg.pt"
+        pose_weight = Path(pose_weight) if pose_weight else weights_dir / "best_yolo11_pose.pt"
+        for weight in (seg_weight, pose_weight):
+            if not weight.is_file():
+                raise FileNotFoundError(f"Model weight missing: {weight}")
         self.core_3d = AutoLabeling3D()
         self.model_seg = YOLO(str(seg_weight))
         self.model_pose = YOLO(str(pose_weight))
@@ -57,7 +63,7 @@ class Step3TrajectoryPipeline3D:
         self.base_speed_mms = float(base_speed_mms)
         self.feather_speed_mms = float(feather_speed_mms)
 
-        self.out_dir = Path("/home/nhan/RB3t_PJ/ai_src/step3_3d_trajectory/outputs")
+        self.out_dir = Path(__file__).resolve().parent / "outputs"
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -97,6 +103,10 @@ class Step3TrajectoryPipeline3D:
                     "confidence": round(float(kpts_conf[idx]), 4),
                 }
 
+        if not np.any(mask_bin):
+            raise ValueError("Khong nhan dien duoc vung quan; khong sinh quy dao.")
+        if len(keypoints_2d) != 12 or any(k["confidence"] < 0.25 for k in keypoints_2d.values()):
+            raise ValueError("Khong du 12 moc tin cay; hay chup lai hoac kiem tra model.")
         return mask_bin, keypoints_2d, ai_ms
 
     # ------------------------------------------------------------------
@@ -124,7 +134,7 @@ class Step3TrajectoryPipeline3D:
         elif len(valid_pts) > 0:
             pos_3d = np.median(valid_pts, axis=0).astype(np.float64)
         else:
-            pos_3d = np.array([0.0, 0.0, 700.0], dtype=np.float64)
+            raise ValueError(f"Khong co du lieu 3D hop le tai pixel ({u}, {v}); khong noi suy gia.")
 
         # Ước lượng pháp tuyến vi mô bằng SVD/PCA
         if len(valid_pts) >= 12:
@@ -592,7 +602,7 @@ class Step3TrajectoryPipeline3D:
 
         t_start = time.perf_counter()
         xyz, bgr_ply, _ = self.core_3d.load_organized_ply(ply_path)
-        bgr = cv2.imread(str(img_path)) if img_path.exists() else bgr_ply
+        bgr = bgr_ply
 
         # Bước 2 Output: Chạy AI YOLO11-seg & YOLO11-pose
         mask_bin, keypoints_2d, ai_ms = self.run_ai_perception(bgr)
