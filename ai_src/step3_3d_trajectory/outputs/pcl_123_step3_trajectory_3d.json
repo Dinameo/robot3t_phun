@@ -1,7 +1,7 @@
 {
   "sample": "pcl_123",
-  "ai_inference_ms": 616.15,
-  "total_pipeline_time_s": 4.016,
+  "ai_inference_ms": 6179.06,
+  "total_pipeline_time_s": 9.03,
   "standoff_distance_mm": 150.0,
   "landmarks_3d": {
     "waist_left": {
