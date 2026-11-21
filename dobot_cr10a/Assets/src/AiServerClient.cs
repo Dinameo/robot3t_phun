@@ -82,6 +82,7 @@ public class AiServerClient : MonoBehaviour
         public float time_generation_s;
         public string trajectory_csv;
         public string preview_image;
+        public string camera_image;
         public string landmarks_json;
         public string revision;
         public bool simulation_only;
@@ -91,6 +92,8 @@ public class AiServerClient : MonoBehaviour
         public bool IsSuccess => status == "SUCCESS" || string.Equals(status, "OK", StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool hasLoadedSettings = false;
+
     private void Awake()
     {
         if (ikController == null) ikController = GetComponent<DobotCR10AIKController>() ?? FindAnyObjectByType<DobotCR10AIKController>();
@@ -99,23 +102,32 @@ public class AiServerClient : MonoBehaviour
 
     private void Start()
     {
+        if (!hasLoadedSettings) LoadSettings();
         CheckServerStatus();
         if (autoModeEnabled) StartAutoListener();
     }
 
     private void OnEnable()
     {
+        if (!hasLoadedSettings) LoadSettings();
         if (autoModeEnabled) StartAutoListener();
     }
 
     private void OnDisable()
     {
+        if (Application.isPlaying && hasLoadedSettings) SaveSettings();
         StopAutoListener();
     }
 
     private void OnDestroy()
     {
+        if (Application.isPlaying && hasLoadedSettings) SaveSettings();
         StopAutoListener();
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (hasLoadedSettings) SaveSettings();
     }
 
     private void Update()
@@ -240,7 +252,7 @@ public class AiServerClient : MonoBehaviour
             AiDetectionResult result = JsonUtility.FromJson<AiDetectionResult>(jsonText);
             if (result != null && result.IsSuccess)
             {
-                lastStatusMessage = $"🟢 [TỰ ĐỘNG] Model vừa đẩy mẫu [{result.sample}] ({result.waypoints_count} điểm)!";
+                lastStatusMessage = $"[Tự động] Nhận mẫu {result.sample} ({result.waypoints_count} điểm)";
                 ProcessAiResult(result, null);
                 Debug.Log($"[AI Auto Receive] Đã tự động cập nhật phôi & quỹ đạo cho mẫu [{result.sample}]!");
             }
@@ -257,16 +269,19 @@ public class AiServerClient : MonoBehaviour
         PlayerPrefs.SetInt("CR10A_AI_Server_Port", serverPort);
         PlayerPrefs.SetInt("CR10A_AI_Protocol", (int)protocol);
         PlayerPrefs.SetInt("CR10A_AI_AutoMode", autoModeEnabled ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_AI_AutoListenPort", autoListenPort);
         PlayerPrefs.Save();
     }
 
     public void LoadSettings()
     {
         serverIp = PlayerPrefs.GetString("CR10A_AI_Server_IP", "127.0.0.1");
+        protocol = (ProtocolType)PlayerPrefs.GetInt("CR10A_AI_Protocol", (int)ProtocolType.UDP);
         int defaultPort = (protocol == ProtocolType.UDP) ? 5005 : 5000;
         serverPort = PlayerPrefs.GetInt("CR10A_AI_Server_Port", defaultPort);
-        protocol = (ProtocolType)PlayerPrefs.GetInt("CR10A_AI_Protocol", (int)ProtocolType.UDP);
         autoModeEnabled = PlayerPrefs.GetInt("CR10A_AI_AutoMode", 0) == 1;
+        autoListenPort = PlayerPrefs.GetInt("CR10A_AI_AutoListenPort", 5006);
+        hasLoadedSettings = true;
     }
 
     public void SetProtocol(ProtocolType newProtocol)
@@ -338,13 +353,13 @@ public class AiServerClient : MonoBehaviour
             success = status != null && status.model_ready;
             isServerOnline = success;
             msg = status == null ? "Phản hồi server không hợp lệ" : !status.model_ready ?
-                (status.loading ? "Server đang nạp model AI; chờ rồi kiểm tra lại." : "Lỗi nạp model: " + status.model_error) : $"🟢 AI Server UDP trực tuyến ({host}:{port})";
+                (status.loading ? "Server đang nạp model AI..." : "Lỗi nạp model: " + status.model_error) : $"Server UDP trực tuyến ({host}:{port})";
         }
         else
         {
             success = false;
             isServerOnline = false;
-            msg = $"🔴 Không phản hồi UDP tại {host}:{port}. Hãy chạy run_ai_server.bat!";
+            msg = $"Không phản hồi UDP ({host}:{port}). Chạy START_AI_SERVER.cmd.";
         }
 
         lastStatusMessage = msg;
@@ -364,13 +379,13 @@ public class AiServerClient : MonoBehaviour
                 AiStatusResponse status = null;
                 try { status = JsonUtility.FromJson<AiStatusResponse>(req.downloadHandler.text); } catch { }
                 isServerOnline = status != null && status.model_ready;
-                lastStatusMessage = !isServerOnline ? "Server chưa sẵn sàng: " + (status != null ? status.model_error : "JSON không hợp lệ") : $"🟢 AI Server HTTP trực tuyến ({serverIp}:{serverPort})";
+                lastStatusMessage = !isServerOnline ? "Server chưa sẵn sàng: " + (status != null ? status.model_error : "JSON không hợp lệ") : $"Server HTTP trực tuyến ({serverIp}:{serverPort})";
                 onComplete?.Invoke(isServerOnline, lastStatusMessage);
             }
             else
             {
                 isServerOnline = false;
-                lastStatusMessage = $"🔴 Không kết nối được HTTP {serverIp}:{serverPort} ({req.error})";
+                lastStatusMessage = $"Lỗi kết nối HTTP {serverIp}:{serverPort} ({req.error})";
                 onComplete?.Invoke(false, lastStatusMessage);
             }
         }
@@ -489,7 +504,7 @@ public class AiServerClient : MonoBehaviour
     private IEnumerator SendCustomDrawUdpOrHttpRoutine(string jsonPayload, string sample, Action<AiDetectionResult> onComplete)
     {
         isProcessing = true;
-        lastStatusMessage = $"🟡 Đang ánh xạ nét vẽ 2D -> 3D Point Cloud trên mẫu [{sample}]...";
+        lastStatusMessage = $"Đang ánh xạ 2D -> 3D [{sample}]...";
         string host = serverIp.Trim();
         int port = serverPort;
 
@@ -561,7 +576,7 @@ public class AiServerClient : MonoBehaviour
     private IEnumerator TriggerUdpRoutine(string size, string sample, Action<AiDetectionResult> onComplete)
     {
         isProcessing = true;
-        lastStatusMessage = $"🟡 [UDP] Đang gửi lệnh tới {serverIp}:{serverPort} kích hoạt AI mẫu {sample} (cỡ {size})...";
+        lastStatusMessage = $"[UDP] Đang nhận diện {sample} (Size {size})...";
 
         string host = serverIp.Trim();
         int port = serverPort;
@@ -619,7 +634,7 @@ public class AiServerClient : MonoBehaviour
         else
         {
             isServerOnline = false;
-            lastStatusMessage = $"🔴 Lỗi gửi UDP: {resultText.Substring(6)}";
+            lastStatusMessage = $"Lỗi UDP: {resultText.Substring(6)}";
             onComplete?.Invoke(null);
         }
     }
@@ -627,7 +642,7 @@ public class AiServerClient : MonoBehaviour
     private IEnumerator TriggerHttpRoutine(string size, string sample, Action<AiDetectionResult> onComplete)
     {
         isProcessing = true;
-        lastStatusMessage = $"🟡 [HTTP] Đang kích hoạt AI nhận dạng phôi mẫu {sample} (cỡ {size})...";
+        lastStatusMessage = $"[HTTP] Đang nhận diện {sample} (Size {size})...";
 
         string url = $"http://{serverIp.Trim()}:{serverPort}/api/detect";
         string jsonBody = JsonUtility.ToJson(new DetectionRequest {
@@ -663,7 +678,7 @@ public class AiServerClient : MonoBehaviour
             else
             {
                 isServerOnline = false;
-                lastStatusMessage = $"🔴 Lỗi kết nối HTTP: {req.error}";
+                lastStatusMessage = $"Lỗi HTTP: {req.error}";
                 onComplete?.Invoke(null);
             }
         }
@@ -684,6 +699,15 @@ public class AiServerClient : MonoBehaviour
                 if (result.frame_only)
                 {
                     ikController.SelectSampleByFullPath(result.pointcloud_ply);
+                    string camImg = !string.IsNullOrEmpty(result.camera_image) ? result.camera_image : result.preview_image;
+                    if (!string.IsNullOrEmpty(camImg))
+                    {
+                        ikController.SetRealCameraImageFromPath(camImg, result.sample);
+                    }
+                    else
+                    {
+                        ikController.RefreshRealCameraImageForCurrentSample();
+                    }
                     RobotCameraController camera = FindAnyObjectByType<RobotCameraController>();
                     if (camera != null) camera.FocusGarment();
                     lastStatusMessage = "Đã chụp camera thật: " + result.sample + ". Chỉ xem phôi; chưa có quỹ đạo.";
@@ -696,6 +720,14 @@ public class AiServerClient : MonoBehaviour
                     ikController.customPlyPath = result.pointcloud_ply;
                     ikController.ReloadPointCloudFromPath(result.pointcloud_ply);
                 }
+                if (!string.IsNullOrEmpty(result.camera_image))
+                {
+                    ikController.SetRealCameraImageFromPath(result.camera_image, result.sample);
+                }
+                else
+                {
+                    ikController.RefreshRealCameraImageForCurrentSample();
+                }
                 ikController.LoadLandmarksAndSegmentationForSample(result.sample, false, result.landmarks_json);
                 if (!string.IsNullOrEmpty(result.trajectory_csv))
                 {
@@ -705,7 +737,7 @@ public class AiServerClient : MonoBehaviour
             }
 
             if (string.IsNullOrEmpty(detSize)) detSize = "S";
-            lastStatusMessage = $"✓ AI nhận diện [{sName}] ➔ SIZE QUẦN: {detSize} | Tự động đổi Mẫu Phun sang SIZE {detSize} ({result.waypoints_count} điểm, {result.time_generation_s:F2}s)";
+            lastStatusMessage = $"AI [{sName}]: Size {detSize} ({result.waypoints_count} điểm, {result.time_generation_s:F2}s)";
             onComplete?.Invoke(result);
         }
         else

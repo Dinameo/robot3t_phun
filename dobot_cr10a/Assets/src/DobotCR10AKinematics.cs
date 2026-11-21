@@ -71,6 +71,174 @@ public static class DobotCR10AKinematics
     // Trọng số lựa chọn nghiệm tối ưu theo báo cáo (ưu tiên ổn định khớp 1, 2)
     private static readonly double[] JointWeights = { 1.2, 1.2, 1.0, 0.8, 0.8, 0.5 };
 
+    // Giới hạn cơ khí 6 khớp Dobot CR10A (Datasheet: J1/J2/J4/J5/J6 = ±360°, J3 = ±160°)
+    public static readonly double[] JointMinDeg = { -360.0, -360.0, -160.0, -360.0, -360.0, -360.0 };
+    public static readonly double[] JointMaxDeg = {  360.0,  360.0,  160.0,  360.0,  360.0,  360.0 };
+
+    /// <summary>
+    /// Kiểm tra bộ 6 góc khớp (độ) có nằm trong giới hạn cơ khí Dobot CR10A hay không.
+    /// </summary>
+    public static bool IsWithinJointLimits(double[] jointsDeg, out int violatedJointIndex, out double violatedAngleDeg)
+    {
+        violatedJointIndex = -1;
+        violatedAngleDeg = 0.0;
+        if (jointsDeg == null || jointsDeg.Length < 6) return false;
+        for (int i = 0; i < 6; i++)
+        {
+            if (jointsDeg[i] < JointMinDeg[i] || jointsDeg[i] > JointMaxDeg[i])
+            {
+                violatedJointIndex = i;
+                violatedAngleDeg = jointsDeg[i];
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static bool IsWithinJointLimits(float[] jointsDeg, out int violatedJointIndex, out float violatedAngleDeg)
+    {
+        violatedJointIndex = -1;
+        violatedAngleDeg = 0f;
+        if (jointsDeg == null || jointsDeg.Length < 6) return false;
+        for (int i = 0; i < 6; i++)
+        {
+            if (jointsDeg[i] < JointMinDeg[i] || jointsDeg[i] > JointMaxDeg[i])
+            {
+                violatedJointIndex = i;
+                violatedAngleDeg = jointsDeg[i];
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Tính tọa độ 3D của toàn bộ các khớp [Base, J1/J2, J3, J4, J5, Flange, TCP] trong hệ Robot Global (mm)
+    /// để kiểm tra va chạm 3D thực tế giữa toàn bộ cánh tay robot với bàn thao tác / khuôn / phôi.
+    /// </summary>
+    public static Vector3[] ForwardAllJointPositionsRobotMm(
+        float[] jointsRad,
+        double dtoolMm = D_TOOL_DEFAULT,
+        double toolOffsetX = 0.0,
+        double toolOffsetY = 0.0)
+    {
+        Vector3[] pts = new Vector3[7];
+        pts[0] = Vector3.zero;
+        if (jointsRad == null || jointsRad.Length < 6) return pts;
+
+        double[,] m1 = DhMatrix(jointsRad[0], D1, 0.0, Math.PI / 2.0);
+        double[,] m2 = DhMatrix(jointsRad[1] + Math.PI / 2.0, D2, A2, 0.0);
+        double[,] m3 = DhMatrix(jointsRad[2], D3, A3, 0.0);
+        double[,] m4 = DhMatrix(jointsRad[3] - Math.PI / 2.0, D4, 0.0, -Math.PI / 2.0);
+        double[,] m5 = DhMatrix(jointsRad[4], D5, 0.0, Math.PI / 2.0);
+        double[,] m6 = DhMatrix(jointsRad[5], D6, 0.0, 0.0);
+
+        double[,] t1 = m1;
+        double[,] t2 = Multiply4(t1, m2);
+        double[,] t3 = Multiply4(t2, m3);
+        double[,] t4 = Multiply4(t3, m4);
+        double[,] t5 = Multiply4(t4, m5);
+        double[,] t6 = Multiply4(t5, m6);
+
+        // Chuyển DH -> Robot Global Unity (X_u = -X_dh, Y_u = Y_dh, Z_u = Z_dh)
+        pts[1] = new Vector3((float)-t1[0, 3], (float)t1[1, 3], (float)t1[2, 3]);
+        pts[2] = new Vector3((float)-t2[0, 3], (float)t2[1, 3], (float)t2[2, 3]);
+        pts[3] = new Vector3((float)-t3[0, 3], (float)t3[1, 3], (float)t3[2, 3]);
+        pts[4] = new Vector3((float)-t4[0, 3], (float)t4[1, 3], (float)t4[2, 3]);
+        pts[5] = new Vector3((float)-t6[0, 3], (float)t6[1, 3], (float)t6[2, 3]);
+
+        double tcpX_dh = t6[0, 3] + toolOffsetX * t6[0, 0] + toolOffsetY * t6[0, 1] + dtoolMm * t6[0, 2];
+        double tcpY_dh = t6[1, 3] + toolOffsetX * t6[1, 0] + toolOffsetY * t6[1, 1] + dtoolMm * t6[1, 2];
+        double tcpZ_dh = t6[2, 3] + toolOffsetX * t6[2, 0] + toolOffsetY * t6[2, 1] + dtoolMm * t6[2, 2];
+        pts[6] = new Vector3((float)-tcpX_dh, (float)tcpY_dh, (float)tcpZ_dh);
+
+        return pts;
+    }
+
+    /// <summary>
+    /// Xây dựng góc định hướng 6-DOF chuẩn (Roll, Pitch, Yaw độ) từ Vector Pháp Tuyến Bề Mặt 3D (hệ Robot)
+    /// và hướng tiếp tuyến quỹ đạo:
+    /// - Trục Z đầu súng z_tool = -normal (vuông góc thẳng vào mặt vải 3D)
+    /// - Giới hạn góc nghiêng tối đa so với trục đứng <= maxTiltDeg (ràng buộc θ <= θ_max)
+    /// - Trục X trực giao hóa theo hướng di chuyển / ống quần.
+    /// </summary>
+    public static Vector3 SurfaceNormalToRobotRpyDeg(Vector3 surfaceNormalRobot, Vector3 pathTangentRobot, float maxTiltDeg = 30f, Vector3? referenceUpRobot = null)
+    {
+        Vector3 n = surfaceNormalRobot.sqrMagnitude > 1e-6f ? surfaceNormalRobot.normalized : Vector3.forward;
+        Vector3 refUp = referenceUpRobot.HasValue && referenceUpRobot.Value.sqrMagnitude > 1e-6f
+            ? referenceUpRobot.Value.normalized
+            : new Vector3(0f, 0f, 1f);
+
+        // Giới hạn góc nghiêng của pháp tuyến so với trục chuẩn <= maxTiltDeg
+        float tiltAngle = Vector3.Angle(n, refUp);
+        if (tiltAngle > maxTiltDeg && maxTiltDeg > 0.1f)
+        {
+            Vector3 rotAxis = Vector3.Cross(refUp, n);
+            if (rotAxis.sqrMagnitude > 1e-6f)
+            {
+                n = Quaternion.AngleAxis(maxTiltDeg, rotAxis.normalized) * refUp;
+                n.Normalize();
+            }
+        }
+
+        // Chuyển n và tangent từ Robot Unity (X_u, Y_u, Z_u) sang DH Robotics (X_dh = -X_u, Y_dh = Y_u, Z_dh = Z_u)
+        Vector3 nDh = new Vector3(-n.x, n.y, n.z).normalized;
+        Vector3 zTool = -nDh; // trục phun cắm vào bề mặt
+
+        Vector3 tRef = pathTangentRobot.sqrMagnitude > 1e-6f ? pathTangentRobot.normalized : new Vector3(1f, 0f, 0f);
+        Vector3 tDh = new Vector3(-tRef.x, tRef.y, tRef.z).normalized;
+
+        Vector3 yTool = Vector3.Cross(zTool, tDh);
+        if (yTool.sqrMagnitude < 1e-5f)
+        {
+            yTool = Vector3.Cross(zTool, Vector3.right);
+            if (yTool.sqrMagnitude < 1e-5f) yTool = Vector3.Cross(zTool, Vector3.up);
+        }
+        yTool.Normalize();
+        Vector3 xTool = Vector3.Cross(yTool, zTool).normalized;
+
+        // Trích xuất Tait-Bryan Z-Y-X (Roll, Pitch, Yaw) từ ma trận Rdh = [xTool, yTool, zTool]
+        double r11 = xTool.x, r21 = xTool.y, r31 = xTool.z;
+        double r32 = yTool.z, r33 = zTool.z;
+
+        double pitch = Math.Atan2(-r31, Math.Sqrt(r11 * r11 + r21 * r21));
+        double roll, yaw;
+        if (Math.Abs(Math.Cos(pitch)) > 1e-5)
+        {
+            roll = Math.Atan2(r32, r33);
+            yaw = Math.Atan2(r21, r11);
+        }
+        else
+        {
+            roll = Math.Atan2(-yTool.y, yTool.x);
+            yaw = 0.0;
+        }
+
+        return new Vector3(
+            (float)(roll * 180.0 / Math.PI),
+            (float)(pitch * 180.0 / Math.PI),
+            (float)(yaw * 180.0 / Math.PI)
+        );
+    }
+
+    /// <summary>
+    /// Trích xuất vector trục phun z_tool (đơn vị, trong hệ Robot Global) từ góc (Roll, Pitch, Yaw độ)
+    /// </summary>
+    public static Vector3 RpyToSprayAxisRobot(float rollDeg, float pitchDeg, float yawDeg)
+    {
+        double cr = Math.Cos(rollDeg * Math.PI / 180.0), sr = Math.Sin(rollDeg * Math.PI / 180.0);
+        double cp = Math.Cos(pitchDeg * Math.PI / 180.0), sp = Math.Sin(pitchDeg * Math.PI / 180.0);
+        double cy = Math.Cos(yawDeg * Math.PI / 180.0), sy = Math.Sin(yawDeg * Math.PI / 180.0);
+
+        // Cột 3 (z6) của ma trận R_dh = Rz * Ry * Rx
+        double zDhX = cy * sp * cr + sy * sr;
+        double zDhY = sy * sp * cr - cy * sr;
+        double zDhZ = cp * cr;
+
+        // Chuyển DH -> Robot Global Unity: X_u = -X_dh
+        return new Vector3((float)-zDhX, (float)zDhY, (float)zDhZ).normalized;
+    }
+
     // =========================================================================
     // 2. BÀI TOÁN ĐỘNG HỌC THUẬN (FORWARD KINEMATICS - FK)
     // =========================================================================
@@ -374,6 +542,13 @@ public static class DobotCR10AKinematics
                         WrapPi(q5),
                         WrapPi(q6)
                     };
+
+                    double[] qSolDeg = new double[6];
+                    for (int i = 0; i < 6; i++) qSolDeg[i] = qSol[i] * (180.0 / Math.PI);
+                    if (!IsWithinJointLimits(qSolDeg, out _, out _))
+                    {
+                        continue;
+                    }
 
                     // Kiểm tra sai số FK đối chiếu thực nghiệm
                     double[,] Tcheck = ForwardFlangeDH(qSol);

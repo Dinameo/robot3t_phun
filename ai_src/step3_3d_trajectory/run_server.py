@@ -88,8 +88,10 @@ class Service:
             try:
                 if command in ('CAPTURE_DETECT','CAPTURE_ONLY','CAPTURE_PREVIEW'):
                     sample,ply=self.capture.capture()
+                    cam_img=self.dataset/'_2D'/(sample+'.png')
+                    cam_img_str=str(cam_img) if cam_img.is_file() else ''
                     if command in ('CAPTURE_ONLY','CAPTURE_PREVIEW'):
-                        return {'status':'SUCCESS','sample':sample,'pointcloud_ply':str(ply),'trajectory_csv':'','frame_only':True,'message':'Da chup camera that; hinh hoc dang hien trong he quy chieu mo phong.','simulation_only':True}
+                        return {'status':'SUCCESS','sample':sample,'pointcloud_ply':str(ply),'camera_image':cam_img_str,'preview_image':cam_img_str,'trajectory_csv':'','frame_only':True,'message':'Da chup camera that; hinh hoc dang hien trong he quy chieu mo phong.','simulation_only':True}
                     if self.calibration is None and not req.get('preview_nominal_rig',False):
                         raise ValueError(f'Da luu anh {sample}. Can hieu chuan camera-robot truoc khi sinh quy dao tu camera that. File: {ply}')
                 else: sample=self.register_sample(req)
@@ -114,7 +116,9 @@ class Service:
                 seg_dest=self.output/(sample+'_'+revision+'_landmarks_seg.json')
                 if not seg.is_file(): raise FileNotFoundError('Missing landmarks/segmentation output.')
                 shutil.copy2(seg,seg_dest)
-                result.update(trajectory_csv=str(dest),landmarks_json=str(seg_dest),revision=revision,simulation_only=True)
+                cam_candidates=[self.dataset/'_2D'/(sample+'.png'),self.dataset/'_2D'/('image_'+sample.replace('pcl_','')+'.png')]
+                cam_img_path=next((str(p) for p in cam_candidates if p.is_file()),'')
+                result.update(trajectory_csv=str(dest),landmarks_json=str(seg_dest),camera_image=cam_img_path,revision=revision,simulation_only=True)
                 if self.calibration is not None:
                     from frame_io import load_frame,save_frame
                     from calibration import camera_to_robot,robot_to_legacy_view_camera

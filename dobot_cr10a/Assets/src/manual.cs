@@ -81,6 +81,8 @@ public class manual : MonoBehaviour
     private bool isHomingStandalone = false;
     private readonly float[] standaloneVelocities = new float[6];
 
+    private bool hasLoadedSettings = false;
+
     private void Awake()
     {
         EnsureOffsetsInitialized();
@@ -88,14 +90,38 @@ public class manual : MonoBehaviour
         LoadSettings();
     }
 
+    private void OnEnable()
+    {
+        EnsureOffsetsInitialized();
+        if (!hasLoadedSettings) LoadSettings();
+        if (!Application.isPlaying)
+        {
+            ResetAllSlidersImmediate();
+        }
+    }
+
     private void OnDisable()
     {
-        SaveSettings();
+        if (Application.isPlaying && hasLoadedSettings)
+        {
+            SaveSettings();
+        }
     }
 
     private void OnDestroy()
     {
-        SaveSettings();
+        if (Application.isPlaying && hasLoadedSettings)
+        {
+            SaveSettings();
+        }
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (hasLoadedSettings)
+        {
+            SaveSettings();
+        }
     }
 
     public void SaveSettings()
@@ -106,6 +132,15 @@ public class manual : MonoBehaviour
         PlayerPrefs.SetInt("Manual_RibbonExpanded", ribbonExpanded ? 1 : 0);
         PlayerPrefs.SetInt("Manual_RibbonTab", ribbonTab);
         PlayerPrefs.SetInt("Manual_AdaptiveTilt", useAdaptiveTilt ? 1 : 0);
+
+        // Nếu IKController đang hoạt động, ưu tiên giữ đồng bộ offset đầu phun từ IKController để tránh ghi đè giá trị cũ
+        if (ikController == null) ikController = GetComponent<DobotCR10AIKController>();
+        if (ikController != null && ikController.enabled)
+        {
+            toolLengthMm = ikController.toolLength;
+            toolOffsetX = ikController.toolOffsetX;
+            toolOffsetY = ikController.toolOffsetY;
+        }
 
         PlayerPrefs.SetFloat("CR10A_ToolOffsetZ", toolLengthMm);
         PlayerPrefs.SetFloat("CR10A_ToolOffsetX", toolOffsetX);
@@ -138,6 +173,7 @@ public class manual : MonoBehaviour
         toolOffsetYText = toolOffsetY.ToString("F1", CultureInfo.InvariantCulture);
 
         ApplyToolOffsetToTransforms();
+        hasLoadedSettings = true;
     }
 
     public void SetToolOffset(float z_mm, float x_mm = 0f, float y_mm = 0f)
@@ -175,15 +211,6 @@ public class manual : MonoBehaviour
         if (tcpTransform != null)
         {
             tcpTransform.localPosition = new Vector3(toolOffsetX * 0.001f, toolOffsetY * 0.001f, toolLengthMm * 0.001f);
-        }
-    }
-
-    private void OnEnable()
-    {
-        EnsureOffsetsInitialized();
-        if (!Application.isPlaying)
-        {
-            ResetAllSlidersImmediate();
         }
     }
 
@@ -537,7 +564,7 @@ public class manual : MonoBehaviour
         {
             float errorMm = Vector3.Distance(currentTcpPosMm, actualSceneTcpPosMm);
             GUIStyle errStyle = errorMm < 0.1f ? AntigravityUITheme.StyleLabelGreen : (errorMm < 1.0f ? AntigravityUITheme.StyleLabelYellow : AntigravityUITheme.StyleLabelRed);
-            GUILayout.Label($"Sai số toán học FK ↔ Mesh: {errorMm:F4} mm", errStyle);
+            GUILayout.Label($"Sai số FK - Mesh: {errorMm:F4} mm", errStyle);
         }
 
         GUILayout.EndVertical();
@@ -608,7 +635,7 @@ public class manual : MonoBehaviour
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         
         GUILayout.BeginHorizontal();
-        GUILayout.Label("KÍCH THƯỚC OFFSET (MẶT BÍCH ➔ TCP):", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("OFFSET ĐẦU CÔNG CỤ (BÍCH -> TCP)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.FlexibleSpace();
         float tcpNorm = Mathf.Sqrt(toolOffsetX * toolOffsetX + toolOffsetY * toolOffsetY + toolLengthMm * toolLengthMm);
         GUILayout.Label($"Độ dài TCP: {tcpNorm:F1} mm", AntigravityUITheme.StyleLabelCyan);
@@ -687,7 +714,6 @@ public class manual : MonoBehaviour
         if (GUILayout.Button("200mm", b200, GUILayout.Height(20))) SetToolOffset(200f, 0f, 0f);
         GUILayout.EndHorizontal();
 
-        GUILayout.Label("✓ Tự động tính lại Động học Thuận/Nghịch & Cập nhật 3D", AntigravityUITheme.StyleLabelGreen);
         GUILayout.EndVertical();
     }
 
@@ -812,20 +838,23 @@ public class manual : MonoBehaviour
                 if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 1f, toolOffsetX, toolOffsetY);
                 if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(20))) SetToolOffset(toolLengthMm + 10f, toolOffsetX, toolOffsetY);
                 GUILayout.EndHorizontal();
-                GUILayout.Label("KÍCH THƯỚC OFFSET (MẶT BÍCH ➔ TCP)", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.Label("OFFSET ĐẦU CÔNG CỤ (BÍCH -> TCP)", AntigravityUITheme.StyleSectionLabel);
                 GUILayout.EndVertical();
 
                 // Nhóm: CAMERA
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(430));
                 GUILayout.BeginHorizontal();
                 RobotCameraController rcc = EnsureCameraController();
                 if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetPerspective(); }
                 if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetTopDown(); }
                 if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetFront(); }
                 if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetSide(); }
-                if (GUILayout.Button("Focus Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.FocusGarment(); }
+                GUIStyle zividManSt = (rcc != null && rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                if (GUILayout.Button("Góc Cam", zividManSt, GUILayout.Height(36))) { if (rcc) rcc.ToggleZividCameraView(); }
+                GUIStyle pipManSt = (rcc != null && rcc.showZividPipWindow && !rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                if (GUILayout.Button("PiP Cam", pipManSt, GUILayout.Height(36))) { if (rcc) rcc.ToggleZividPip(); }
                 GUILayout.EndHorizontal();
-                GUILayout.Label("GÓC NHÌN CAMERA TRÊN ĐỒ", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.Label("GÓC NHÌN CAMERA & ZIVID", AntigravityUITheme.StyleSectionLabel);
                 GUILayout.EndVertical();
             }
             else
@@ -851,16 +880,19 @@ public class manual : MonoBehaviour
                 GUILayout.EndVertical();
 
                 // Nhóm: CAMERA
-                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(330));
+                GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(430));
                 GUILayout.BeginHorizontal();
                 RobotCameraController rcc = EnsureCameraController();
                 if (GUILayout.Button("Góc 3/4", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetPerspective(); }
                 if (GUILayout.Button("Trên Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetTopDown(); }
                 if (GUILayout.Button("Trước Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetFront(); }
                 if (GUILayout.Button("Ngang", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.SetPresetSide(); }
-                if (GUILayout.Button("Focus Đồ", AntigravityUITheme.StyleButton, GUILayout.Height(36))) { if (rcc) rcc.FocusGarment(); }
+                GUIStyle zividManSt = (rcc != null && rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                if (GUILayout.Button("Góc Cam", zividManSt, GUILayout.Height(36))) { if (rcc) rcc.ToggleZividCameraView(); }
+                GUIStyle pipManSt = (rcc != null && rcc.showZividPipWindow && !rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                if (GUILayout.Button("PiP Cam", pipManSt, GUILayout.Height(36))) { if (rcc) rcc.ToggleZividPip(); }
                 GUILayout.EndHorizontal();
-                GUILayout.Label("GÓC NHÌN CAMERA TRÊN ĐỒ", AntigravityUITheme.StyleSectionLabel);
+                GUILayout.Label("GÓC NHÌN CAMERA & ZIVID", AntigravityUITheme.StyleSectionLabel);
                 GUILayout.EndVertical();
             }
 
@@ -1137,8 +1169,9 @@ public class manual : MonoBehaviour
         {
             if (c.GetComponent<FixedRigCamera>() != null)
             {
-                c.depth = -1;
+                c.depth = -2;
                 c.tag = "Untagged";
+                if (c.targetTexture == null) c.enabled = false;
             }
             else if (targetCam == null && c.name == "Camera")
             {
