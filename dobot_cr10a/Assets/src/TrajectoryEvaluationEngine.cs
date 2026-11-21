@@ -26,33 +26,324 @@ public static class TrajectoryEvaluationEngine
         public float registrationResidualThresholdMm = 12f; // Ngưỡng chặn sai số dư đăng ký P4
     }
 
+    public enum P1RegionSourceMode
+    {
+        FromTemplateStrokes = 0, // Vùng R từ mẫu vẽ / mask hiện tại
+        JeansLegZones = 1,       // Vùng 2 ống quần AI (đùi - gối)
+        TestCircle = 2,          // Hình tròn kiểm chứng (bán kính R0, co e -> R0 - e)
+        TestRectangle = 3        // Hình chữ nhật kiểm chứng (W x L)
+    }
+
+    public enum P1ScanDirectionMode
+    {
+        PcaMajorAxis = 0,        // Trục dài PCA tự động
+        MinAreaBoundingBox = 1,  // Hình chữ nhật bao nhỏ nhất (Min-Area Rect)
+        CustomAngleDeg = 2       // Góc quét tùy chỉnh (0..180°)
+    }
+
+    public enum P1ZHeightMode
+    {
+        Surface25DVertical = 0,     // 2.5D từ Point Cloud + súng thẳng đứng (Baseline)
+        Surface25DSmoothNormal = 1, // 2.5D từ Point Cloud + pháp tuyến làm mượt
+        Flat2DPlane = 2             // 2D mặt phẳng bàn + súng thẳng đứng
+    }
+
+    public enum P1ZigzagStyle
+    {
+        PrinterRasterFullSweep = 0, // Kiểu máy in 3D: đi zigzag song song qua lại toàn khung, vào chỗ cần phun mới bật súng
+        TrimmedToSafeRegion = 1     // Cắt gọn sát biên R_safe (chỉ di chuyển trong vùng phun + đoạn nối quay đầu)
+    }
+
+    [Serializable]
+    public class P1ZigzagConfig
+    {
+        public P1RegionSourceMode regionSource = P1RegionSourceMode.FromTemplateStrokes;
+        public P1ZigzagStyle zigzagStyle = P1ZigzagStyle.PrinterRasterFullSweep;
+        public float erosionEMm = 8f;                   // e – khoảng co biên vào trong (mm)
+        public bool autoSpacingFromWidthOverlap = true; // true: s = w*(1-r), false: nhập tay s
+        public float scanSpacingSMm = 18f;              // s – bước lượt quét song song (mm)
+        public float sprayDistanceDMm = 20f;            // d – khoảng cách súng/TCP đến bề mặt (mm)
+        public float sprayWidthWMm = 40f;               // w – bề rộng vệt phun tại khoảng cách d (mm)
+        public float overlapRatioR = 0.50f;             // r – tỷ lệ chồng lấn (0..0.85)
+        public float douglasPeuckerEpsMm = 4.0f;        // ngưỡng đơn giản hóa biên Douglas-Peucker (mm)
+        public float turnaroundOverscanMm = 16f;        // lề quay đầu bên ngoài vùng phun (mm, tắt súng)
+        public float openStrokeBrushRadiusMm = 20f;     // bề rộng nở nét khi người dùng vẽ nét hở (mm)
+        public P1ScanDirectionMode scanDirection = P1ScanDirectionMode.PcaMajorAxis;
+        public float customScanAngleDeg = 0f;           // góc quét tùy chỉnh (độ)
+        public bool useBoustrophedonSplit = true;       // phân tách vùng lõm thành ô lồi (Boustrophedon)
+        public P1ZHeightMode zHeightMode = P1ZHeightMode.Surface25DVertical;
+        public float testCircleRadiusMm = 55f;          // R0 khi kiểm chứng hình tròn (mm)
+        public float testRectWidthMm = 110f;            // Chiều rộng HCN kiểm chứng (mm)
+        public float testRectLengthMm = 260f;           // Chiều dài HCN kiểm chứng (mm)
+        public bool testOnBothLegs = true;              // Kiểm chứng trên cả 2 ống hay 1 ống trái
+
+        public float EffectiveSpacingSMm => autoSpacingFromWidthOverlap
+            ? Mathf.Clamp(sprayWidthWMm * (1f - Mathf.Clamp(overlapRatioR, 0.05f, 0.85f)), 4f, 120f)
+            : Mathf.Clamp(scanSpacingSMm, 4f, 120f);
+    }
+
+    public class P1ExecutionResult
+    {
+        public List<List<Vector3>> rawTargetRegionPolygonsWorld = new List<List<Vector3>>();  // Chỗ cần phun R (gốc)
+        public List<List<Vector3>> safeErodedRegionPolygonsWorld = new List<List<Vector3>>(); // Vùng an toàn R_safe (sau co e)
+        public List<List<Vector3>> sprayOnSegmentsWorld = new List<List<Vector3>>();          // Các đoạn quỹ đạo BẬT súng
+        public List<List<Vector3>> sprayOffConnectorsWorld = new List<List<Vector3>>();       // Các đoạn nối/quay đầu TẮT súng
+        public float areaRawCm2;
+        public float areaSafeCm2;
+        public int cellCount;
+        public int passCount;
+        public int sprayOnSegmentCount;
+        public int sprayOffConnectorCount;
+        public float scanAngleDegUsed;
+        public float effectiveSpacingMm;
+        public float erosionEMm;
+        public string warningMessage = "";
+    }
+
+    public enum P2GeometryMode
+    {
+        SkeletonParallel = 0,        // Cách A: Song song trục giữa (Skeleton / Medial Axis)
+        BoundaryConcentricOffset = 1 // Cách B: Offset đồng tâm lùi dần từ biên mask vào trong
+    }
+
+    public enum P2RegionScopeMode
+    {
+        FromTemplateRegion = 0,      // Theo vùng chỗ cần phun đã chọn/vẽ trên từng ống
+        FullLegMask = 1              // Toàn bộ mask 2 ống quần (tự tách cạp & đáy quần)
+    }
+
+    public enum P2PassOrderingMode
+    {
+        MinimumTravelGreedy = 0,     // Tối ưu giảm quãng đường di chuyển không phun (order_for_minimum_travel)
+        CenterOutAlternating = 1,    // Từ trục giữa lần lượt ra hai bên
+        OuterToInner = 2             // Từ biên ngoài thu dần vào trục giữa
+    }
+
+    public enum P2GunOrientationMode
+    {
+        SmoothSurfaceNormal25D = 0,  // 2.5D/3D Pháp tuyến bề mặt đã làm mượt
+        Vertical25D = 1,             // 2.5D Hướng súng thẳng đứng cố định
+        FlatPlane2D = 2              // 2D Mặt phẳng chuẩn + súng thẳng đứng
+    }
+
+    [Serializable]
+    public class P2SkeletonConfig
+    {
+        public P2GeometryMode geometryMode = P2GeometryMode.SkeletonParallel;
+        public P2RegionScopeMode regionScope = P2RegionScopeMode.FromTemplateRegion;
+        public bool continuousScanLike3DPrinter = true; // true: quét qua lại liên tục kiểu máy in 3D, chỉ BẬT súng khi đi qua chỗ cần phun
+        public float openStrokeSprayWidthMm = 26f;      // bề rộng vùng cần phun (mm) cho các nét vẽ hở (râu mèo, đường cong)
+        public bool autoSpacingFromWidthOverlap = true; // true: s = w * (1 - r)
+        public float sprayWidthWMm = 45f;               // w – bề rộng vệt phun (mm)
+        public float overlapRatioR = 0.35f;             // r – tỷ lệ chồng lấn (0..0.80)
+        public float passSpacingSMm = 29f;              // s – khoảng cách giữa 2 đường phun lân cận (mm)
+        public float borderMarginEMm = 16f;             // e – biên an toàn vùng cần phun (mm)
+        public float sprayDistanceDMm = 20f;            // d – khoảng cách súng đến bề mặt (mm)
+        public float minPassLengthMm = 35f;             // loại bỏ đoạn quá ngắn khi ống thu hẹp (mm)
+        public P2PassOrderingMode passOrdering = P2PassOrderingMode.MinimumTravelGreedy;
+        public P2GunOrientationMode gunOrientation = P2GunOrientationMode.SmoothSurfaceNormal25D;
+
+        public float EffectiveSpacingSMm => autoSpacingFromWidthOverlap
+            ? Mathf.Clamp(sprayWidthWMm * (1f - Mathf.Clamp(overlapRatioR, 0.05f, 0.80f)), 6f, 110f)
+            : Mathf.Clamp(passSpacingSMm, 6f, 110f);
+    }
+
+    public class P2ExecutionResult
+    {
+        public List<List<Vector3>> targetRegionPolygonsWorld = new List<List<Vector3>>(); // Chỗ cần phun (hình/vùng mục tiêu trên mặt vải)
+        public List<List<Vector3>> skeletonAxesWorld = new List<List<Vector3>>();         // Trục giữa (Skeleton chính) của 2 ống quần
+        public List<List<Vector3>> sprayOnPathsWorld = new List<List<Vector3>>();         // Đường phun (các đoạn BẬT súng ON)
+        public List<List<Vector3>> sprayOffConnectorsWorld = new List<List<Vector3>>();   // Đường quỹ đạo không phun (quét OFF & quay đầu)
+        public int leftLegPassCount;
+        public int rightLegPassCount;
+        public int truncatedOuterPassCount;
+        public int sprayOnSegmentCount;
+        public int turnaroundCount;
+        public float totalSprayLengthMm;
+        public float totalTravelLengthMm;
+        public float effectiveSpacingMm;
+        public string summaryText = "";
+    }
+
+    // =========================================================================
+    // CẤU HÌNH & KẾT QUẢ KIỂM TRA THUẬT TOÁN P3 (QUỸ ĐẠO MẪU THEO MỐC HÌNH HỌC)
+    // =========================================================================
+    public enum P3LandmarkSourceMode
+    {
+        AiKeypoint12 = 0,       // 12 mốc từ AI (YOLO11-pose / file landmarks)
+        ContourGeometry = 1     // Tự phát hiện mốc bằng hình học trên contour (điểm lồi/lõm, giao trục giữa)
+    }
+
+    public enum P3GunOrientationMode
+    {
+        SmoothSurfaceNormal25D = 0, // 2.5D/3D Pháp tuyến bề mặt đã làm mượt
+        Vertical25D = 1,            // 2.5D Thẳng đứng cố định
+        FlatPlane2D = 2             // 2D Mặt phẳng chuẩn
+    }
+
+    [Serializable]
+    public class P3LandmarkConfig
+    {
+        public P3LandmarkSourceMode landmarkSource = P3LandmarkSourceMode.AiKeypoint12;
+        public P3GunOrientationMode gunOrientation = P3GunOrientationMode.SmoothSurfaceNormal25D;
+        public float sprayDistanceDMm = 20f;      // Khoảng cách súng d (mm)
+        public float borderMarginEMm = 10f;       // Biên an toàn cắt tràn ngoài mép vải (mm)
+        public float resampleStepUV = 0.014f;     // Bước lấy mẫu mịn dọc quỹ đạo mẫu
+        public bool fillClosedDrawnRegions = true;// true: vùng Tròn/Vuông/Đa giác có cả viền + lượt phủ; false: chỉ giữ đường viền/nét dạy
+        public bool clipToGarmentContour = true;  // Cắt điểm tràn ngoài đường bao quần
+    }
+
+    public class P3ExecutionResult
+    {
+        public List<Vector3[]> meshTrianglesWorld = new List<Vector3[]>();                // 32 tam giác Barycentric 3D trên quần mới
+        public List<bool> meshTriangleFlipped = new List<bool>();                         // Cờ cảnh báo tam giác bị đảo ngược
+        public List<Vector3> detectedLandmarksWorld = new List<Vector3>();                // Bộ mốc đã phát hiện trên quần mới
+        public List<List<Vector3>> targetRegionPolygonsWorld = new List<List<Vector3>>(); // Vùng mục tiêu (nếu có hình vẽ kín)
+        public string landmarkMethodUsed = "";
+        public int landmarkCount;
+        public bool landmarkOrderConsistent;
+        public int totalTriangles;
+        public int flippedTriangleCount;
+        public float maxTriangleDistortion;
+        public float inTargetRatioPct;
+        public int strokeCount;
+        public float totalSprayLengthMm;
+        public float totalTravelLengthMm;
+        public string summaryText = "";
+        public string warningMessage = "";
+    }
+
+    // =========================================================================
+    // CẤU HÌNH & KẾT QUẢ KIỂM TRA THUẬT TOÁN P4 (QUỸ ĐẠO MẪU + ĐĂNG KÝ ĐÁM MÂY ĐIỂM 3D)
+    // =========================================================================
+    public enum P4InitMode
+    {
+        AutoLandmarksOrPca = 0, // Tự động: ưu tiên mốc P3, thiếu mốc dùng PCA 3D
+        LandmarksP3Only = 1,    // Khởi tạo thô bằng bộ mốc P3
+        Pca3DOnly = 2           // Khởi tạo thô bằng PCA 3D (không dùng mốc)
+    }
+
+    public enum P4NonRigidMode
+    {
+        NonRigidCpd = 0,        // CPD phi cứng (Coherent Point Drift - Gaussian Motion Coherence)
+        TpsRbf = 1,             // TPS RBF (Thin-Plate Spline 3D/2.5D chuẩn hóa)
+        RigidIcpOnly = 2        // Chỉ ICP cứng 3D (ablation so sánh)
+    }
+
+    public enum P4GunOrientationMode
+    {
+        SmoothSurfaceNormal25D = 0, // 3D/2.5D Pháp tuyến bề mặt đã làm mượt (p_TCP = p_surface + d*n)
+        Vertical25D = 1,            // 2.5D Thẳng đứng cố định
+        FlatPlane2D = 2             // 2D Mặt phẳng chuẩn
+    }
+
+    [Serializable]
+    public class P4RegistrationConfig
+    {
+        public P4InitMode initMode = P4InitMode.AutoLandmarksOrPca;
+        public P4NonRigidMode nonRigidMode = P4NonRigidMode.NonRigidCpd;
+        public P4GunOrientationMode gunOrientation = P4GunOrientationMode.SmoothSurfaceNormal25D;
+        public float voxelSizeMm = 5.0f;           // Kích thước voxel giảm điểm (~5 mm theo tài liệu)
+        public int icpMaxIterations = 14;          // Số vòng lặp ICP cứng 3D
+        public float icpMaxMatchRadiusMm = 85f;    // Bán kính ghép cặp ICP tối đa (mm)
+        public float cpdLambda = 2.0f;             // Độ cứng biến dạng CPD phi cứng (lớn -> cứng hơn)
+        public float cpdBetaMm = 180f;             // Bán kính tương quan mượt CPD beta (mm)
+        public float tpsLambda = 0.012f;           // Tham số điều chuẩn TPS
+        public float residualThresholdMm = 12.0f;  // Ngưỡng sai số dư đăng ký -> vượt ngưỡng thì dừng & báo kỹ sư
+        public float sprayDistanceDMm = 20f;       // Khoảng lùi súng d dọc pháp tuyến (mm)
+        public bool fillClosedDrawnRegions = true; // Với vùng Tròn/Vuông/Đa giác: phủ kín hay chỉ viền
+        public bool clipToGarmentContour = true;
+    }
+
+    public class P4ExecutionResult
+    {
+        public List<Vector3> registeredCloudWorld = new List<Vector3>();                  // Đám mây quần mẫu đã đăng ký lên quần mới
+        public List<List<Vector3>> targetRegionPolygonsWorld = new List<List<Vector3>>(); // Vùng mục tiêu sau đăng ký
+        public string initMethodUsed = "";
+        public string nonRigidMethodUsed = "";
+        public int sourceVoxelCount;
+        public int targetVoxelCount;
+        public float residualAfterInitMm;
+        public float residualAfterIcpMm;
+        public float residualAfterNonRigidMm;
+        public float meanSurfaceSnapShiftMm;
+        public float normalStabilityStdDeg;
+        public bool rejectedByResidualGate;
+        public int strokeCount;
+        public float totalSprayLengthMm;
+        public float totalTravelLengthMm;
+        public string summaryText = "";
+        public string warningMessage = "";
+    }
+
     [Serializable]
     public class MethodEvaluationResult
     {
         public string methodName;
         public string sampleName;
         public int waypointCount;
-        public float eGeoMeanMm;
-        public float eGeoP95Mm;
-        public float eGeoHausdorffMm;
-        public float eDMeanMm;
-        public float eDMaxMm;
-        public float eThetaMeanDeg;
-        public float eThetaMaxDeg;
-        public float eTPercent;       // Sai lệch mật độ RMS(T - T*) / mean(T*) (%)
-        public float coveragePercent; // Độ phủ C (% diện tích R có T >= 50% T*)
-        public float oversprayPercent;// Tràn ra ngoài O (% lượng phun rơi ngoài R)
-        public float feasibilityPct;  // Khả thi F (% điểm qua IK, giới hạn khớp, 0 va chạm, góc <= θ_max)
-        public int collisionCount;
-        public float vCvPercent;      // Độ đều tốc độ TCP (% hệ số biến thiên)
-        public float tGenSec;         // Thời gian sinh quỹ đạo (s)
-        public float tCycleSec;       // Thời gian chu kỳ (s)
-        public float rDropMm;         // Độ bền vững khi lệch tư thế/nếp (mm)
+        public bool hasGroundTruth;
+        public string groundTruthSource = "";
+
+        // 12 chỉ tiêu đo chuẩn (Trang 10–11 file góp ý) + Hàm mục tiêu J (Trang 7)
+        public float eGeoMeanMm;      // 1. E_geo trung bình (mm)
+        public float eGeoP95Mm;       //    E_geo P95 (mm)
+        public float eGeoHausdorffMm; //    E_geo Hausdorff (mm)
+        public float eDMeanMm;        // 2. E_d trung bình (mm)
+        public float eDMaxMm;         //    E_d lớn nhất (mm)
+        public float eThetaMeanDeg;   // 3. E_θ trung bình (°)
+        public float eThetaMaxDeg;    //    E_θ lớn nhất (°)
+        public float eTPercent;       // 4. E_T sai lệch mật độ RMS(T - T*) / mean(T*) (%)
+        public float coveragePercent; // 5. C độ phủ (% diện tích R có T >= 50% T*)
+        public float oversprayPercent;// 6. O tràn ra ngoài (% lượng phun rơi ngoài R)
+        public float feasibilityPct;  // 7. F khả thi (% điểm qua IK, giới hạn khớp, 0 va chạm, góc <= θ_max)
+        public int collisionCount;    //    Số điểm va chạm
+        public int singularityCount;  //    Số điểm gần kỳ dị / sát biên tầm với
+        public float vCvPercent;      // 8. V_cv độ đều tốc độ TCP (% hệ số biến thiên)
+        public float tGenSec;         // 9. t_gen thời gian sinh quỹ đạo (s)
+        public float tCycleSec;       // 10. t_cycle thời gian chu kỳ robot chạy hết quỹ đạo (s)
+        public float rDropMm;         // 11. R_drop độ bền vững khi lệch tư thế/nếp (mm)
+        public float tSetupMin;       // 12. t_setup thời gian thiết lập mã/cỡ mới (phút, so với dạy tay)
+        public float objectiveJ;      // Hàm mục tiêu chung J = MSE_R + λ_o*O + λ_t*t_cycle (Trang 7)
         public float regResidualMm;   // Sai số dư sau đăng ký (riêng P4)
-        public float engineeringScore;// Điểm công cài đặt & kỹ sư chỉnh tay (1-5)
+
+        // Bước 1 — Chi tiết ngưỡng loại (Trang 11)
+        public bool gateFeasibilityOk;
+        public bool gateCollisionOk;
+        public bool gateGeoOk;
+        public bool gateTimeOk;
         public bool passedGate;       // Đạt Bước 1 ngưỡng loại (F>=95%, 0 va chạm, E_geo<=5/8, t_gen<=60)
-        public float weightedScore;   // Điểm Bước 2 Ma trận quyết định (0..100)
+        public string gateFailReason = "";
+
+        // Bước 2 — 6 điểm thành phần Ma trận Quyết định (0..100) & Trọng số (30/20/15/15/10/10, Trang 11–12)
+        public float scoreSprayQuality; // Nhóm 1 (30%): E_T, C, O
+        public float scoreGeoAcc;       // Nhóm 2 (20%): E_geo, E_d, E_θ
+        public float scoreRobust;       // Nhóm 3 (15%): R_drop
+        public float scoreFeasCycle;    // Nhóm 4 (15%): F, V_cv, t_cycle
+        public float scoreSpeedSetup;   // Nhóm 5 (10%): t_gen, t_setup
+        public float scoreEng;          // Nhóm 6 (10%): Công cài đặt, bảo trì, chỉnh tay (1-5)
+        public float engineeringScore;  // Điểm công cài đặt & kỹ sư chỉnh tay (1-5)
+        public string engineeringReason = "";
+        public float weightedScore;     // Tổng điểm Bước 2 Ma trận quyết định (0..100)
+
+        // Bảng so sánh định tính (Trang 8)
+        public string minInputDesc = "";
+        public string curvedSurfaceRating = "";
+        public string sizePoseAdaptRating = "";
+        public string effectIntentRating = "";
+        public string implEffortRating = "";
         public string notes;
+    }
+
+    [Serializable]
+    public class SensitivityAnalysisReport
+    {
+        public string baseWinnerName = "";
+        public int totalScenarios;
+        public int stableWinCount;
+        public bool isStable;
+        public string summaryText = "";
+        public List<string> scenarioLines = new List<string>();
     }
 
     /// <summary>
@@ -354,12 +645,17 @@ public static class TrajectoryEvaluationEngine
         PLYDirectLoader plyLoader,
         SprayTechParams tech,
         string methodTag,
-        bool useFixedVerticalNormal = false)
+        bool useFixedVerticalNormal = false,
+        bool useFlatPlaneZ = false,
+        float flatPlaneWorldY = 0.02f,
+        float overrideStandoffMm = -1f,
+        List<List<bool>> perPointSprayOn = null)
     {
         var result = new List<DobotCR10AIKController.WaypointData>();
         if (worldSurfaceStrokes == null || worldSurfaceStrokes.Count == 0 || ctrl == null) return result;
 
-        float standoffM = GetEffectiveSprayHeightMm(ctrl, tech) * 0.001f;
+        float effectiveStandoffMm = (overrideStandoffMm >= 0f) ? overrideStandoffMm : GetEffectiveSprayHeightMm(ctrl, tech);
+        float standoffM = effectiveStandoffMm * 0.001f;
         Transform gRef = ctrl.globalReference;
 
         // 1. Lấy điểm bề mặt + pháp tuyến thô cho từng nét, sau đó làm mượt pháp tuyến dọc nét
@@ -381,7 +677,12 @@ public static class TrajectoryEvaluationEngine
             {
                 Vector3 pt = stroke[p];
                 Vector3 nrm = Vector3.up;
-                if (ctrl.SampleCompensatedSurface(pt.x, pt.z, out float cy, out Vector3 cn))
+                if (useFlatPlaneZ)
+                {
+                    pt.y = flatPlaneWorldY;
+                    nrm = Vector3.up;
+                }
+                else if (ctrl.SampleCompensatedSurface(pt.x, pt.z, out float cy, out Vector3 cn))
                 {
                     pt.y = cy;
                     nrm = useFixedVerticalNormal ? Vector3.up : cn;
@@ -453,6 +754,10 @@ public static class TrajectoryEvaluationEngine
                 if (wpIdx > 0) cumDistMm += Vector3.Distance(prevTcpRobotMm, tcpRobotMm);
                 prevTcpRobotMm = tcpRobotMm;
 
+                bool customSprayFlag = (perPointSprayOn == null || s >= perPointSprayOn.Count || perPointSprayOn[s] == null || p >= perPointSprayOn[s].Count)
+                    ? true
+                    : perPointSprayOn[s][p];
+
                 var wp = new DobotCR10AIKController.WaypointData
                 {
                     index = wpIdx,
@@ -463,7 +768,7 @@ public static class TrajectoryEvaluationEngine
                     roll_deg = rpyDeg.x,
                     pitch_deg = rpyDeg.y,
                     yaw_deg = rpyDeg.z,
-                    sprayOn = (p > 0), // Điểm đầu mỗi nét là đoạn di chuyển chuyển tiếp -> TẮT PHUN
+                    sprayOn = (p > 0) && customSprayFlag, // Điểm đầu mỗi nét là đoạn di chuyển chuyển tiếp -> TẮT PHUN
                     segmentName = $"{methodTag}_S{s + 1}"
                 };
 
@@ -659,64 +964,90 @@ public static class TrajectoryEvaluationEngine
     /// <summary>
     /// Ánh xạ 2D giải phẫu độc lập 2 ống quần giữa bất kỳ 2 bộ 12 điểm mốc nào (Canvas chuẩn <-> Ảnh Camera <-> Unity XZ):
     /// Đảm bảo ống trái và ống phải tự xoay, co giãn, xòe rộng/hẹp độc lập theo đúng tư thế chiếc quần đích!
+    /// Hỗ trợ truyền tỷ lệ khung hình (aspect ratio X/Y của nguồn và đích) để pháp tuyến vuông góc 90° không bị méo trên ảnh 1944x1200.
     /// </summary>
-    public static Vector2 WarpPointAnatomical2D(Vector2 pt, Vector2[] src12, Vector2[] dst12)
+    public static Vector2 WarpPointAnatomical2D(Vector2 pt, Vector2[] src12, Vector2[] dst12, float srcAspectXOverY = 1f, float dstAspectXOverY = 1f)
     {
         if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return pt;
 
-        AnatomicalLegChain srcL = BuildLegChain(src12, true);
-        AnatomicalLegChain srcR = BuildLegChain(src12, false);
+        float sAx = Mathf.Max(0.05f, srcAspectXOverY);
+        float dAx = Mathf.Max(0.05f, dstAspectXOverY);
+        Vector2 ptIso = new Vector2(pt.x * sAx, pt.y);
+        Vector2[] srcIso = src12;
+        if (Mathf.Abs(sAx - 1f) > 1e-4f)
+        {
+            srcIso = new Vector2[12];
+            for (int i = 0; i < 12; i++) srcIso[i] = new Vector2(src12[i].x * sAx, src12[i].y);
+        }
+        Vector2[] dstIso = dst12;
+        if (Mathf.Abs(dAx - 1f) > 1e-4f)
+        {
+            dstIso = new Vector2[12];
+            for (int i = 0; i < 12; i++) dstIso[i] = new Vector2(dst12[i].x * dAx, dst12[i].y);
+        }
 
-        ProjectOntoLegChain(pt, srcL, out int segL, out float uL, out float wL, out float d2L);
-        ProjectOntoLegChain(pt, srcR, out int segR, out float uR, out float wR, out float d2R);
+        AnatomicalLegChain srcL = BuildLegChain(srcIso, true);
+        AnatomicalLegChain srcR = BuildLegChain(srcIso, false);
+
+        ProjectOntoLegChain(ptIso, srcL, out int segL, out float uL, out float wL, out float d2L);
+        ProjectOntoLegChain(ptIso, srcR, out int segR, out float uR, out float wR, out float d2R);
 
         float absWL = Mathf.Abs(wL);
         float absWR = Mathf.Abs(wR);
         bool useLeft = (absWL <= 1.15f || absWR <= 1.15f) ? (absWL <= absWR) : (d2L <= d2R);
 
+        Vector2 resIso;
         if (useLeft)
         {
-            AnatomicalLegChain dstL = BuildLegChain(dst12, true);
-            return ReconstructOnLegChain(dstL, segL, uL, wL);
+            AnatomicalLegChain dstL = BuildLegChain(dstIso, true);
+            resIso = ReconstructOnLegChain(dstL, segL, uL, wL);
         }
         else
         {
-            AnatomicalLegChain dstR = BuildLegChain(dst12, false);
-            return ReconstructOnLegChain(dstR, segR, uR, wR);
+            AnatomicalLegChain dstR = BuildLegChain(dstIso, false);
+            resIso = ReconstructOnLegChain(dstR, segR, uR, wR);
         }
+        return new Vector2(resIso.x / dAx, resIso.y);
     }
 
     // =========================================================================
-    // 2C. LƯỚI TAM GIÁC 12 MỐC GIẢI PHẪU & TỌA ĐỘ TRỌNG TÂM (BARYCENTRIC - P3)
+    // 2C. LƯỚI TAM GIÁC GIẢI PHẪU 32 MẢNH (STRUCTURED ANATOMICAL TRIANGLE MESH)
+    //     & TỌA ĐỘ TRỌNG TÂM (BARYCENTRIC COORDINATES - THUẬT TOÁN P3 CHUẨN)
     //     Đúng mô tả P3 trang 7 file góp ý:
     //     "Chia quần thành lưới tam giác theo mốc; biểu diễn mỗi điểm quỹ đạo mẫu
     //      bằng tọa độ trọng tâm (barycentric) trong tam giác chứa nó -> với quần mới:
     //      phát hiện mốc -> dựng lại lưới -> biến đổi affine từng mảnh."
+    //
+    //     Từ 12 mốc YOLO11-pose, mỗi ống quần (Trái & Phải) được chia thành 5 trạm
+    //     ngang (0:Eo, 1:Hông/Đũng, 2:Đùi, 3:Gối, 4:Gấu) x 3 đỉnh (Ngoài, Tâm, Trong)
+    //     = 15 đỉnh -> 4 dải dọc x 4 tam giác đều đặn = 16 tam giác/ống (Tổng 32 tam giác).
+    //     Loại bỏ hoàn toàn tam giác suy biến/chéo ống khi quần xòe hoặc xoay ngang!
     // =========================================================================
 
-    // 14 tam giác giải phẫu cố định không chồng lấp phủ kín toàn bộ thân quần & 2 ống
-    // (0:waist_L, 1:waist_C, 2:waist_R, 3:crotch, 4:thigh_L, 5:thigh_R,
-    //  6:knee_L, 7:knee_R, 8:cuff_L_out, 9:cuff_L_in, 10:cuff_R_in, 11:cuff_R_out)
-    private static readonly int[,] AnatomicalTriangles12 = new int[14, 3]
+    private static readonly int[,] LegStripTriangles16 = new int[16, 3]
     {
-        // Vùng cạp - hông - đáy đũng
-        { 0, 1, 3 },
-        { 1, 2, 3 },
-        // Ống quần trái (quanh tâm đùi 4 & tâm gối 6)
-        { 0, 3, 4 },
-        { 0, 4, 6 },
-        { 0, 6, 8 },
-        { 3, 9, 4 },
-        { 4, 9, 6 },
-        { 6, 9, 8 },
-        // Ống quần phải (quanh tâm đùi 5 & tâm gối 7)
-        { 2, 5, 3 },
-        { 2, 7, 5 },
-        { 2, 11, 7 },
-        { 3, 5, 10 },
-        { 5, 7, 10 },
-        { 7, 11, 10 }
+        // Dải 0: Eo (k=0) -> Hông/Đũng (k=1)
+        { 0, 1, 3 }, { 1, 4, 3 }, { 1, 2, 4 }, { 2, 5, 4 },
+        // Dải 1: Hông/Đũng (k=1) -> Đùi (k=2)
+        { 3, 4, 6 }, { 4, 7, 6 }, { 4, 5, 7 }, { 5, 8, 7 },
+        // Dải 2: Đùi (k=2) -> Gối (k=3)
+        { 6, 7, 9 }, { 7, 10, 9 }, { 7, 8, 10 }, { 8, 11, 10 },
+        // Dải 3: Gối (k=3) -> Gấu (k=4)
+        { 9, 10, 12 }, { 10, 13, 12 }, { 10, 11, 13 }, { 11, 14, 13 }
     };
+
+    private static void BuildLegStructuredVertices15(in AnatomicalLegChain chain, Vector2[] verts15)
+    {
+        for (int k = 0; k < 5; k++)
+        {
+            Vector2 c = chain.C[k];
+            Vector2 n = chain.N[k];
+            float r = chain.R[k];
+            verts15[k * 3 + 0] = c - n * r; // Đỉnh biên ngoài (Outer, w = -1)
+            verts15[k * 3 + 1] = c;         // Đỉnh trục giữa (Center, w = 0)
+            verts15[k * 3 + 2] = c + n * r; // Đỉnh biên trong (Inner, w = +1)
+        }
+    }
 
     private static bool ComputeBarycentric2D(Vector2 p, Vector2 a, Vector2 b, Vector2 c, out float u, out float v, out float w)
     {
@@ -737,57 +1068,93 @@ public static class TrajectoryEvaluationEngine
     }
 
     /// <summary>
-    /// Biến đổi Affine từng mảnh theo Tọa độ Trọng tâm (Barycentric Coordinates) trên lưới 14 tam giác của 12 mốc giải phẫu (Thuật toán P3 chuẩn).
+    /// Biến đổi Affine từng mảnh theo Tọa độ Trọng tâm (Barycentric Coordinates) trên lưới 32 tam giác giải phẫu
+    /// được dựng từ 12 mốc (Thuật toán P3 chuẩn trang 7). Đảm bảo nội suy chính xác 100% tại 12 mốc và trên cả 2 ống quần!
     /// </summary>
-    public static Vector2 WarpPointBarycentric12(Vector2 pt, Vector2[] src12, Vector2[] dst12)
+    public static Vector2 WarpPointBarycentric12(Vector2 pt, Vector2[] src12, Vector2[] dst12, float srcAspectXOverY = 1f, float dstAspectXOverY = 1f)
     {
         if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return pt;
+
+        float sAx = Mathf.Max(0.05f, srcAspectXOverY);
+        float dAx = Mathf.Max(0.05f, dstAspectXOverY);
+        Vector2 ptIso = new Vector2(pt.x * sAx, pt.y);
+        Vector2[] srcIso = src12;
+        if (Mathf.Abs(sAx - 1f) > 1e-4f)
+        {
+            srcIso = new Vector2[12];
+            for (int i = 0; i < 12; i++) srcIso[i] = new Vector2(src12[i].x * sAx, src12[i].y);
+        }
+        Vector2[] dstIso = dst12;
+        if (Mathf.Abs(dAx - 1f) > 1e-4f)
+        {
+            dstIso = new Vector2[12];
+            for (int i = 0; i < 12; i++) dstIso[i] = new Vector2(dst12[i].x * dAx, dst12[i].y);
+        }
+
+        // Phân định ống trái / ống phải để hai ống không bao giờ kéo méo nhau qua khe đũng quần
+        AnatomicalLegChain srcChainL = BuildLegChain(srcIso, true);
+        AnatomicalLegChain srcChainR = BuildLegChain(srcIso, false);
+        ProjectOntoLegChain(ptIso, srcChainL, out int segL, out float uL, out float wL, out float d2L);
+        ProjectOntoLegChain(ptIso, srcChainR, out int segR, out float uR, out float wR, out float d2R);
+
+        float absWL = Mathf.Abs(wL);
+        float absWR = Mathf.Abs(wR);
+        bool useLeft = (absWL <= 1.15f || absWR <= 1.15f) ? (absWL <= absWR) : (d2L <= d2R);
+
+        AnatomicalLegChain activeSrcChain = useLeft ? srcChainL : srcChainR;
+        AnatomicalLegChain activeDstChain = BuildLegChain(dstIso, useLeft);
+
+        Vector2[] srcVerts = new Vector2[15];
+        Vector2[] dstVerts = new Vector2[15];
+        BuildLegStructuredVertices15(activeSrcChain, srcVerts);
+        BuildLegStructuredVertices15(activeDstChain, dstVerts);
 
         int bestTri = -1;
         float bestMinCoord = float.MinValue;
         float bestU = 1f, bestV = 0f, bestW = 0f;
         float bestCenterDistSq = float.MaxValue;
 
-        int numTris = AnatomicalTriangles12.GetLength(0);
-        for (int t = 0; t < numTris; t++)
+        for (int t = 0; t < 16; t++)
         {
-            int i0 = AnatomicalTriangles12[t, 0];
-            int i1 = AnatomicalTriangles12[t, 1];
-            int i2 = AnatomicalTriangles12[t, 2];
+            int i0 = LegStripTriangles16[t, 0];
+            int i1 = LegStripTriangles16[t, 1];
+            int i2 = LegStripTriangles16[t, 2];
 
-            if (!ComputeBarycentric2D(pt, src12[i0], src12[i1], src12[i2], out float u, out float v, out float w))
+            if (!ComputeBarycentric2D(ptIso, srcVerts[i0], srcVerts[i1], srcVerts[i2], out float u, out float v, out float w))
                 continue;
 
             float minCoord = Mathf.Min(u, Mathf.Min(v, w));
             if (minCoord >= -1e-4f)
             {
-                // Điểm nằm trọn bên trong tam giác t
-                return u * dst12[i0] + v * dst12[i1] + w * dst12[i2];
+                // Điểm nằm trọn bên trong tam giác t -> Biến đổi Affine từng mảnh chuẩn Barycentric: P' = u*A' + v*B' + w*C'
+                Vector2 mapped = u * dstVerts[i0] + v * dstVerts[i1] + w * dstVerts[i2];
+                return new Vector2(mapped.x / dAx, mapped.y);
             }
 
-            // Nếu nằm ngoài biên nhẹ, ưu tiên tam giác gần nhất có độ âm nhỏ nhất
-            Vector2 triCenter = (src12[i0] + src12[i1] + src12[i2]) / 3f;
-            float d2 = (pt - triCenter).sqrMagnitude;
-            if (minCoord > bestMinCoord - 0.08f && d2 < bestCenterDistSq)
+            Vector2 triCenter = (srcVerts[i0] + srcVerts[i1] + srcVerts[i2]) / 3f;
+            float d2 = (ptIso - triCenter).sqrMagnitude;
+            if (minCoord > bestMinCoord - 0.05f && d2 < bestCenterDistSq)
             {
                 bestMinCoord = Mathf.Max(bestMinCoord, minCoord);
                 bestCenterDistSq = d2;
                 bestTri = t;
-                bestU = Mathf.Clamp(u, -0.35f, 1.35f);
-                bestV = Mathf.Clamp(v, -0.35f, 1.35f);
+                bestU = Mathf.Clamp(u, -0.45f, 1.45f);
+                bestV = Mathf.Clamp(v, -0.45f, 1.45f);
                 bestW = 1f - bestU - bestV;
             }
         }
 
-        if (bestTri >= 0)
+        if (bestTri >= 0 && bestMinCoord >= -0.45f)
         {
-            int j0 = AnatomicalTriangles12[bestTri, 0];
-            int j1 = AnatomicalTriangles12[bestTri, 1];
-            int j2 = AnatomicalTriangles12[bestTri, 2];
-            return bestU * dst12[j0] + bestV * dst12[j1] + bestW * dst12[j2];
+            int j0 = LegStripTriangles16[bestTri, 0];
+            int j1 = LegStripTriangles16[bestTri, 1];
+            int j2 = LegStripTriangles16[bestTri, 2];
+            Vector2 mapped = bestU * dstVerts[j0] + bestV * dstVerts[j1] + bestW * dstVerts[j2];
+            return new Vector2(mapped.x / dAx, mapped.y);
         }
 
-        return WarpPointAnatomical2D(pt, src12, dst12);
+        Vector2 fallback = ReconstructOnLegChain(activeDstChain, useLeft ? segL : segR, useLeft ? uL : uR, useLeft ? wL : wR);
+        return new Vector2(fallback.x / dAx, fallback.y);
     }
 
     // =========================================================================
@@ -874,14 +1241,114 @@ public static class TrajectoryEvaluationEngine
     }
 
     /// <summary>
-    /// Kiểm tra điểm 2D `ptXZ` trên ống `leg` (0=trái, 1=phải) có nằm trong vùng phun mục tiêu `R`
-    /// (giao giữa vùng mẫu hiệu ứng đã ánh xạ và biên quần Douglas-Peucker co khoảng `e`) hay không.
+    /// Trích xuất vùng mục tiêu giải phẫu R_leg = [sMin..sMax] x [wMin..wMax] trên từng ống quần từ mẫu vẽ `templateStrokesUV`.
+    /// Nếu mẫu vẽ chỉ đặt trên đùi hoặc cả đùi-gối, P1 và P2 sẽ biết chính xác cần đặt vùng quét ở đâu trên ống quần mới!
     /// </summary>
-    private static bool IsPointInTemplateRegionR(
+    private static void ExtractLegAnatomicalRegionBounds(
+        List<List<Vector2>> templateStrokesUV,
+        Vector2[] src12,
+        Vector2[] dst12XZ,
+        out bool[] hasLegRegion,
+        out float[] sMinLeg,
+        out float[] sMaxLeg,
+        out float[] wMinLeg,
+        out float[] wMaxLeg,
+        out List<Vector2>[] legRegionPolygonPoints)
+    {
+        hasLegRegion = new bool[2];
+        sMinLeg = new float[2] { float.MaxValue, float.MaxValue };
+        sMaxLeg = new float[2] { float.MinValue, float.MinValue };
+        wMinLeg = new float[2] { float.MaxValue, float.MaxValue };
+        wMaxLeg = new float[2] { float.MinValue, float.MinValue };
+        legRegionPolygonPoints = new List<Vector2>[2] { new List<Vector2>(), new List<Vector2>() };
+
+        AnatomicalLegChain srcChainL = BuildLegChain(src12, true);
+        AnatomicalLegChain srcChainR = BuildLegChain(src12, false);
+        AnatomicalLegChain dstChainL = BuildLegChain(dst12XZ, true);
+        AnatomicalLegChain dstChainR = BuildLegChain(dst12XZ, false);
+
+        int totalPts = 0;
+        if (templateStrokesUV != null)
+        {
+            for (int s = 0; s < templateStrokesUV.Count; s++)
+            {
+                var raw = templateStrokesUV[s];
+                if (raw == null || raw.Count < 2) continue;
+                var resampled = ResampleUV(raw, 0.015f);
+                for (int p = 0; p < resampled.Count; p++)
+                {
+                    Vector2 pt = resampled[p];
+                    ProjectOntoLegChain(pt, srcChainL, out int segL, out float uL, out float wL, out float d2L);
+                    ProjectOntoLegChain(pt, srcChainR, out int segR, out float uR, out float wR, out float d2R);
+
+                    float absWL = Mathf.Abs(wL);
+                    float absWR = Mathf.Abs(wR);
+                    int leg = (absWL <= 1.15f || absWR <= 1.15f) ? (absWL <= absWR ? 0 : 1) : (d2L <= d2R ? 0 : 1);
+                    float sVal = (leg == 0 ? segL + uL : segR + uR);
+                    float wVal = (leg == 0 ? wL : wR);
+
+                    hasLegRegion[leg] = true;
+                    if (sVal < sMinLeg[leg]) sMinLeg[leg] = sVal;
+                    if (sVal > sMaxLeg[leg]) sMaxLeg[leg] = sVal;
+                    if (wVal < wMinLeg[leg]) wMinLeg[leg] = wVal;
+                    if (wVal > wMaxLeg[leg]) wMaxLeg[leg] = wVal;
+                    totalPts++;
+                }
+            }
+        }
+
+        // Nếu chưa có mẫu vẽ nào, mặc định vùng phun chuẩn là vùng đùi-gối trên cả 2 ống
+        if (totalPts == 0)
+        {
+            for (int leg = 0; leg < 2; leg++)
+            {
+                hasLegRegion[leg] = true;
+                sMinLeg[leg] = 1.15f;
+                sMaxLeg[leg] = 3.70f;
+                wMinLeg[leg] = -0.82f;
+                wMaxLeg[leg] = 0.82f;
+            }
+        }
+
+        for (int leg = 0; leg < 2; leg++)
+        {
+            if (!hasLegRegion[leg]) continue;
+            // Mở rộng nhẹ biên bao giải phẫu để vùng quét liền mạch, phủ trọn các nét mẫu trên ống quần
+            sMinLeg[leg] = Mathf.Clamp(sMinLeg[leg] - 0.08f, 0.85f, 3.85f);
+            sMaxLeg[leg] = Mathf.Clamp(Mathf.Max(sMinLeg[leg] + 0.35f, sMaxLeg[leg] + 0.08f), 1.05f, 3.92f);
+            wMinLeg[leg] = Mathf.Clamp(wMinLeg[leg] - 0.12f, -0.92f, 0.60f);
+            wMaxLeg[leg] = Mathf.Clamp(Mathf.Max(wMinLeg[leg] + 0.45f, wMaxLeg[leg] + 0.12f), -0.60f, 0.92f);
+
+            AnatomicalLegChain dstChain = (leg == 0) ? dstChainL : dstChainR;
+            int nS = 10;
+            int nW = 5;
+            for (int i = 0; i <= nS; i++)
+            {
+                float sVal = Mathf.Lerp(sMinLeg[leg], sMaxLeg[leg], (float)i / nS);
+                int seg = Mathf.Clamp(Mathf.FloorToInt(sVal), 0, 3);
+                float u = sVal - seg;
+                for (int j = 0; j <= nW; j++)
+                {
+                    float wVal = Mathf.Lerp(wMinLeg[leg], wMaxLeg[leg], (float)j / nW);
+                    legRegionPolygonPoints[leg].Add(ReconstructOnLegChain(dstChain, seg, u, wVal));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Kiểm tra điểm 2D `ptXZ` trên ống `leg` (0=trái, 1=phải) có nằm trong vùng phun mục tiêu `R_leg`
+    /// (giao giữa vùng mẫu hiệu ứng giải phẫu `[sMin..sMax, wMin..wMax]` trên ống đích và biên quần Douglas-Peucker co khoảng `e`) hay không.
+    /// </summary>
+    private static bool IsPointInAnatomicalRegionR(
         Vector2 ptXZ,
         int leg,
-        List<Vector2> legTemplatePts,
-        float corridorRadiusM,
+        in AnatomicalLegChain dstChainL,
+        in AnatomicalLegChain dstChainR,
+        float sMin,
+        float sMax,
+        float wMin,
+        float wMax,
         List<Vector3> contourWorld,
         List<Vector3> landmarksWorldPos,
         float borderMarginMm)
@@ -889,35 +1356,872 @@ public static class TrajectoryEvaluationEngine
         if (!IsInsideValidSprayZone(ptXZ.x, ptXZ.y, contourWorld, landmarksWorldPos, borderMarginMm, out _))
             return false;
 
-        // Phân tách ô lồi Boustrophedon tại đáy đũng: điểm của ống nào phải gần trục ống đó hơn
-        Vector2 thighL = new Vector2(landmarksWorldPos[4].x, landmarksWorldPos[4].z);
-        Vector2 kneeL = new Vector2(landmarksWorldPos[6].x, landmarksWorldPos[6].z);
-        Vector2 thighR = new Vector2(landmarksWorldPos[5].x, landmarksWorldPos[5].z);
-        Vector2 kneeR = new Vector2(landmarksWorldPos[7].x, landmarksWorldPos[7].z);
-        float dL = DistToSegment2D(ptXZ, thighL, kneeL);
-        float dR = DistToSegment2D(ptXZ, thighR, kneeR);
-        if (leg == 0 && dL > dR + 0.008f) return false;
-        if (leg == 1 && dR > dL + 0.008f) return false;
+        // Phân tách ô lồi Boustrophedon tại đáy đũng: điểm thuộc ống nào phải gần trục giữa ống đó hơn
+        ProjectOntoLegChain(ptXZ, dstChainL, out int segL, out float uL, out float wL, out float d2L);
+        ProjectOntoLegChain(ptXZ, dstChainR, out int segR, out float uR, out float wR, out float d2R);
 
-        if (legTemplatePts == null || legTemplatePts.Count == 0)
-            return true;
-
-        // Kiểm tra điểm nằm trong bao vùng mẫu hiệu ứng R trên ống chân hiện tại
-        float r2 = corridorRadiusM * corridorRadiusM;
-        for (int i = 0; i < legTemplatePts.Count; i++)
+        if (leg == 0)
         {
-            if ((ptXZ - legTemplatePts[i]).sqrMagnitude <= r2)
-                return true;
+            if (d2L > d2R + 0.0004f && Mathf.Abs(wL) > Mathf.Abs(wR)) return false;
+            float sVal = segL + uL;
+            return (sVal >= sMin && sVal <= sMax && wL >= wMin && wL <= wMax);
         }
-        return false;
+        else
+        {
+            if (d2R > d2L + 0.0004f && Mathf.Abs(wR) > Mathf.Abs(wL)) return false;
+            float sVal = segR + uR;
+            return (sVal >= sMin && sVal <= sMax && wR >= wMin && wR <= wMax);
+        }
+    }
+
+    // =========================================================================
+    // 2E. CÔNG CỤ HÌNH HỌC & MASK CHO THUẬT TOÁN P1 – QUÉT ZIGZAG ĐẦY ĐỦ 10 BƯỚC
+    //     (Douglas-Peucker, Co biên e bằng EDT chuẩn, PCA / Min-Area Rect,
+    //      Phân tách ô lồi Boustrophedon, Cắt đường song song bước s, Bật/Tắt súng)
+    // =========================================================================
+
+    private static bool IsPointInPolygonXZ(Vector2 pt, List<Vector2> poly)
+    {
+        if (poly == null || poly.Count < 3) return false;
+        bool inside = false;
+        int n = poly.Count;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            Vector2 pi = poly[i];
+            Vector2 pj = poly[j];
+            if (((pi.y > pt.y) != (pj.y > pt.y)) &&
+                (pt.x < (pj.x - pi.x) * (pt.y - pi.y) / (pj.y - pi.y + 1e-9f) + pi.x))
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    private static float ComputePolygonAreaSqM(List<Vector2> poly)
+    {
+        if (poly == null || poly.Count < 3) return 0f;
+        double sum = 0.0;
+        int n = poly.Count;
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 a = poly[i];
+            Vector2 b = poly[(i + 1) % n];
+            sum += (double)a.x * b.y - (double)b.x * a.y;
+        }
+        return (float)(Math.Abs(sum) * 0.5);
+    }
+
+    private static List<Vector2> SimplifyClosedPolygonDouglasPeucker(List<Vector2> poly, float epsilonM)
+    {
+        if (poly == null || poly.Count <= 4 || epsilonM <= 1e-5f)
+            return poly != null ? new List<Vector2>(poly) : new List<Vector2>();
+
+        // Chia vòng kín tại 2 điểm xa nhau nhất rồi áp Douglas-Peucker lên từng nửa để bảo toàn hình kín
+        int n = poly.Count;
+        int idxA = 0, idxB = n / 2;
+        float bestD2 = -1f;
+        for (int i = 0; i < n; i++)
+        {
+            float d2 = (poly[i] - poly[0]).sqrMagnitude;
+            if (d2 > bestD2) { bestD2 = d2; idxB = i; }
+        }
+        if (idxB <= 1 || idxB >= n - 1) idxB = n / 2;
+
+        var half1 = new List<Vector2>(idxB - idxA + 1);
+        for (int i = idxA; i <= idxB; i++) half1.Add(poly[i]);
+        var half2 = new List<Vector2>(n - idxB + 1);
+        for (int i = idxB; i < n; i++) half2.Add(poly[i]);
+        half2.Add(poly[idxA]);
+
+        var s1 = SimplifyPolygonDouglasPeucker(half1, epsilonM);
+        var s2 = SimplifyPolygonDouglasPeucker(half2, epsilonM);
+
+        var merged = new List<Vector2>(s1.Count + s2.Count);
+        for (int i = 0; i < s1.Count; i++) merged.Add(s1[i]);
+        for (int i = 1; i < s2.Count - 1; i++) merged.Add(s2[i]);
+        return merged.Count >= 3 ? merged : new List<Vector2>(poly);
+    }
+
+    private static List<Vector2> ComputeConvexHull2D(List<Vector2> pts)
+    {
+        if (pts == null || pts.Count < 3) return pts != null ? new List<Vector2>(pts) : new List<Vector2>();
+        var sorted = new List<Vector2>(pts);
+        sorted.Sort((a, b) => Math.Abs(a.x - b.x) > 1e-6f ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
+
+        var lower = new List<Vector2>();
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            Vector2 p = sorted[i];
+            while (lower.Count >= 2)
+            {
+                Vector2 o = lower[lower.Count - 2];
+                Vector2 a = lower[lower.Count - 1];
+                if ((a.x - o.x) * (p.y - o.y) - (a.y - o.y) * (p.x - o.x) <= 1e-9f) lower.RemoveAt(lower.Count - 1);
+                else break;
+            }
+            lower.Add(p);
+        }
+
+        var upper = new List<Vector2>();
+        for (int i = sorted.Count - 1; i >= 0; i--)
+        {
+            Vector2 p = sorted[i];
+            while (upper.Count >= 2)
+            {
+                Vector2 o = upper[upper.Count - 2];
+                Vector2 a = upper[upper.Count - 1];
+                if ((a.x - o.x) * (p.y - o.y) - (a.y - o.y) * (p.x - o.x) <= 1e-9f) upper.RemoveAt(upper.Count - 1);
+                else break;
+            }
+            upper.Add(p);
+        }
+
+        lower.RemoveAt(lower.Count - 1);
+        upper.RemoveAt(upper.Count - 1);
+        lower.AddRange(upper);
+        return lower.Count >= 3 ? lower : new List<Vector2>(pts);
     }
 
     /// <summary>
-    /// P1 — Quét Zigzag / Boustrophedon trong vùng phun R (Chuẩn trang 7 file góp ý):
-    /// 1. Lấy vùng R từ mask/mẫu hiệu ứng, đơn giản hóa biên bằng Douglas-Peucker và co biên một khoảng e.
-    /// 2. Tách vùng lõm đáy quần thành 2 ô lồi từng ống (Boustrophedon decomposition), tìm trục dài từng ống bằng PCA để giảm số lượt.
-    /// 3. Cắt vùng R bằng họ đường song song cách nhau bước lượt s = w*(1-r), nối zigzag và tắt súng ở đoạn quay đầu ngoài R.
-    /// 4. Gán Z bề mặt (2.5D) với độ cao lớp phun thống nhất và hướng súng thẳng đứng (Baseline).
+    /// Bước 4 P1: Tìm hướng quét bằng Hình chữ nhật bao nhỏ nhất (Minimum-Area Bounding Rectangle) trên bao lồi.
+    /// Trục majorAxis nằm theo cạnh dài nhất (giảm số lượt quét), minorAxis vuông góc (hướng dịch bước s).
+    /// </summary>
+    private static void ComputeMinAreaRectAxes2D(List<Vector2> pts, Vector2 fallbackMajor, out Vector2 centroid, out Vector2 majorAxis, out Vector2 minorAxis)
+    {
+        centroid = Vector2.zero;
+        if (pts == null || pts.Count < 3)
+        {
+            ComputePcaAxes2D(pts, fallbackMajor, out centroid, out majorAxis, out minorAxis);
+            return;
+        }
+        for (int i = 0; i < pts.Count; i++) centroid += pts[i];
+        centroid /= pts.Count;
+
+        var hull = ComputeConvexHull2D(pts);
+        float bestArea = float.MaxValue;
+        majorAxis = fallbackMajor.sqrMagnitude > 1e-6f ? fallbackMajor.normalized : Vector2.up;
+        minorAxis = new Vector2(-majorAxis.y, majorAxis.x);
+
+        int hn = hull.Count;
+        for (int i = 0; i < hn; i++)
+        {
+            Vector2 edge = hull[(i + 1) % hn] - hull[i];
+            if (edge.sqrMagnitude < 1e-10f) continue;
+            Vector2 axU = edge.normalized;
+            Vector2 axV = new Vector2(-axU.y, axU.x);
+
+            float minU = float.MaxValue, maxU = float.MinValue;
+            float minV = float.MaxValue, maxV = float.MinValue;
+            for (int k = 0; k < hn; k++)
+            {
+                float u = Vector2.Dot(hull[k], axU);
+                float v = Vector2.Dot(hull[k], axV);
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+            }
+            float spanU = maxU - minU;
+            float spanV = maxV - minV;
+            float area = spanU * spanV;
+            if (area < bestArea)
+            {
+                bestArea = area;
+                if (spanU >= spanV)
+                {
+                    majorAxis = axU;
+                    minorAxis = axV;
+                }
+                else
+                {
+                    majorAxis = axV;
+                    minorAxis = new Vector2(-axV.y, axV.x);
+                }
+            }
+        }
+        if (fallbackMajor.sqrMagnitude > 1e-6f && Vector2.Dot(majorAxis, fallbackMajor) < 0f)
+        {
+            majorAxis = -majorAxis;
+            minorAxis = -minorAxis;
+        }
+    }
+
+    // 1D Squared Euclidean Distance Transform (Felzenszwalb & Huttenlocher, O(n))
+    private static void Edt1D(float[] f, float[] d, int n, int[] v, float[] z)
+    {
+        int k = 0;
+        v[0] = 0;
+        z[0] = float.NegativeInfinity;
+        z[1] = float.PositiveInfinity;
+        for (int q = 1; q < n; q++)
+        {
+            float s;
+            while (true)
+            {
+                int r = v[k];
+                s = ((f[q] + q * q) - (f[r] + r * r)) / (2f * (q - r));
+                if (s <= z[k])
+                {
+                    k--;
+                    if (k < 0) { k = 0; break; }
+                }
+                else break;
+            }
+            k++;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = float.PositiveInfinity;
+        }
+        k = 0;
+        for (int q = 0; q < n; q++)
+        {
+            while (z[k + 1] < q) k++;
+            int r = v[k];
+            float diff = q - r;
+            d[q] = diff * diff + f[r];
+        }
+    }
+
+    /// <summary>
+    /// Bước 3 P1: Co vùng phun R vào trong khoảng e (mm) bằng biến đổi khoảng cách Euclid chính xác (Exact EDT)
+    /// trên lưới Mask raster và trích xuất đa giác biên R_safe (mỗi thành phần liên thông -> 1 đa giác kín sạch).
+    /// </summary>
+    private static List<List<Vector2>> ErodePolygonByDistanceE2D(
+        List<Vector2> rawPoly,
+        float erosionEM,
+        List<Vector2> garmentClipPoly,
+        float dpEpsM,
+        out float rawAreaSqM,
+        out float safeAreaSqM)
+    {
+        rawAreaSqM = ComputePolygonAreaSqM(rawPoly);
+        safeAreaSqM = 0f;
+        var safePolys = new List<List<Vector2>>();
+        if (rawPoly == null || rawPoly.Count < 3) return safePolys;
+
+        if (erosionEM <= 0.0005f)
+        {
+            safeAreaSqM = rawAreaSqM;
+            safePolys.Add(new List<Vector2>(rawPoly));
+            return safePolys;
+        }
+
+        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+        for (int i = 0; i < rawPoly.Count; i++)
+        {
+            if (rawPoly[i].x < minX) minX = rawPoly[i].x;
+            if (rawPoly[i].x > maxX) maxX = rawPoly[i].x;
+            if (rawPoly[i].y < minY) minY = rawPoly[i].y;
+            if (rawPoly[i].y > maxY) maxY = rawPoly[i].y;
+        }
+
+        // Độ phân giải lưới raster k pixel/mm (~3 mm/ô, tự co nhẹ nếu vùng quá lớn để luôn mượt < 2ms)
+        float spanX = Mathf.Max(0.01f, maxX - minX);
+        float spanY = Mathf.Max(0.01f, maxY - minY);
+        float cell = Mathf.Clamp(Mathf.Max(spanX, spanY) / 180f, 0.0025f, 0.0045f);
+        int pad = 3;
+        int gw = Mathf.Clamp(Mathf.CeilToInt(spanX / cell) + pad * 2, 10, 260);
+        int gh = Mathf.Clamp(Mathf.CeilToInt(spanY / cell) + pad * 2, 10, 260);
+        float origX = minX - pad * cell;
+        float origY = minY - pad * cell;
+
+        bool[,] maskRaw = new bool[gw, gh];
+        const float INF = 1e12f;
+        float[,] distGrid = new float[gw, gh];
+        int rawCount = 0;
+        bool useClip = (garmentClipPoly != null && garmentClipPoly.Count >= 4);
+
+        for (int y = 0; y < gh; y++)
+        {
+            float wy = origY + (y + 0.5f) * cell;
+            for (int x = 0; x < gw; x++)
+            {
+                float wx = origX + (x + 0.5f) * cell;
+                Vector2 p = new Vector2(wx, wy);
+                bool inside = IsPointInPolygonXZ(p, rawPoly);
+                if (inside && useClip && !IsPointInPolygonXZ(p, garmentClipPoly))
+                    inside = false;
+                maskRaw[x, y] = inside;
+                if (inside) rawCount++;
+                distGrid[x, y] = inside ? INF : 0f;
+            }
+        }
+
+        // Nếu clip theo garmentClipPoly làm rỗng (ví dụ mẫu hình tròn thử nghiệm đặt ra ngoài contour), bỏ clip garment
+        if (rawCount == 0 && useClip)
+        {
+            for (int y = 0; y < gh; y++)
+            {
+                float wy = origY + (y + 0.5f) * cell;
+                for (int x = 0; x < gw; x++)
+                {
+                    float wx = origX + (x + 0.5f) * cell;
+                    bool inside = IsPointInPolygonXZ(new Vector2(wx, wy), rawPoly);
+                    maskRaw[x, y] = inside;
+                    if (inside) rawCount++;
+                    distGrid[x, y] = inside ? INF : 0f;
+                }
+            }
+        }
+
+        rawAreaSqM = rawCount * cell * cell;
+        if (rawCount == 0) return safePolys;
+
+        // Pass 1 (cột) + Pass 2 (hàng) -> Khoảng cách Euclid chính xác tới biên ngoài của Mask R
+        int maxDim = Mathf.Max(gw, gh);
+        float[] fBuf = new float[maxDim];
+        float[] dBuf = new float[maxDim];
+        int[] vBuf = new int[maxDim];
+        float[] zBuf = new float[maxDim + 1];
+
+        for (int x = 0; x < gw; x++)
+        {
+            for (int y = 0; y < gh; y++) fBuf[y] = distGrid[x, y];
+            Edt1D(fBuf, dBuf, gh, vBuf, zBuf);
+            for (int y = 0; y < gh; y++) distGrid[x, y] = dBuf[y];
+        }
+        for (int y = 0; y < gh; y++)
+        {
+            for (int x = 0; x < gw; x++) fBuf[x] = distGrid[x, y];
+            Edt1D(fBuf, dBuf, gw, vBuf, zBuf);
+            for (int x = 0; x < gw; x++) distGrid[x, y] = dBuf[x];
+        }
+
+        float ePixelsSq = (erosionEM / cell) * (erosionEM / cell);
+        bool[,] maskSafe = new bool[gw, gh];
+        int safeCount = 0;
+        for (int y = 1; y < gh - 1; y++)
+        {
+            for (int x = 1; x < gw - 1; x++)
+            {
+                if (maskRaw[x, y] && distGrid[x, y] >= ePixelsSq)
+                {
+                    maskSafe[x, y] = true;
+                    safeCount++;
+                }
+            }
+        }
+        safeAreaSqM = safeCount * cell * cell;
+        if (safeCount < 3) return safePolys;
+
+        // Trích xuất từng thành phần liên thông của R_safe rồi lần biên (Moore-Neighbor contour tracing)
+        int[,] compId = new int[gw, gh];
+        int curComp = 0;
+        var queue = new Queue<Vector2Int>();
+        int[] dx4 = { 1, -1, 0, 0 };
+        int[] dy4 = { 0, 0, 1, -1 };
+
+        for (int y = 1; y < gh - 1; y++)
+        {
+            for (int x = 1; x < gw - 1; x++)
+            {
+                if (!maskSafe[x, y] || compId[x, y] != 0) continue;
+                curComp++;
+                int compPixels = 0;
+                queue.Clear();
+                queue.Enqueue(new Vector2Int(x, y));
+                compId[x, y] = curComp;
+                int startX = x, startY = y;
+
+                while (queue.Count > 0)
+                {
+                    Vector2Int c = queue.Dequeue();
+                    compPixels++;
+                    if (c.y < startY || (c.y == startY && c.x < startX)) { startX = c.x; startY = c.y; }
+                    for (int d = 0; d < 4; d++)
+                    {
+                        int nx = c.x + dx4[d], ny = c.y + dy4[d];
+                        if (nx > 0 && nx < gw - 1 && ny > 0 && ny < gh - 1 && maskSafe[nx, ny] && compId[nx, ny] == 0)
+                        {
+                            compId[nx, ny] = curComp;
+                            queue.Enqueue(new Vector2Int(nx, ny));
+                        }
+                    }
+                }
+
+                if (compPixels < 4) continue;
+
+                // Moore-Neighbor tracing theo chiều kim đồng hồ xung quanh thành phần liên thông curComp
+                int[] mdx = { -1, 0, 1, 1, 1, 0, -1, -1 };
+                int[] mdy = { 0, -1, -1, 0, 1, 1, 1, 0 };
+                var traced = new List<Vector2>();
+                int cx = startX, cy = startY;
+                int backDir = 0; // bên trái của (startX, startY) chắc chắn ngoài comp
+                int maxSteps = compPixels * 4 + 32;
+
+                for (int step = 0; step < maxSteps; step++)
+                {
+                    traced.Add(new Vector2(origX + (cx + 0.5f) * cell, origY + (cy + 0.5f) * cell));
+                    bool foundNext = false;
+                    int searchStart = (backDir + 1) % 8;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int dir = (searchStart + k) % 8;
+                        int nx = cx + mdx[dir];
+                        int ny = cy + mdy[dir];
+                        if (nx >= 0 && nx < gw && ny >= 0 && ny < gh && compId[nx, ny] == curComp)
+                        {
+                            cx = nx; cy = ny;
+                            backDir = (dir + 5) % 8; // quay lại ô trống ngay trước hướng đi vào
+                            foundNext = true;
+                            break;
+                        }
+                    }
+                    if (!foundNext || (cx == startX && cy == startY && step > 1)) break;
+                }
+
+                if (traced.Count >= 3)
+                {
+                    // Làm mượt nhẹ (1 pass Laplacian) rồi đơn giản hóa bằng Douglas-Peucker
+                    var smoothed = new List<Vector2>(traced.Count);
+                    for (int i = 0; i < traced.Count; i++)
+                    {
+                        Vector2 prev = traced[(i - 1 + traced.Count) % traced.Count];
+                        Vector2 curr = traced[i];
+                        Vector2 next = traced[(i + 1) % traced.Count];
+                        smoothed.Add(0.25f * prev + 0.50f * curr + 0.25f * next);
+                    }
+                    var simple = SimplifyClosedPolygonDouglasPeucker(smoothed, Mathf.Max(0.002f, dpEpsM * 0.65f));
+                    if (simple.Count >= 3 && ComputePolygonAreaSqM(simple) > 1e-5f)
+                    {
+                        safePolys.Add(simple);
+                    }
+                }
+            }
+        }
+        return safePolys;
+    }
+
+    private static List<Vector2> BuildCirclePolygon2D(Vector2 center, float radiusM, int segments = 48)
+    {
+        var poly = new List<Vector2>(segments);
+        if (radiusM <= 1e-4f) return poly;
+        for (int i = 0; i < segments; i++)
+        {
+            float ang = (2f * Mathf.PI * i) / segments;
+            poly.Add(center + new Vector2(Mathf.Cos(ang) * radiusM, Mathf.Sin(ang) * radiusM));
+        }
+        return poly;
+    }
+
+    private static List<Vector2> BuildOrientedRectPolygon2D(Vector2 center, Vector2 longAxis, float widthM, float lengthM)
+    {
+        var poly = new List<Vector2>(4);
+        if (widthM <= 1e-4f || lengthM <= 1e-4f) return poly;
+        Vector2 u = longAxis.sqrMagnitude > 1e-6f ? longAxis.normalized : Vector2.up;
+        Vector2 v = new Vector2(-u.y, u.x);
+        float hw = widthM * 0.5f;
+        float hl = lengthM * 0.5f;
+        poly.Add(center - u * hl - v * hw);
+        poly.Add(center + u * hl - v * hw);
+        poly.Add(center + u * hl + v * hw);
+        poly.Add(center - u * hl + v * hw);
+        return poly;
+    }
+
+    private static List<Vector2> BuildAnatomicalLegStripPolygon2D(in AnatomicalLegChain chain, float sMin, float sMax, float wMin, float wMax)
+    {
+        var poly = new List<Vector2>(28);
+        int nSteps = 10;
+        for (int i = 0; i <= nSteps; i++)
+        {
+            float sVal = Mathf.Lerp(sMin, sMax, (float)i / nSteps);
+            int seg = Mathf.Clamp(Mathf.FloorToInt(sVal), 0, 3);
+            poly.Add(ReconstructOnLegChain(chain, seg, sVal - seg, wMin));
+        }
+        for (int i = nSteps; i >= 0; i--)
+        {
+            float sVal = Mathf.Lerp(sMin, sMax, (float)i / nSteps);
+            int seg = Mathf.Clamp(Mathf.FloorToInt(sVal), 0, 3);
+            poly.Add(ReconstructOnLegChain(chain, seg, sVal - seg, wMax));
+        }
+        return poly;
+    }
+
+    /// <summary>
+    /// Bước 6 P1: Cắt chính xác đa giác kín `poly` (đã chuyển sang hệ tọa độ (u, v) theo majorAxis/minorAxis)
+    /// bằng đường thẳng quét song song tại `v = vLine`. Trả về danh sách các giao đoạn hợp lệ `[uStart, uEnd]`.
+    /// </summary>
+    private static List<Vector2> IntersectPolygonWithScanlineUV(List<Vector2> polyUV, float vLine)
+    {
+        var hitsU = new List<float>(8);
+        int n = polyUV.Count;
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 a = polyUV[i];
+            Vector2 b = polyUV[(i + 1) % n];
+            // Dùng quy ước half-open [min, max) để không đếm đúp tại đỉnh
+            if ((a.y <= vLine && b.y > vLine) || (b.y <= vLine && a.y > vLine))
+            {
+                float t = (vLine - a.y) / (b.y - a.y);
+                hitsU.Add(a.x + t * (b.x - a.x));
+            }
+        }
+        hitsU.Sort();
+        var intervals = new List<Vector2>(hitsU.Count / 2);
+        for (int i = 0; i + 1 < hitsU.Count; i += 2)
+        {
+            float u0 = hitsU[i];
+            float u1 = hitsU[i + 1];
+            if (u1 - u0 >= 0.004f) // bỏ các đoạn vi mô < 4 mm
+            {
+                intervals.Add(new Vector2(u0, u1));
+            }
+        }
+        return intervals;
+    }
+
+    private struct BoustrophedonSpan
+    {
+        public float v;
+        public float u0;
+        public float u1;
+    }
+
+    private static List<Vector3> LiftPolygon2DToWorldSurface(List<Vector2> poly2D, DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, bool useFlatPlane, float flatY)
+    {
+        var res = new List<Vector3>(poly2D.Count);
+        for (int i = 0; i < poly2D.Count; i++)
+        {
+            float y = flatY;
+            if (!useFlatPlane)
+            {
+                if (ctrl.SampleCompensatedSurface(poly2D[i].x, poly2D[i].y, out float cy, out _)) y = cy;
+                else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(poly2D[i].x, poly2D[i].y, out float py, out _)) y = py;
+            }
+            res.Add(new Vector3(poly2D[i].x, y + 0.002f, poly2D[i].y));
+        }
+        return res;
+    }
+
+    private struct TypedSurfacePoint
+    {
+        public Vector3 worldPos;
+        public bool sprayOnToHere;
+        public string segName;
+    }
+
+    /// <summary>
+    /// Chuyển các nét vẽ hở của người dùng thành đa giác Mask R chính xác theo đúng hình dáng nét vẽ
+    /// (thay vì ép thành hình chữ nhật lớn bao cả ống quần).
+    /// </summary>
+    private static List<List<Vector2>> BuildMaskPolygonsFromOpenStrokes2D(List<List<Vector2>> strokes2D, float brushRadiusM, float dpEpsM)
+    {
+        var polys = new List<List<Vector2>>();
+        if (strokes2D == null || strokes2D.Count == 0) return polys;
+
+        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+        int validSegs = 0;
+        for (int s = 0; s < strokes2D.Count; s++)
+        {
+            var st = strokes2D[s];
+            if (st == null || st.Count < 2) continue;
+            validSegs += st.Count - 1;
+            for (int p = 0; p < st.Count; p++)
+            {
+                if (st[p].x < minX) minX = st[p].x; if (st[p].x > maxX) maxX = st[p].x;
+                if (st[p].y < minY) minY = st[p].y; if (st[p].y > maxY) maxY = st[p].y;
+            }
+        }
+        if (validSegs == 0) return polys;
+
+        float rBrush = Mathf.Clamp(brushRadiusM, 0.008f, 0.060f);
+        float spanX = Mathf.Max(0.02f, (maxX - minX) + 2f * rBrush);
+        float spanY = Mathf.Max(0.02f, (maxY - minY) + 2f * rBrush);
+        float cell = Mathf.Clamp(Mathf.Max(spanX, spanY) / 180f, 0.0025f, 0.0045f);
+        int pad = 3;
+        int gw = Mathf.Clamp(Mathf.CeilToInt(spanX / cell) + pad * 2, 12, 260);
+        int gh = Mathf.Clamp(Mathf.CeilToInt(spanY / cell) + pad * 2, 12, 260);
+        float origX = minX - rBrush - pad * cell;
+        float origY = minY - rBrush - pad * cell;
+
+        bool[,] mask = new bool[gw, gh];
+        float r2 = rBrush * rBrush;
+        int rCells = Mathf.CeilToInt(rBrush / cell) + 1;
+
+        for (int s = 0; s < strokes2D.Count; s++)
+        {
+            var st = strokes2D[s];
+            if (st == null || st.Count < 2) continue;
+            for (int p = 0; p < st.Count - 1; p++)
+            {
+                Vector2 a = st[p];
+                Vector2 b = st[p + 1];
+                int ix0 = Mathf.Clamp(Mathf.FloorToInt((Mathf.Min(a.x, b.x) - origX) / cell) - rCells, 1, gw - 2);
+                int ix1 = Mathf.Clamp(Mathf.CeilToInt((Mathf.Max(a.x, b.x) - origX) / cell) + rCells, 1, gw - 2);
+                int iy0 = Mathf.Clamp(Mathf.FloorToInt((Mathf.Min(a.y, b.y) - origY) / cell) - rCells, 1, gh - 2);
+                int iy1 = Mathf.Clamp(Mathf.CeilToInt((Mathf.Max(a.y, b.y) - origY) / cell) + rCells, 1, gh - 2);
+
+                for (int y = iy0; y <= iy1; y++)
+                {
+                    float wy = origY + (y + 0.5f) * cell;
+                    for (int x = ix0; x <= ix1; x++)
+                    {
+                        if (mask[x, y]) continue;
+                        float wx = origX + (x + 0.5f) * cell;
+                        float d = DistToSegment2D(new Vector2(wx, wy), a, b);
+                        if (d * d <= r2) mask[x, y] = true;
+                    }
+                }
+            }
+        }
+
+        // Lần biên từng thành phần liên thông của Mask nét vẽ
+        int[,] compId = new int[gw, gh];
+        int curComp = 0;
+        var queue = new Queue<Vector2Int>();
+        int[] dx4 = { 1, -1, 0, 0 };
+        int[] dy4 = { 0, 0, 1, -1 };
+        int[] mdx = { -1, 0, 1, 1, 1, 0, -1, -1 };
+        int[] mdy = { 0, -1, -1, 0, 1, 1, 1, 0 };
+
+        for (int y = 1; y < gh - 1; y++)
+        {
+            for (int x = 1; x < gw - 1; x++)
+            {
+                if (!mask[x, y] || compId[x, y] != 0) continue;
+                curComp++;
+                int compPixels = 0;
+                queue.Clear();
+                queue.Enqueue(new Vector2Int(x, y));
+                compId[x, y] = curComp;
+                int startX = x, startY = y;
+
+                while (queue.Count > 0)
+                {
+                    Vector2Int c = queue.Dequeue();
+                    compPixels++;
+                    if (c.y < startY || (c.y == startY && c.x < startX)) { startX = c.x; startY = c.y; }
+                    for (int d = 0; d < 4; d++)
+                    {
+                        int nx = c.x + dx4[d], ny = c.y + dy4[d];
+                        if (nx > 0 && nx < gw - 1 && ny > 0 && ny < gh - 1 && mask[nx, ny] && compId[nx, ny] == 0)
+                        {
+                            compId[nx, ny] = curComp;
+                            queue.Enqueue(new Vector2Int(nx, ny));
+                        }
+                    }
+                }
+                if (compPixels < 6) continue;
+
+                var traced = new List<Vector2>();
+                int cx = startX, cy = startY;
+                int backDir = 0;
+                int maxSteps = compPixels * 4 + 32;
+                for (int step = 0; step < maxSteps; step++)
+                {
+                    traced.Add(new Vector2(origX + (cx + 0.5f) * cell, origY + (cy + 0.5f) * cell));
+                    bool foundNext = false;
+                    int searchStart = (backDir + 1) % 8;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int dir = (searchStart + k) % 8;
+                        int nx = cx + mdx[dir];
+                        int ny = cy + mdy[dir];
+                        if (nx >= 0 && nx < gw && ny >= 0 && ny < gh && compId[nx, ny] == curComp)
+                        {
+                            cx = nx; cy = ny;
+                            backDir = (dir + 5) % 8;
+                            foundNext = true;
+                            break;
+                        }
+                    }
+                    if (!foundNext || (cx == startX && cy == startY && step > 1)) break;
+                }
+
+                if (traced.Count >= 3)
+                {
+                    var smoothed = new List<Vector2>(traced.Count);
+                    for (int i = 0; i < traced.Count; i++)
+                    {
+                        Vector2 prev = traced[(i - 1 + traced.Count) % traced.Count];
+                        Vector2 curr = traced[i];
+                        Vector2 next = traced[(i + 1) % traced.Count];
+                        smoothed.Add(0.25f * prev + 0.50f * curr + 0.25f * next);
+                    }
+                    var simple = SimplifyClosedPolygonDouglasPeucker(smoothed, Mathf.Max(0.002f, dpEpsM * 0.7f));
+                    if (simple.Count >= 3 && ComputePolygonAreaSqM(simple) > 2e-5f)
+                        polys.Add(simple);
+                }
+            }
+        }
+        return polys;
+    }
+
+    private static List<DobotCR10AIKController.WaypointData> BuildSprayWaypointsFromTypedPolyline(
+        List<TypedSurfacePoint> typedPath,
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        SprayTechParams tech,
+        bool useFixedVerticalNormal,
+        bool useFlatPlaneZ,
+        float flatPlaneWorldY,
+        float overrideStandoffMm)
+    {
+        var result = new List<DobotCR10AIKController.WaypointData>();
+        if (typedPath == null || typedPath.Count < 2 || ctrl == null) return result;
+
+        float effectiveStandoffMm = (overrideStandoffMm >= 0f) ? overrideStandoffMm : GetEffectiveSprayHeightMm(ctrl, tech);
+        float standoffM = effectiveStandoffMm * 0.001f;
+        Transform gRef = ctrl.globalReference;
+        int m = typedPath.Count;
+
+        Vector3[] surfPtsWorld = new Vector3[m];
+        Vector3[] surfNormsWorld = new Vector3[m];
+        for (int p = 0; p < m; p++)
+        {
+            Vector3 pt = typedPath[p].worldPos;
+            Vector3 nrm = Vector3.up;
+            if (useFlatPlaneZ)
+            {
+                pt.y = flatPlaneWorldY;
+                nrm = Vector3.up;
+            }
+            else if (ctrl.SampleCompensatedSurface(pt.x, pt.z, out float cy, out Vector3 cn))
+            {
+                pt.y = cy;
+                nrm = useFixedVerticalNormal ? Vector3.up : cn;
+            }
+            else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(pt.x, pt.z, out float py, out Vector3 pn))
+            {
+                pt.y = py;
+                nrm = useFixedVerticalNormal ? Vector3.up : pn;
+            }
+            if (nrm.y < 0f) nrm = -nrm;
+            surfPtsWorld[p] = pt;
+            surfNormsWorld[p] = nrm.normalized;
+        }
+
+        Vector3[] smoothNormsWorld = new Vector3[m];
+        for (int p = 0; p < m; p++)
+        {
+            Vector3 sum = surfNormsWorld[p] * 2f;
+            if (p > 0) sum += surfNormsWorld[p - 1];
+            if (p < m - 1) sum += surfNormsWorld[p + 1];
+            smoothNormsWorld[p] = sum.normalized;
+        }
+
+        float cumDistMm = 0f;
+        Vector3 prevTcpRobotMm = Vector3.zero;
+        float[] prevJoints = null;
+        float maxTilt = tech != null ? tech.maxTiltDeg : 28f;
+
+        for (int p = 0; p < m; p++)
+        {
+            Vector3 surfW = surfPtsWorld[p];
+            Vector3 normW = smoothNormsWorld[p];
+            float tiltDeg = Vector3.Angle(normW, Vector3.up);
+            if (tiltDeg > maxTilt && maxTilt > 0.1f)
+            {
+                Vector3 axis = Vector3.Cross(Vector3.up, normW);
+                if (axis.sqrMagnitude > 1e-6f)
+                    normW = (Quaternion.AngleAxis(maxTilt, axis.normalized) * Vector3.up).normalized;
+            }
+
+            Vector3 tcpW = surfW + normW * standoffM;
+            Vector3 tcpRobotMm = gRef != null
+                ? gRef.InverseTransformPoint(tcpW) * 1000f
+                : new Vector3((1.100f - tcpW.z) * 1000f, -tcpW.x * 1000f, tcpW.y * 1000f);
+            tcpRobotMm.z = Mathf.Clamp(tcpRobotMm.z, 18f, 550f);
+            if (tcpRobotMm.magnitude > 1145f)
+            {
+                float rScale = 1140f / tcpRobotMm.magnitude;
+                tcpRobotMm.x *= rScale;
+                tcpRobotMm.y *= rScale;
+                tcpW = gRef != null
+                    ? gRef.TransformPoint(tcpRobotMm * 0.001f)
+                    : new Vector3(-tcpRobotMm.y * 0.001f, tcpRobotMm.z * 0.001f, 1.100f - tcpRobotMm.x * 0.001f);
+            }
+
+            Vector3 normRobot = gRef != null
+                ? gRef.InverseTransformDirection(normW).normalized
+                : new Vector3(-normW.z, -normW.x, normW.y).normalized;
+            Vector3 tanW = (p < m - 1) ? (surfPtsWorld[p + 1] - surfPtsWorld[p]) : (surfPtsWorld[p] - surfPtsWorld[p - 1]);
+            if (tanW.sqrMagnitude < 1e-7f) tanW = Vector3.forward;
+            Vector3 tanRobot = gRef != null
+                ? gRef.InverseTransformDirection(tanW).normalized
+                : new Vector3(-tanW.z, -tanW.x, tanW.y).normalized;
+
+            Vector3 rpyDeg = DobotCR10AKinematics.SurfaceNormalToRobotRpyDeg(normRobot, tanRobot, maxTilt);
+
+            if (p > 0) cumDistMm += Vector3.Distance(prevTcpRobotMm, tcpRobotMm);
+            prevTcpRobotMm = tcpRobotMm;
+
+            var wp = new DobotCR10AIKController.WaypointData
+            {
+                index = p,
+                distance_mm = cumDistMm,
+                targetPosGlobal_mm = tcpRobotMm,
+                targetPosWorld_m = tcpW,
+                microNormal = normW,
+                roll_deg = rpyDeg.x,
+                pitch_deg = rpyDeg.y,
+                yaw_deg = rpyDeg.z,
+                sprayOn = (p > 0) && typedPath[p].sprayOnToHere,
+                segmentName = typedPath[p].segName
+            };
+
+            Quaternion qRot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+            var sols = DobotCR10AKinematics.SolveTcpPose(
+                wp.targetPosGlobal_mm, qRot, prevJoints,
+                ctrl.toolLength, useAdaptiveTilt: true, maxTiltDeg: maxTilt,
+                toolOffsetX: ctrl.toolOffsetX, toolOffsetY: ctrl.toolOffsetY);
+            if (sols == null || sols.Count == 0)
+            {
+                wp.roll_deg = 180f; wp.pitch_deg = 0f; wp.yaw_deg = 0f;
+                qRot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+                sols = DobotCR10AKinematics.SolveTcpPose(
+                    wp.targetPosGlobal_mm, qRot, prevJoints,
+                    ctrl.toolLength, useAdaptiveTilt: true, maxTiltDeg: maxTilt,
+                    toolOffsetX: ctrl.toolOffsetX, toolOffsetY: ctrl.toolOffsetY);
+            }
+            if (sols != null && sols.Count > 0)
+            {
+                var best = sols[0];
+                for (int j = 0; j < 6; j++)
+                {
+                    wp.jointAngles_rad[j] = (float)best.jointsRad[j];
+                    wp.jointAngles_deg[j] = (float)best.jointsDeg[j];
+                }
+                wp.isSolved = true;
+                wp.posError_mm = (float)best.positionErrorMm;
+                wp.selectedSolutionIndex = 0;
+                wp.selectedBranchName = best.branchName;
+                prevJoints = wp.jointAngles_rad;
+            }
+            result.Add(wp);
+        }
+
+        return result;
+    }
+
+    private static void AppendSampledLinePoints(
+        List<TypedSurfacePoint> list,
+        Vector2 startXZ,
+        Vector2 endXZ,
+        bool sprayOn,
+        string segName,
+        float stepM,
+        float defaultY,
+        bool includeStart)
+    {
+        float len = Vector2.Distance(startXZ, endXZ);
+        int nSteps = Mathf.Clamp(Mathf.CeilToInt(len / Mathf.Max(0.005f, stepM)), 1, 60);
+        int kStart = includeStart ? 0 : 1;
+        for (int k = kStart; k <= nSteps; k++)
+        {
+            float t = (float)k / nSteps;
+            Vector2 p = Vector2.Lerp(startXZ, endXZ, t);
+            list.Add(new TypedSurfacePoint
+            {
+                worldPos = new Vector3(p.x, defaultY, p.y),
+                sprayOnToHere = (k == 0) ? false : sprayOn,
+                segName = segName
+            });
+        }
+    }
+
+    /// <summary>
+    /// Overload tương thích ngược cho bộ so sánh P1 / P2 / P3 / P4.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP1Zigzag(
         DobotCR10AIKController ctrl,
@@ -927,144 +2231,823 @@ public static class TrajectoryEvaluationEngine
         SprayTechParams tech,
         out float genTimeSec)
     {
+        var cfg = ctrl != null && ctrl.p1Config != null ? ctrl.p1Config : new P1ZigzagConfig
+        {
+            erosionEMm = tech != null ? tech.borderMarginMm : 12f,
+            sprayWidthWMm = tech != null ? tech.sprayWidthMm : 80f,
+            overlapRatioR = tech != null ? tech.overlapRatio : 0.40f,
+            sprayDistanceDMm = GetEffectiveSprayHeightMm(ctrl, tech),
+            autoSpacingFromWidthOverlap = true
+        };
+        return GenerateP1Zigzag(ctrl, plyLoader, templateStrokesUV, templateSize, tech, cfg, out _, out genTimeSec);
+    }
+
+    /// <summary>
+    /// P1 — Quét Zigzag / Raster kiểu máy in 3D trên chỗ cần phun R (Đầy đủ 10 bước chuẩn tài liệu P1):
+    /// 1. Nhận chỗ cần phun R (hình/vòng tròn/nét vẽ thực tế của người dùng, 2 ống AI, hình tròn hoặc HCN kiểm chứng).
+    /// 2. Đơn giản hóa biên bằng Douglas-Peucker (ngưỡng eps mm).
+    /// 3. Co vùng phun R vào trong khoảng e -> R_safe (phân tách rõ R gốc và R_safe để hiển thị độc lập trong View).
+    /// 4. Chọn hướng quét tối ưu (PCA trục dài / HCN bao nhỏ nhất / góc tùy chỉnh).
+    /// 5. Phân tách vùng lõm thành các ô lồi (Boustrophedon).
+    /// 6-7. Quét đường thẳng song song cách bước s qua lại kiểu Zigzag:
+    ///      - Kiểu Máy in 3D (mặc định): Đầu phun chạy Zigzag qua lại liên tục trên toàn khung bao vùng phun;
+    ///        đi qua chỗ cần phun (R_safe) thì BẬT SÚNG (sprayOn=true), đi ngoài vùng hoặc quay đầu thì TẮT SÚNG (sprayOn=false).
+    ///      - Kiểu Cắt gọn R_safe: Chỉ đi trong giao đoạn R_safe + nối quay đầu tắt súng.
+    /// 8-10. Gán Z (2.5D từ Point Cloud / 2D mặt phẳng), hướng súng, lùi d, giải IK 6-DOF.
+    /// </summary>
+    public static List<DobotCR10AIKController.WaypointData> GenerateP1Zigzag(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
+        SprayTechParams tech,
+        P1ZigzagConfig p1Cfg,
+        out P1ExecutionResult p1Result,
+        out float genTimeSec)
+    {
         float t0 = Time.realtimeSinceStartup;
+        p1Result = new P1ExecutionResult();
         var strokesWorld = new List<List<Vector3>>();
 
-        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12)
+        if (ctrl == null)
         {
+            p1Result.warningMessage = "Chưa có bộ điều khiển phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
 
-        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
-        Vector2[] dst12XZ = new Vector2[12];
-        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+        if (p1Cfg == null) p1Cfg = new P1ZigzagConfig();
+        float erosionEM = Mathf.Max(0f, p1Cfg.erosionEMm) * 0.001f;
+        float stepSM = Mathf.Clamp(p1Cfg.EffectiveSpacingSMm, 4f, 120f) * 0.001f;
+        float dpEpsM = Mathf.Clamp(p1Cfg.douglasPeuckerEpsMm, 0.5f, 20f) * 0.001f;
+        float overscanM = Mathf.Clamp(p1Cfg.turnaroundOverscanMm, 4f, 50f) * 0.001f;
+        float sampleStepM = 0.015f;
+        p1Result.effectiveSpacingMm = stepSM * 1000f;
+        p1Result.erosionEMm = p1Cfg.erosionEMm;
 
-        // Bước 1: Đơn giản hóa biên quần bằng Douglas-Peucker (epsilon = 4 mm)
-        List<Vector3> simplifiedContourWorld = ctrl.garmentContourWorld;
-        if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 8)
+        bool has12Landmarks = (ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12);
+        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
+        Vector2[] dst12XZ = null;
+        float avgClothY = (plyLoader != null) ? (plyLoader.estimatedTableY + 0.025f) : 0.025f;
+
+        if (has12Landmarks)
         {
-            var raw2D = new List<Vector2>(ctrl.garmentContourWorld.Count);
-            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++)
-                raw2D.Add(new Vector2(ctrl.garmentContourWorld[i].x, ctrl.garmentContourWorld[i].z));
-            var dp2D = SimplifyPolygonDouglasPeucker(raw2D, 0.004f);
-            simplifiedContourWorld = new List<Vector3>(dp2D.Count);
-            for (int i = 0; i < dp2D.Count; i++)
-                simplifiedContourWorld.Add(new Vector3(dp2D[i].x, 0.02f, dp2D[i].y));
+            dst12XZ = new Vector2[12];
+            avgClothY = 0f;
+            for (int i = 0; i < 12; i++)
+            {
+                dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+                avgClothY += ctrl.landmarksWorldPos[i].y;
+            }
+            avgClothY /= 12f;
+        }
+        else if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 3)
+        {
+            float sumY = 0f;
+            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) sumY += ctrl.garmentContourWorld[i].y;
+            avgClothY = sumY / ctrl.garmentContourWorld.Count;
         }
 
-        // Ánh xạ mẫu vẽ sang từng ống để xác định vùng cần phun R_leg (theo mẫu hiệu ứng của mã hàng)
-        var legTemplatePts = new List<Vector2>[2] { new List<Vector2>(), new List<Vector2>() };
-        if (templateStrokesUV != null)
+        List<Vector2> garmentClip2D = null;
+        if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 6)
         {
-            Vector2 thighL = dst12XZ[4], kneeL = dst12XZ[6];
-            Vector2 thighR = dst12XZ[5], kneeR = dst12XZ[7];
-            for (int s = 0; s < templateStrokesUV.Count; s++)
+            var rawG = new List<Vector2>(ctrl.garmentContourWorld.Count);
+            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++)
+                rawG.Add(new Vector2(ctrl.garmentContourWorld[i].x, ctrl.garmentContourWorld[i].z));
+            garmentClip2D = SimplifyClosedPolygonDouglasPeucker(rawG, dpEpsM);
+        }
+
+        bool hasMaskFallback = (garmentClip2D != null && garmentClip2D.Count >= 3)
+            || (ctrl.sprayZoneLeftWorld != null && ctrl.sprayZoneLeftWorld.Count >= 3)
+            || (ctrl.sprayZoneRightWorld != null && ctrl.sprayZoneRightWorld.Count >= 3)
+            || ctrl.HasCustomDrawnRegions2D;
+        if (!has12Landmarks && !hasMaskFallback)
+        {
+            p1Result.warningMessage = "Chưa có Mask 2D (đường bao quần / vùng ống) hoặc 12 mốc AI cho phôi hiện tại.";
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+
+        AnatomicalLegChain dstChainL = has12Landmarks ? BuildLegChain(dst12XZ, true) : default;
+        AnatomicalLegChain dstChainR = has12Landmarks ? BuildLegChain(dst12XZ, false) : default;
+
+        // Tách sẵn mask 2 ống quần thuần túy từ Mask 2D (phục vụ P1 chạy độc lập không cần 12 mốc!)
+        var pureMaskLegs = ExtractLegMaskPolygonsFromMask2D(ctrl, dpEpsM, preferFullGarmentSplit: true);
+
+        // BƯỚC 1 & 2 & 3: Xây dựng vùng cần phun R gốc + đơn giản hóa Douglas-Peucker + co biên e -> R_safe
+        var rawRegions2D = new List<List<Vector2>>();
+        var safeRegions2D = new List<List<Vector2>>();
+        var safeToRawIdx = new List<int>();
+        var regionFallbackAxes = new List<Vector2>();
+        float totalRawSqM = 0f;
+        float totalSafeSqM = 0f;
+
+        if (p1Cfg.regionSource == P1RegionSourceMode.TestCircle)
+        {
+            float r0 = Mathf.Clamp(p1Cfg.testCircleRadiusMm, 10f, 180f) * 0.001f;
+            float rSafe = r0 - erosionEM;
+            int nLegs = p1Cfg.testOnBothLegs ? 2 : 1;
+            for (int leg = 0; leg < nLegs; leg++)
             {
-                var raw = templateStrokesUV[s];
-                if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.015f);
-                for (int p = 0; p < resampled.Count; p++)
+                Vector2 center, longAx;
+                if (has12Landmarks)
                 {
-                    Vector2 wpt = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
-                    float dL = DistToSegment2D(wpt, thighL, kneeL);
-                    float dR = DistToSegment2D(wpt, thighR, kneeR);
-                    legTemplatePts[dL <= dR ? 0 : 1].Add(wpt);
+                    Vector2 thigh = dst12XZ[leg == 0 ? 4 : 5];
+                    Vector2 knee = dst12XZ[leg == 0 ? 6 : 7];
+                    center = 0.5f * (thigh + knee);
+                    longAx = (knee - thigh).sqrMagnitude > 1e-6f ? (knee - thigh).normalized : Vector2.up;
+                }
+                else if (leg < pureMaskLegs.Count && pureMaskLegs[leg].Count >= 3)
+                {
+                    ComputePcaAxes2D(pureMaskLegs[leg], Vector2.up, out center, out longAx, out _);
+                }
+                else continue;
+
+                int rawIdx = rawRegions2D.Count;
+                rawRegions2D.Add(BuildCirclePolygon2D(center, r0, 56));
+                totalRawSqM += Mathf.PI * r0 * r0;
+                if (rSafe > 0.003f)
+                {
+                    safeRegions2D.Add(BuildCirclePolygon2D(center, rSafe, 56));
+                    safeToRawIdx.Add(rawIdx);
+                    regionFallbackAxes.Add(longAx);
+                    totalSafeSqM += Mathf.PI * rSafe * rSafe;
                 }
             }
+            if (rSafe <= 0.003f)
+                p1Result.warningMessage = $"Co biên e = {p1Cfg.erosionEMm:F1} mm >= bán kính R0 = {p1Cfg.testCircleRadiusMm:F1} mm -> vùng R_safe biến mất! Hãy giảm e.";
         }
-
-        float stepSM = Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 90f) * 0.001f;
-        float sampleStepM = 0.016f;
-        float corridorRadiusM = Mathf.Max(stepSM * 0.85f, 0.026f);
-
-        // Bước 2 & 3: Boustrophedon decomposition cho 2 ô lồi (ống trái & ống phải), quét dọc trục dài PCA
-        float[] marginAttempts = { tech.borderMarginMm, tech.borderMarginMm * 0.35f, 0f };
-        for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0; attempt++)
+        else if (p1Cfg.regionSource == P1RegionSourceMode.TestRectangle)
         {
-            float activeMargin = marginAttempts[attempt];
-            List<Vector3> activeContour = (attempt < 2) ? simplifiedContourWorld : null;
-
-            for (int leg = 0; leg < 2; leg++)
+            float w0 = Mathf.Clamp(p1Cfg.testRectWidthMm, 20f, 300f) * 0.001f;
+            float l0 = Mathf.Clamp(p1Cfg.testRectLengthMm, 30f, 600f) * 0.001f;
+            float wSafe = w0 - 2f * erosionEM;
+            float lSafe = l0 - 2f * erosionEM;
+            int nLegs = p1Cfg.testOnBothLegs ? 2 : 1;
+            for (int leg = 0; leg < nLegs; leg++)
             {
-                Vector2 crotch = dst12XZ[3];
-                Vector2 thigh = dst12XZ[leg == 0 ? 4 : 5];
-                Vector2 knee = dst12XZ[leg == 0 ? 6 : 7];
-                Vector2 cuffMid = 0.5f * (dst12XZ[leg == 0 ? 8 : 10] + dst12XZ[leg == 0 ? 9 : 11]);
-                Vector2 fallbackLong = (cuffMid - crotch).sqrMagnitude > 1e-6f ? (cuffMid - crotch).normalized : Vector2.up;
-
-                List<Vector2> pcaInput = legTemplatePts[leg].Count >= 3
-                    ? legTemplatePts[leg]
-                    : new List<Vector2> { crotch, thigh, knee, cuffMid };
-                ComputePcaAxes2D(pcaInput, fallbackLong, out Vector2 centroid, out Vector2 majorAxis, out Vector2 minorAxis);
-
-                // Xác định hộp bao của vùng R_leg trên hệ trục PCA (majorAxis = hướng quét dọc, minorAxis = bước dịch ngang s)
-                float minMajor = float.MaxValue, maxMajor = float.MinValue;
-                float minMinor = float.MaxValue, maxMinor = float.MinValue;
-                for (int i = 0; i < pcaInput.Count; i++)
+                Vector2 center, longAx;
+                if (has12Landmarks)
                 {
-                    Vector2 rel = pcaInput[i] - centroid;
-                    float u = Vector2.Dot(rel, majorAxis);
-                    float v = Vector2.Dot(rel, minorAxis);
-                    if (u < minMajor) minMajor = u;
-                    if (u > maxMajor) maxMajor = u;
-                    if (v < minMinor) minMinor = v;
-                    if (v > maxMinor) maxMinor = v;
+                    Vector2 thigh = dst12XZ[leg == 0 ? 4 : 5];
+                    Vector2 knee = dst12XZ[leg == 0 ? 6 : 7];
+                    center = 0.5f * (thigh + knee);
+                    longAx = (knee - thigh).sqrMagnitude > 1e-6f ? (knee - thigh).normalized : Vector2.up;
                 }
-                minMajor -= corridorRadiusM * 0.7f;
-                maxMajor += corridorRadiusM * 0.7f;
-                minMinor -= corridorRadiusM * 0.7f;
-                maxMinor += corridorRadiusM * 0.7f;
-
-                float spanMinor = Mathf.Max(stepSM, maxMinor - minMinor);
-                int numPasses = Mathf.Clamp(Mathf.CeilToInt(spanMinor / stepSM) + 1, 2, 18);
-                int numSteps = Mathf.Clamp(Mathf.CeilToInt((maxMajor - minMajor) / sampleStepM), 8, 90);
-
-                for (int pass = 0; pass < numPasses; pass++)
+                else if (leg < pureMaskLegs.Count && pureMaskLegs[leg].Count >= 3)
                 {
-                    float vOff = (numPasses == 1)
-                        ? 0.5f * (minMinor + maxMinor)
-                        : Mathf.Lerp(minMinor, maxMinor, (float)pass / (numPasses - 1));
-                    bool reverse = (pass % 2 == 1);
-                    var currentSeg = new List<Vector3>();
+                    ComputePcaAxes2D(pureMaskLegs[leg], Vector2.up, out center, out longAx, out _);
+                }
+                else continue;
 
-                    for (int k = 0; k <= numSteps; k++)
+                int rawIdx = rawRegions2D.Count;
+                rawRegions2D.Add(BuildOrientedRectPolygon2D(center, longAx, w0, l0));
+                totalRawSqM += w0 * l0;
+                if (wSafe > 0.005f && lSafe > 0.005f)
+                {
+                    safeRegions2D.Add(BuildOrientedRectPolygon2D(center, longAx, wSafe, lSafe));
+                    safeToRawIdx.Add(rawIdx);
+                    regionFallbackAxes.Add(longAx);
+                    totalSafeSqM += wSafe * lSafe;
+                }
+            }
+            if (wSafe <= 0.005f || lSafe <= 0.005f)
+                p1Result.warningMessage = $"Co biên 2*e = {2f * p1Cfg.erosionEMm:F1} mm >= kích thước HCN ({p1Cfg.testRectWidthMm:F0}x{p1Cfg.testRectLengthMm:F0} mm) -> vùng R_safe biến mất!";
+        }
+        else
+        {
+            var candidateRawPolys = new List<List<Vector2>>();
+            var candidateAxes = new List<Vector2>();
+            bool clipToGarment = (p1Cfg.regionSource == P1RegionSourceMode.JeansLegZones);
+
+            bool usedUserDrawnRegions = false;
+            if (p1Cfg.regionSource == P1RegionSourceMode.FromTemplateStrokes)
+            {
+                // Nếu người dùng vẽ trực tiếp vùng hình cơ bản (Tròn / Vuông / Đa giác) trên ảnh 2D,
+                // dùng thẳng đa giác thực 3D World XZ (không bị méo qua biến dạng 12 mốc và không bị giãn nét hở!)
+                if (ctrl.HasCustomDrawnRegions2D)
+                {
+                    var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+                    for (int i = 0; i < directRegionsXZ.Count; i++)
                     {
-                        float t = reverse ? (1f - (float)k / numSteps) : ((float)k / numSteps);
-                        float uOff = Mathf.Lerp(minMajor, maxMajor, t);
-                        Vector2 ptXZ = centroid + uOff * majorAxis + vOff * minorAxis;
-
-                        if (IsPointInTemplateRegionR(ptXZ, leg, legTemplatePts[leg], corridorRadiusM, activeContour, ctrl.landmarksWorldPos, activeMargin))
+                        if (directRegionsXZ[i] != null && directRegionsXZ[i].Count >= 3)
                         {
-                            currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
+                            candidateRawPolys.Add(directRegionsXZ[i]);
+                            candidateAxes.Add(Vector2.up);
+                            usedUserDrawnRegions = true;
                         }
-                        else if (currentSeg.Count >= 2)
+                    }
+                }
+                if (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0 &&
+                    (!usedUserDrawnRegions || ctrl.HasCustomDrawnStrokes2D))
+                {
+                    var closedUserLoops = new List<List<Vector2>>();
+                    var openStrokesWorld2D = new List<List<Vector2>>();
+
+                    for (int s = 0; s < templateStrokesUV.Count; s++)
+                    {
+                        var st = templateStrokesUV[s];
+                        if (st == null || st.Count < 2) continue;
+
+                        var warped = new List<Vector2>(st.Count);
+                        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+                        float arcLen = 0f;
+                        for (int p = 0; p < st.Count; p++)
                         {
-                            strokesWorld.Add(currentSeg);
-                            currentSeg = new List<Vector3>();
+                            Vector2 wp = WarpPointBarycentric12(st[p], src12, dst12XZ);
+                            if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
+                            warped.Add(wp);
+                            if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
+                            if (wp.y < minY) minY = wp.y; if (wp.y > maxY) maxY = wp.y;
+                        }
+                        float diag = Mathf.Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
+                        float endGap = Vector2.Distance(warped[0], warped[warped.Count - 1]);
+                        float area = ComputePolygonAreaSqM(warped);
+
+                        // Nhận diện thông minh vòng khép kín vẽ tay (hình tròn, oval, hình vuông, hình tự do...)
+                        bool isLoopShape = (warped.Count >= 6 && diag > 0.025f && area >= 0.00025f)
+                            && (endGap <= Mathf.Max(0.065f, diag * 0.42f) || (endGap > 1e-4f && arcLen / endGap >= 2.2f));
+                        if (isLoopShape)
+                        {
+                            closedUserLoops.Add(warped);
                         }
                         else
                         {
-                            currentSeg.Clear();
+                            openStrokesWorld2D.Add(warped);
                         }
                     }
-                    if (currentSeg.Count >= 2) strokesWorld.Add(currentSeg);
+
+                    for (int i = 0; i < closedUserLoops.Count; i++)
+                    {
+                        var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
+                        if (simp.Count >= 3)
+                        {
+                            candidateRawPolys.Add(simp);
+                            candidateAxes.Add(Vector2.up);
+                        }
+                    }
+
+                    // Với các nét vẽ hở (chữ, đường cong, râu mèo, mẫu nhiều nét): chuyển đúng hình dáng nét vẽ thành vùng Mask R!
+                    if (openStrokesWorld2D.Count > 0)
+                    {
+                        float brushR = Mathf.Max(0.012f, p1Cfg.openStrokeBrushRadiusMm * 0.001f);
+                        if (erosionEM > 0.001f && brushR < erosionEM + 0.008f)
+                            brushR = Mathf.Min(0.045f, erosionEM + 0.010f);
+                        var strokeMaskPolys = BuildMaskPolygonsFromOpenStrokes2D(openStrokesWorld2D, brushR, dpEpsM);
+                        for (int i = 0; i < strokeMaskPolys.Count; i++)
+                        {
+                            candidateRawPolys.Add(strokeMaskPolys[i]);
+                            candidateAxes.Add(Vector2.up);
+                        }
+                    }
+                }
+            }
+
+            if (candidateRawPolys.Count == 0)
+            {
+                clipToGarment = true;
+                // Ưu tiên lấy trực tiếp từ Mask 2D thuần (sprayZoneLeft/Right hoặc tự tách 2 ống từ garmentContourWorld — KHÔNG cần 12 mốc!)
+                if (pureMaskLegs.Count > 0)
+                {
+                    for (int m = 0; m < pureMaskLegs.Count; m++)
+                    {
+                        ComputePcaAxes2D(pureMaskLegs[m], Vector2.up, out _, out Vector2 pcaAx, out _);
+                        candidateRawPolys.Add(pureMaskLegs[m]);
+                        candidateAxes.Add(pcaAx);
+                    }
+                }
+                else if (has12Landmarks)
+                {
+                    var stripL = BuildAnatomicalLegStripPolygon2D(dstChainL, 1.08f, 3.80f, -0.88f, 0.88f);
+                    var stripR = BuildAnatomicalLegStripPolygon2D(dstChainR, 1.08f, 3.80f, -0.88f, 0.88f);
+                    candidateRawPolys.Add(SimplifyClosedPolygonDouglasPeucker(stripL, dpEpsM));
+                    candidateAxes.Add((dstChainL.C[4] - dstChainL.C[1]).normalized);
+                    candidateRawPolys.Add(SimplifyClosedPolygonDouglasPeucker(stripR, dpEpsM));
+                    candidateAxes.Add((dstChainR.C[4] - dstChainR.C[1]).normalized);
+                }
+            }
+
+            int autoClampedSmallCount = 0;
+            for (int r = 0; r < candidateRawPolys.Count; r++)
+            {
+                int rawIdx = rawRegions2D.Count;
+                rawRegions2D.Add(candidateRawPolys[r]);
+                var erodedList = ErodePolygonByDistanceE2D(candidateRawPolys[r], erosionEM, clipToGarment ? garmentClip2D : null, dpEpsM, out float aRaw, out float aSafe);
+
+                // Bảo vệ các vùng nhỏ do người dùng tự vẽ (Tròn/Vuông/Đa giác): không để co biên e xóa mất hoàn toàn vùng vẽ!
+                if (erodedList.Count == 0 && usedUserDrawnRegions && aRaw > 1e-5f)
+                {
+                    float approxR = Mathf.Sqrt(aRaw / Mathf.PI);
+                    float safeSmallE = Mathf.Clamp(approxR * 0.25f, 0f, erosionEM * 0.4f);
+                    if (safeSmallE >= 0.002f)
+                        erodedList = ErodePolygonByDistanceE2D(candidateRawPolys[r], safeSmallE, null, Mathf.Min(dpEpsM, 0.002f), out _, out aSafe);
+                    if (erodedList.Count == 0)
+                    {
+                        erodedList = new List<List<Vector2>> { new List<Vector2>(candidateRawPolys[r]) };
+                        aSafe = aRaw;
+                    }
+                    autoClampedSmallCount++;
+                }
+
+                totalRawSqM += aRaw;
+                totalSafeSqM += aSafe;
+                for (int k = 0; k < erodedList.Count; k++)
+                {
+                    safeRegions2D.Add(erodedList[k]);
+                    safeToRawIdx.Add(rawIdx);
+                    regionFallbackAxes.Add(candidateAxes[r]);
+                }
+            }
+
+            if (safeRegions2D.Count == 0 && rawRegions2D.Count > 0)
+            {
+                p1Result.warningMessage = $"Co biên e = {p1Cfg.erosionEMm:F1} mm quá lớn so với bề rộng vùng R -> vùng R_safe biến mất! Hãy giảm e.";
+            }
+            else if (autoClampedSmallCount > 0)
+            {
+                p1Result.warningMessage = $"Lưu ý: {autoClampedSmallCount} vùng vẽ nhỏ hơn 2×e ({2f * p1Cfg.erosionEMm:F0} mm) đã tự giảm co biên để không bị mất quỹ đạo.";
+            }
+        }
+
+        // Lưu đa giác 3D của CHỖ CẦN PHUN (R gốc & R_safe sau co biên e) để hiển thị độc lập trong View 2D & 3D
+        bool flatPlane = (p1Cfg.zHeightMode == P1ZHeightMode.Flat2DPlane);
+        for (int i = 0; i < rawRegions2D.Count; i++)
+            p1Result.rawTargetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(rawRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY));
+        for (int i = 0; i < safeRegions2D.Count; i++)
+            p1Result.safeErodedRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(safeRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY));
+
+        p1Result.areaRawCm2 = totalRawSqM * 10000f;
+        p1Result.areaSafeCm2 = totalSafeSqM * 10000f;
+
+        if (safeRegions2D.Count == 0)
+        {
+            genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+
+        bool fixedVert = (p1Cfg.zHeightMode != P1ZHeightMode.Surface25DSmoothNormal);
+        float firstAngleDeg = 0f;
+        bool hasFirstAngle = false;
+
+        // =====================================================================
+        // CHẾ ĐỘ A (MẶC ĐỊNH): QUÉT ZIGZAG KIỂU MÁY IN 3D (PRINTER RASTER FULL SWEEP)
+        // Quỹ đạo đi Zigzag song song qua lại liên tục trên toàn khung bao của chỗ cần phun;
+        // đoạn nào đi VÀO R_safe thì BẬT SÚNG (sprayOn=true), ngoài vùng & đoạn quay đầu thì TẮT SÚNG (sprayOn=false)!
+        // =====================================================================
+        if (p1Cfg.zigzagStyle == P1ZigzagStyle.PrinterRasterFullSweep)
+        {
+            var typedPath = new List<TypedSurfacePoint>(512);
+
+            var groupedSafeByRaw = new Dictionary<int, List<List<Vector2>>>();
+            for (int i = 0; i < safeRegions2D.Count; i++)
+            {
+                int rKey = safeToRawIdx[i];
+                if (!groupedSafeByRaw.TryGetValue(rKey, out var lst))
+                {
+                    lst = new List<List<Vector2>>();
+                    groupedSafeByRaw[rKey] = lst;
+                }
+                lst.Add(safeRegions2D[i]);
+            }
+
+            int groupNum = 0;
+            foreach (var kv in groupedSafeByRaw)
+            {
+                groupNum++;
+                int rawIdx = kv.Key;
+                List<Vector2> framePoly = (rawIdx >= 0 && rawIdx < rawRegions2D.Count) ? rawRegions2D[rawIdx] : kv.Value[0];
+                List<List<Vector2>> safePolysInGroup = kv.Value;
+
+                Vector2 fallbackMajor = Vector2.up;
+                for (int i = 0; i < safeToRawIdx.Count; i++)
+                {
+                    if (safeToRawIdx[i] == rawIdx && i < regionFallbackAxes.Count)
+                    {
+                        fallbackMajor = regionFallbackAxes[i];
+                        break;
+                    }
+                }
+
+                Vector2 centroid, majorAxis, minorAxis;
+                if (p1Cfg.scanDirection == P1ScanDirectionMode.MinAreaBoundingBox)
+                    ComputeMinAreaRectAxes2D(framePoly, fallbackMajor, out centroid, out majorAxis, out minorAxis);
+                else if (p1Cfg.scanDirection == P1ScanDirectionMode.CustomAngleDeg)
+                {
+                    centroid = Vector2.zero;
+                    for (int i = 0; i < framePoly.Count; i++) centroid += framePoly[i];
+                    centroid /= framePoly.Count;
+                    float rad = p1Cfg.customScanAngleDeg * Mathf.Deg2Rad;
+                    majorAxis = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+                    minorAxis = new Vector2(-majorAxis.y, majorAxis.x);
+                }
+                else
+                    ComputePcaAxes2D(framePoly, fallbackMajor, out centroid, out majorAxis, out minorAxis);
+
+                if (!hasFirstAngle)
+                {
+                    firstAngleDeg = Mathf.Atan2(majorAxis.y, majorAxis.x) * Mathf.Rad2Deg;
+                    hasFirstAngle = true;
+                }
+
+                float minU = float.MaxValue, maxU = float.MinValue;
+                for (int i = 0; i < framePoly.Count; i++)
+                {
+                    Vector2 rel = framePoly[i] - centroid;
+                    float u = Vector2.Dot(rel, majorAxis);
+                    if (u < minU) minU = u; if (u > maxU) maxU = u;
+                }
+
+                float safeMinV = float.MaxValue, safeMaxV = float.MinValue;
+                var safePolysUV = new List<List<Vector2>>(safePolysInGroup.Count);
+                for (int p = 0; p < safePolysInGroup.Count; p++)
+                {
+                    var sp = safePolysInGroup[p];
+                    var uvList = new List<Vector2>(sp.Count);
+                    for (int i = 0; i < sp.Count; i++)
+                    {
+                        Vector2 rel = sp[i] - centroid;
+                        float u = Vector2.Dot(rel, majorAxis);
+                        float v = Vector2.Dot(rel, minorAxis);
+                        uvList.Add(new Vector2(u, v));
+                        if (u < minU) minU = u; if (u > maxU) maxU = u;
+                        if (v < safeMinV) safeMinV = v; if (v > safeMaxV) safeMaxV = v;
+                    }
+                    safePolysUV.Add(uvList);
+                }
+
+                // Đặt các đường quét song song CHẮC CHẮN cắt qua R_safe (kể cả vùng nhỏ/hẹp hơn bước lượt s!)
+                float safeSpanV = Mathf.Max(0f, safeMaxV - safeMinV);
+                int numLines;
+                float vFirst, vLast;
+                if (safeSpanV <= stepSM * 0.95f)
+                {
+                    numLines = 1;
+                    vFirst = vLast = 0.5f * (safeMinV + safeMaxV);
+                }
+                else
+                {
+                    float edgeInset = Mathf.Min(stepSM * 0.22f, safeSpanV * 0.12f);
+                    vFirst = safeMinV + edgeInset;
+                    vLast = safeMaxV - edgeInset;
+                    float innerSpan = Mathf.Max(0f, vLast - vFirst);
+                    numLines = Mathf.Clamp(Mathf.CeilToInt(innerSpan / stepSM) + 1, 2, 95);
+                }
+                float uLeftFrame = minU - overscanM;
+                float uRightFrame = maxU + overscanM;
+
+                string segTag = $"P1_RASTER_{groupNum}";
+                p1Result.cellCount++;
+                Vector2? prevRowEndXZ = null;
+
+                for (int lineIdx = 0; lineIdx < numLines; lineIdx++)
+                {
+                    float vLine = (numLines == 1)
+                        ? vFirst
+                        : Mathf.Lerp(vFirst, vLast, (float)lineIdx / (numLines - 1));
+                    bool reverse = (lineIdx % 2 == 1);
+
+                    var rawIntervals = new List<Vector2>();
+                    for (int spIdx = 0; spIdx < safePolysUV.Count; spIdx++)
+                    {
+                        var ivs = IntersectPolygonWithScanlineUV(safePolysUV[spIdx], vLine);
+                        rawIntervals.AddRange(ivs);
+                    }
+
+                    // Gộp các giao đoạn chồng lấn/sát nhau trước khi sắp xếp để KHÔNG BAO GIỜ chạy lùi trên cùng 1 hàng
+                    var rowOnIntervals = new List<Vector2>(rawIntervals.Count);
+                    if (rawIntervals.Count > 0)
+                    {
+                        rawIntervals.Sort((a, b) => a.x.CompareTo(b.x));
+                        Vector2 curIv = rawIntervals[0];
+                        for (int k = 1; k < rawIntervals.Count; k++)
+                        {
+                            if (rawIntervals[k].x <= curIv.y + 0.002f)
+                            {
+                                curIv.y = Mathf.Max(curIv.y, rawIntervals[k].y);
+                            }
+                            else
+                            {
+                                rowOnIntervals.Add(curIv);
+                                curIv = rawIntervals[k];
+                            }
+                        }
+                        rowOnIntervals.Add(curIv);
+                        if (reverse) rowOnIntervals.Reverse();
+                    }
+
+                    float uStart = reverse ? uRightFrame : uLeftFrame;
+                    float uEnd = reverse ? uLeftFrame : uRightFrame;
+                    Vector2 rowStartXZ = centroid + uStart * majorAxis + vLine * minorAxis;
+                    Vector2 rowEndXZ = centroid + uEnd * majorAxis + vLine * minorAxis;
+
+                    if (prevRowEndXZ.HasValue)
+                    {
+                        AppendSampledLinePoints(typedPath, prevRowEndXZ.Value, rowStartXZ, sprayOn: false, segTag, sampleStepM, avgClothY, includeStart: false);
+                        p1Result.sprayOffConnectorsWorld.Add(new List<Vector3>
+                        {
+                            new Vector3(prevRowEndXZ.Value.x, avgClothY, prevRowEndXZ.Value.y),
+                            new Vector3(rowStartXZ.x, avgClothY, rowStartXZ.y)
+                        });
+                        p1Result.sprayOffConnectorCount++;
+                    }
+                    else
+                    {
+                        if (typedPath.Count > 0)
+                        {
+                            Vector3 prevGroupEnd = typedPath[typedPath.Count - 1].worldPos;
+                            p1Result.sprayOffConnectorsWorld.Add(new List<Vector3>
+                            {
+                                prevGroupEnd,
+                                new Vector3(rowStartXZ.x, avgClothY, rowStartXZ.y)
+                            });
+                            p1Result.sprayOffConnectorCount++;
+                        }
+                        typedPath.Add(new TypedSurfacePoint
+                        {
+                            worldPos = new Vector3(rowStartXZ.x, avgClothY, rowStartXZ.y),
+                            sprayOnToHere = false,
+                            segName = segTag
+                        });
+                    }
+
+                    float curU = uStart;
+                    Vector2 curXZ = rowStartXZ;
+                    for (int j = 0; j < rowOnIntervals.Count; j++)
+                    {
+                        float uEnter = reverse ? rowOnIntervals[j].y : rowOnIntervals[j].x;
+                        float uExit = reverse ? rowOnIntervals[j].x : rowOnIntervals[j].y;
+                        // Đảm bảo đơn điệu theo chiều quét (không lùi ngược)
+                        if (!reverse)
+                        {
+                            uEnter = Mathf.Max(uEnter, curU);
+                            if (uExit <= uEnter + 0.002f) continue;
+                        }
+                        else
+                        {
+                            uEnter = Mathf.Min(uEnter, curU);
+                            if (uExit >= uEnter - 0.002f) continue;
+                        }
+                        Vector2 enterXZ = centroid + uEnter * majorAxis + vLine * minorAxis;
+                        Vector2 exitXZ = centroid + uExit * majorAxis + vLine * minorAxis;
+
+                        // 1. Đoạn chạy trống tới mép chỗ cần phun -> TẮT SÚNG
+                        if (Vector2.Distance(curXZ, enterXZ) > 0.002f)
+                        {
+                            AppendSampledLinePoints(typedPath, curXZ, enterXZ, sprayOn: false, segTag, sampleStepM, avgClothY, includeStart: false);
+                            p1Result.sprayOffConnectorsWorld.Add(new List<Vector3>
+                            {
+                                new Vector3(curXZ.x, avgClothY, curXZ.y),
+                                new Vector3(enterXZ.x, avgClothY, enterXZ.y)
+                            });
+                            p1Result.sprayOffConnectorCount++;
+                        }
+
+                        // 2. Đoạn đi NGANG QUA chỗ cần phun R_safe -> BẬT SÚNG!
+                        if (Vector2.Distance(enterXZ, exitXZ) > 0.002f)
+                        {
+                            AppendSampledLinePoints(typedPath, enterXZ, exitXZ, sprayOn: true, segTag, sampleStepM, avgClothY, includeStart: false);
+                            p1Result.sprayOnSegmentsWorld.Add(new List<Vector3>
+                            {
+                                new Vector3(enterXZ.x, avgClothY, enterXZ.y),
+                                new Vector3(exitXZ.x, avgClothY, exitXZ.y)
+                            });
+                            p1Result.sprayOnSegmentCount++;
+                        }
+                        curU = uExit;
+                        curXZ = exitXZ;
+                    }
+
+                    // 3. Đoạn chạy trống ra cuối khung chuẩn bị quay đầu -> TẮT SÚNG
+                    if (Vector2.Distance(curXZ, rowEndXZ) > 0.002f)
+                    {
+                        AppendSampledLinePoints(typedPath, curXZ, rowEndXZ, sprayOn: false, segTag, sampleStepM, avgClothY, includeStart: false);
+                        p1Result.sprayOffConnectorsWorld.Add(new List<Vector3>
+                        {
+                            new Vector3(curXZ.x, avgClothY, curXZ.y),
+                            new Vector3(rowEndXZ.x, avgClothY, rowEndXZ.y)
+                        });
+                        p1Result.sprayOffConnectorCount++;
+                    }
+
+                    prevRowEndXZ = rowEndXZ;
+                    p1Result.passCount++;
+                }
+            }
+
+            p1Result.scanAngleDegUsed = firstAngleDeg;
+            var rasterWps = BuildSprayWaypointsFromTypedPolyline(
+                typedPath, ctrl, plyLoader, tech,
+                useFixedVerticalNormal: fixedVert,
+                useFlatPlaneZ: flatPlane,
+                flatPlaneWorldY: avgClothY,
+                overrideStandoffMm: p1Cfg.sprayDistanceDMm);
+            genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
+            return rasterWps;
+        }
+
+        // =====================================================================
+        // CHẾ ĐỘ B: CẮT GỌN SÁT BIÊN R_safe + PHÂN TÁCH Ô LỒI BOUSTROPHEDON
+        // =====================================================================
+        Vector3? prevSegEndWorld = null;
+        for (int rIdx = 0; rIdx < safeRegions2D.Count; rIdx++)
+        {
+            List<Vector2> safePoly = safeRegions2D[rIdx];
+            if (safePoly == null || safePoly.Count < 3) continue;
+
+            Vector2 fallbackMajor = rIdx < regionFallbackAxes.Count ? regionFallbackAxes[rIdx] : Vector2.up;
+            Vector2 centroid, majorAxis, minorAxis;
+            if (p1Cfg.scanDirection == P1ScanDirectionMode.MinAreaBoundingBox)
+                ComputeMinAreaRectAxes2D(safePoly, fallbackMajor, out centroid, out majorAxis, out minorAxis);
+            else if (p1Cfg.scanDirection == P1ScanDirectionMode.CustomAngleDeg)
+            {
+                centroid = Vector2.zero;
+                for (int i = 0; i < safePoly.Count; i++) centroid += safePoly[i];
+                centroid /= safePoly.Count;
+                float rad = p1Cfg.customScanAngleDeg * Mathf.Deg2Rad;
+                majorAxis = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+                minorAxis = new Vector2(-majorAxis.y, majorAxis.x);
+            }
+            else
+                ComputePcaAxes2D(safePoly, fallbackMajor, out centroid, out majorAxis, out minorAxis);
+
+            if (!hasFirstAngle)
+            {
+                firstAngleDeg = Mathf.Atan2(majorAxis.y, majorAxis.x) * Mathf.Rad2Deg;
+                hasFirstAngle = true;
+            }
+
+            var polyUV = new List<Vector2>(safePoly.Count);
+            float minV = float.MaxValue, maxV = float.MinValue;
+            for (int i = 0; i < safePoly.Count; i++)
+            {
+                Vector2 rel = safePoly[i] - centroid;
+                float u = Vector2.Dot(rel, majorAxis);
+                float v = Vector2.Dot(rel, minorAxis);
+                polyUV.Add(new Vector2(u, v));
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+
+            float spanV = maxV - minV;
+            int numLines;
+            float vFirstB, vLastB;
+            if (spanV <= stepSM * 0.95f)
+            {
+                numLines = 1;
+                vFirstB = vLastB = 0.5f * (minV + maxV);
+            }
+            else
+            {
+                float edgeInset = Mathf.Min(stepSM * 0.22f, spanV * 0.12f);
+                vFirstB = minV + edgeInset;
+                vLastB = maxV - edgeInset;
+                numLines = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(0f, vLastB - vFirstB) / stepSM) + 1, 2, 90);
+            }
+
+            var lineIntervals = new List<List<BoustrophedonSpan>>(numLines);
+            for (int lineIdx = 0; lineIdx < numLines; lineIdx++)
+            {
+                float vLine = (numLines == 1)
+                    ? vFirstB
+                    : Mathf.Lerp(vFirstB, vLastB, (float)lineIdx / (numLines - 1));
+
+                var ivs = IntersectPolygonWithScanlineUV(polyUV, vLine);
+                var spans = new List<BoustrophedonSpan>(ivs.Count);
+                for (int k = 0; k < ivs.Count; k++)
+                    spans.Add(new BoustrophedonSpan { v = vLine, u0 = ivs[k].x, u1 = ivs[k].y });
+                lineIntervals.Add(spans);
+            }
+
+            var orderedCells = new List<List<BoustrophedonSpan>>();
+            if (p1Cfg.useBoustrophedonSplit)
+            {
+                var activeCells = new List<List<BoustrophedonSpan>>();
+                for (int lineIdx = 0; lineIdx < lineIntervals.Count; lineIdx++)
+                {
+                    var curSpans = lineIntervals[lineIdx];
+                    if (activeCells.Count == 0)
+                    {
+                        for (int c = 0; c < curSpans.Count; c++)
+                            activeCells.Add(new List<BoustrophedonSpan> { curSpans[c] });
+                        continue;
+                    }
+
+                    int nAct = activeCells.Count;
+                    int nCur = curSpans.Count;
+                    var actMatches = new List<int>[nAct];
+                    var curMatches = new List<int>[nCur];
+                    for (int a = 0; a < nAct; a++) actMatches[a] = new List<int>();
+                    for (int c = 0; c < nCur; c++) curMatches[c] = new List<int>();
+
+                    for (int a = 0; a < nAct; a++)
+                    {
+                        BoustrophedonSpan prevSp = activeCells[a][activeCells[a].Count - 1];
+                        for (int c = 0; c < nCur; c++)
+                        {
+                            BoustrophedonSpan curSp = curSpans[c];
+                            if (curSp.u0 <= prevSp.u1 + 0.005f && curSp.u1 >= prevSp.u0 - 0.005f)
+                            {
+                                actMatches[a].Add(c);
+                                curMatches[c].Add(a);
+                            }
+                        }
+                    }
+
+                    var nextActive = new List<List<BoustrophedonSpan>>();
+                    bool[] curConsumed = new bool[nCur];
+                    for (int a = 0; a < nAct; a++)
+                    {
+                        if (actMatches[a].Count == 1 && curMatches[actMatches[a][0]].Count == 1)
+                        {
+                            int cIdx = actMatches[a][0];
+                            activeCells[a].Add(curSpans[cIdx]);
+                            nextActive.Add(activeCells[a]);
+                            curConsumed[cIdx] = true;
+                        }
+                        else
+                        {
+                            orderedCells.Add(activeCells[a]);
+                        }
+                    }
+                    for (int c = 0; c < nCur; c++)
+                        if (!curConsumed[c]) nextActive.Add(new List<BoustrophedonSpan> { curSpans[c] });
+                    activeCells = nextActive;
+                }
+                for (int a = 0; a < activeCells.Count; a++) orderedCells.Add(activeCells[a]);
+            }
+            else
+            {
+                var singleCell = new List<BoustrophedonSpan>();
+                for (int lineIdx = 0; lineIdx < lineIntervals.Count; lineIdx++)
+                    singleCell.AddRange(lineIntervals[lineIdx]);
+                if (singleCell.Count > 0) orderedCells.Add(singleCell);
+            }
+
+            p1Result.cellCount += orderedCells.Count;
+            for (int cIdx = 0; cIdx < orderedCells.Count; cIdx++)
+            {
+                var cellSpans = orderedCells[cIdx];
+                for (int pIdx = 0; pIdx < cellSpans.Count; pIdx++)
+                {
+                    BoustrophedonSpan sp = cellSpans[pIdx];
+                    bool reverse = (pIdx % 2 == 1);
+                    float uA = reverse ? sp.u1 : sp.u0;
+                    float uB = reverse ? sp.u0 : sp.u1;
+                    float segLen = Mathf.Abs(uB - uA);
+                    int steps = Mathf.Clamp(Mathf.CeilToInt(segLen / sampleStepM), 2, 80);
+
+                    var segWorld = new List<Vector3>(steps + 1);
+                    for (int k = 0; k <= steps; k++)
+                    {
+                        float t = (float)k / steps;
+                        float uVal = Mathf.Lerp(uA, uB, t);
+                        Vector2 pXZ = centroid + uVal * majorAxis + sp.v * minorAxis;
+                        float surfY = avgClothY;
+                        if (!flatPlane)
+                        {
+                            if (ctrl.SampleCompensatedSurface(pXZ.x, pXZ.y, out float cy, out _)) surfY = cy;
+                            else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(pXZ.x, pXZ.y, out float py, out _)) surfY = py;
+                        }
+                        segWorld.Add(new Vector3(pXZ.x, surfY, pXZ.y));
+                    }
+
+                    if (segWorld.Count >= 2)
+                    {
+                        if (prevSegEndWorld.HasValue)
+                        {
+                            p1Result.sprayOffConnectorsWorld.Add(new List<Vector3> { prevSegEndWorld.Value, segWorld[0] });
+                            p1Result.sprayOffConnectorCount++;
+                        }
+                        prevSegEndWorld = segWorld[segWorld.Count - 1];
+                        strokesWorld.Add(segWorld);
+                        p1Result.sprayOnSegmentsWorld.Add(segWorld);
+                        p1Result.sprayOnSegmentCount++;
+                        p1Result.passCount++;
+                    }
                 }
             }
         }
 
-        // Bước 4: Gán Z (2.5D) và hướng súng thẳng đứng (Baseline P1)
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P1_ZIGZAG", useFixedVerticalNormal: true);
+        p1Result.scanAngleDegUsed = firstAngleDeg;
+        var wps = BuildSprayWaypointsFromWorldStrokes(
+            strokesWorld, ctrl, plyLoader, tech, "P1_ZIGZAG",
+            useFixedVerticalNormal: fixedVert,
+            useFlatPlaneZ: flatPlane,
+            flatPlaneWorldY: avgClothY,
+            overrideStandoffMm: p1Cfg.sprayDistanceDMm);
+
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
     }
 
     /// <summary>
-    /// P2 — Đường theo hình dạng (Song song biên / theo trục giữa — Skeleton, Chuẩn trang 7 file góp ý):
-    /// 1. Tính trục giữa (medial axis / skeleton) của từng ống quần từ mask/12 mốc kèm bề rộng thực của ống từ đùi xuống gấu.
-    /// 2. Sinh các đường cong song song với trục giữa cách nhau bước s = w*(1-r) dọc theo ống.
-    /// 3. Bề rộng ống thu hẹp từ đùi xuống gấu -> tự động cắt bớt các lượt ngoài khi vượt quá biên vùng R hoặc bề rộng ống tại trạm đó.
-    /// 4. Gán Z bề mặt và hướng súng theo pháp tuyến đã làm mượt.
+    /// P2 — Đường phun theo hình dạng ống quần (Song song trục giữa Skeleton hoặc Offset đồng tâm từ biên, Chuẩn 8 bước trang 7):
+    /// Bước 1: Nhận mask & tách 2 vùng ống trái / phải riêng biệt (loại bỏ vùng cạp & đáy quần), trích xuất đa giác "Chỗ cần phun".
+    /// Bước 2: Tính trục giữa (skeleton) chính chạy từ đùi xuống gấu của từng ống quần.
+    /// Bước 3 & 4: Sinh các đường chạy cách nhau bước s = w*(1-r) theo Cách A (song song trục giữa) hoặc Cách B (offset đồng tâm lùi dần từ biên).
+    /// Bước 5: Xử lý thay đổi bề rộng ống quần (cắt ngắn lượt ngoài khi ống thu hẹp từ đùi xuống gấu và loại bỏ đoạn quá ngắn).
+    /// Bước 6: Sắp xếp thứ tự các lượt để giảm quãng đường di chuyển không phun (order_for_minimum_travel) và tắt súng ở đoạn nối.
+    /// Bước 7 & 8: Gán độ cao Z + hướng súng (pháp tuyến làm mượt hoặc thẳng đứng) và kiểm tra xuất quỹ đạo TCP.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP2ShapeSkeleton(
         DobotCR10AIKController ctrl,
@@ -1074,128 +3057,1138 @@ public static class TrajectoryEvaluationEngine
         SprayTechParams tech,
         out float genTimeSec)
     {
+        var cfg = (ctrl != null && ctrl.p2Config != null) ? ctrl.p2Config : new P2SkeletonConfig
+        {
+            sprayWidthWMm = tech != null ? tech.sprayWidthMm : 45f,
+            overlapRatioR = tech != null ? tech.overlapRatio : 0.35f,
+            borderMarginEMm = tech != null ? tech.borderMarginMm : 16f,
+            sprayDistanceDMm = GetEffectiveSprayHeightMm(ctrl, tech),
+            autoSpacingFromWidthOverlap = true
+        };
+        return GenerateP2ShapeSkeleton(ctrl, plyLoader, templateStrokesUV, templateSize, tech, cfg, out _, out genTimeSec);
+    }
+
+    private struct MaskSkeletonSpine
+    {
+        public List<Vector2> C; // Trục giữa thật (Medial Axis) từ đùi xuống gấu, đã làm mượt & loại nhánh nhiễu
+        public List<Vector2> N; // Pháp tuyến ngang vuông góc trục giữa tại mỗi điểm
+        public List<float> R;   // Nửa bề rộng thật của ống quần đo từ Exact Euclidean Distance Transform (EDT)
+        public float totalLengthM;
+        public float maxHalfWidthM;
+    }
+
+    /// <summary>
+    /// Tách riêng 2 vùng mask ống quần trái / phải trực tiếp từ Mask 2D (`garmentContourWorld` hoặc `sprayZoneLeftWorld`/`sprayZoneRightWorld`).
+    /// Khi `preferFullGarmentSplit = true` (dùng cho P2): ưu tiên tách toàn bộ 2 ống quần đầy đủ từ đùi xuống gấu dựa trên `garmentContourWorld`,
+    /// tự nhận diện chính xác đầu cạp (đặc ở trục giữa v=0) vs đầu gấu (tách 2 ống trống ở v=0) — KHÔNG cần 12 mốc AI!
+    /// </summary>
+    private static List<List<Vector2>> ExtractLegMaskPolygonsFromMask2D(DobotCR10AIKController ctrl, float dpEpsM, bool preferFullGarmentSplit = false)
+    {
+        var legs = new List<List<Vector2>>();
+        if (ctrl == null) return legs;
+
+        if (!preferFullGarmentSplit)
+        {
+            if (ctrl.sprayZoneLeftWorld != null && ctrl.sprayZoneLeftWorld.Count >= 4)
+            {
+                var pL = new List<Vector2>(ctrl.sprayZoneLeftWorld.Count);
+                for (int i = 0; i < ctrl.sprayZoneLeftWorld.Count; i++)
+                    pL.Add(new Vector2(ctrl.sprayZoneLeftWorld[i].x, ctrl.sprayZoneLeftWorld[i].z));
+                var simp = SimplifyClosedPolygonDouglasPeucker(pL, dpEpsM);
+                if (simp.Count >= 3) legs.Add(simp);
+            }
+            if (ctrl.sprayZoneRightWorld != null && ctrl.sprayZoneRightWorld.Count >= 4)
+            {
+                var pR = new List<Vector2>(ctrl.sprayZoneRightWorld.Count);
+                for (int i = 0; i < ctrl.sprayZoneRightWorld.Count; i++)
+                    pR.Add(new Vector2(ctrl.sprayZoneRightWorld[i].x, ctrl.sprayZoneRightWorld[i].z));
+                var simp = SimplifyClosedPolygonDouglasPeucker(pR, dpEpsM);
+                if (simp.Count >= 3) legs.Add(simp);
+            }
+            if (legs.Count > 0) return legs;
+        }
+
+        // Tách đầy đủ 2 ống quần trái / phải từ đường bao toàn thân quần `garmentContourWorld` (không cần 12 mốc!)
+        if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 8)
+        {
+            var rawG = new List<Vector2>(ctrl.garmentContourWorld.Count);
+            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++)
+                rawG.Add(new Vector2(ctrl.garmentContourWorld[i].x, ctrl.garmentContourWorld[i].z));
+
+            ComputePcaAxes2D(rawG, Vector2.up, out Vector2 centroid, out Vector2 majorAx, out Vector2 minorAx);
+            float minU = float.MaxValue, maxU = float.MinValue;
+            float minVAll = float.MaxValue, maxVAll = float.MinValue;
+            for (int i = 0; i < rawG.Count; i++)
+            {
+                Vector2 rel = rawG[i] - centroid;
+                float u = Vector2.Dot(rel, majorAx);
+                float v = Vector2.Dot(rel, minorAx);
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minVAll) minVAll = v; if (v > maxVAll) maxVAll = v;
+            }
+            float uSpan = Mathf.Max(0.10f, maxU - minU);
+
+            // Tự xác định chiều Cạp -> Gấu thuần túy từ mask:
+            // Đầu Cạp đặc liền ở trục giữa (v = 0 nằm TRONG mask), còn đầu Gấu chẻ 2 ống (v = 0 nằm NGOÀI mask)!
+            int midInsideAtMin = 0, midInsideAtMax = 0;
+            for (int k = 1; k <= 5; k++)
+            {
+                float frac = 0.08f + 0.04f * k; // 12%..28% từ mỗi đầu
+                Vector2 pMin = centroid + majorAx * (minU + frac * uSpan);
+                Vector2 pMax = centroid + majorAx * (maxU - frac * uSpan);
+                if (IsPointInPolygonXZ(pMin, rawG)) midInsideAtMin++;
+                if (IsPointInPolygonXZ(pMax, rawG)) midInsideAtMax++;
+            }
+            if (midInsideAtMax > midInsideAtMin)
+            {
+                // Đảo trục để minU luôn là đầu Cạp (Waist), maxU luôn là đầu Gấu (Cuff)
+                majorAx = -majorAx;
+                minorAx = -minorAx;
+                float oldMin = minU;
+                minU = -maxU;
+                maxU = -oldMin;
+                float oldMinV = minVAll;
+                minVAll = -maxVAll;
+                maxVAll = -oldMinV;
+            }
+
+            // Tìm vị trí chẻ đũng (crotch notch) uCrotch dọc theo v = 0 thuần túy từ mask
+            float uCrotch = minU + 0.32f * uSpan;
+            for (int s = 10; s <= 65; s++)
+            {
+                float uTest = minU + (s / 100f) * uSpan;
+                Vector2 pMid = centroid + majorAx * uTest;
+                if (IsPointInPolygonXZ(pMid, rawG))
+                {
+                    uCrotch = uTest;
+                }
+                else if (uTest > minU + 0.22f * uSpan)
+                {
+                    break;
+                }
+            }
+
+            float uTopCut = Mathf.Clamp(uCrotch - 0.05f * uSpan, minU + 0.16f * uSpan, minU + 0.48f * uSpan);
+            float uBotCut = maxU - 0.02f * uSpan;
+            float vSearchMax = Mathf.Max(0.28f, Mathf.Max(Mathf.Abs(minVAll), Mathf.Abs(maxVAll)) + 0.03f);
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                var leftB = new List<Vector2>();
+                var rightB = new List<Vector2>();
+                int nSlices = 28;
+                for (int s = 0; s <= nSlices; s++)
+                {
+                    float u = Mathf.Lerp(uTopCut, uBotCut, (float)s / nSlices);
+                    float vMinSide = float.MaxValue, vMaxSide = float.MinValue;
+                    for (int k = 0; k <= 48; k++)
+                    {
+                        float v = (side < 0)
+                            ? Mathf.Lerp(-vSearchMax, -0.004f, k / 48f)
+                            : Mathf.Lerp(0.004f, vSearchMax, k / 48f);
+                        Vector2 p = centroid + majorAx * u + minorAx * v;
+                        if (IsPointInPolygonXZ(p, rawG))
+                        {
+                            if (v < vMinSide) vMinSide = v;
+                            if (v > vMaxSide) vMaxSide = v;
+                        }
+                    }
+                    if (vMaxSide - vMinSide > 0.025f)
+                    {
+                        leftB.Add(centroid + majorAx * u + minorAx * vMinSide);
+                        rightB.Add(centroid + majorAx * u + minorAx * vMaxSide);
+                    }
+                }
+                if (leftB.Count >= 4)
+                {
+                    var legPoly = new List<Vector2>(leftB.Count + rightB.Count);
+                    legPoly.AddRange(leftB);
+                    for (int k = rightB.Count - 1; k >= 0; k--) legPoly.Add(rightB[k]);
+                    var simp = SimplifyClosedPolygonDouglasPeucker(legPoly, dpEpsM);
+                    if (simp.Count >= 3) legs.Add(simp);
+                }
+            }
+            if (legs.Count > 0) return legs;
+        }
+
+        // Dự phòng cuối cùng nếu không có garmentContourWorld: dùng sprayZoneLeft/RightWorld
+        if (ctrl.sprayZoneLeftWorld != null && ctrl.sprayZoneLeftWorld.Count >= 4)
+        {
+            var pL = new List<Vector2>(ctrl.sprayZoneLeftWorld.Count);
+            for (int i = 0; i < ctrl.sprayZoneLeftWorld.Count; i++)
+                pL.Add(new Vector2(ctrl.sprayZoneLeftWorld[i].x, ctrl.sprayZoneLeftWorld[i].z));
+            var simp = SimplifyClosedPolygonDouglasPeucker(pL, dpEpsM);
+            if (simp.Count >= 3) legs.Add(simp);
+        }
+        if (ctrl.sprayZoneRightWorld != null && ctrl.sprayZoneRightWorld.Count >= 4)
+        {
+            var pR = new List<Vector2>(ctrl.sprayZoneRightWorld.Count);
+            for (int i = 0; i < ctrl.sprayZoneRightWorld.Count; i++)
+                pR.Add(new Vector2(ctrl.sprayZoneRightWorld[i].x, ctrl.sprayZoneRightWorld[i].z));
+            var simp = SimplifyClosedPolygonDouglasPeucker(pR, dpEpsM);
+            if (simp.Count >= 3) legs.Add(simp);
+        }
+        return legs;
+    }
+
+    /// <summary>
+    /// Tính TRỤC GIỮA (SKELETON / MEDIAL AXIS) THẬT trực tiếp từ ảnh nhị phân Mask ống quần:
+    /// 1. Rasterize đa giác mask sang lưới nhị phân (~6 mm).
+    /// 2. Tính Exact Euclidean Distance Transform (EDT) khoảng cách tới biên mask.
+    /// 3. Trích xuất dãy đỉnh cực đại EDT (Medial Axis) dọc theo trục dài PCA từ đùi xuống gấu + lọc nhánh nhiễu (làm mượt 3 điểm).
+    /// </summary>
+    private static bool ExtractRealMaskSkeletonByEDT(List<Vector2> legMaskPoly, float gridResM, out MaskSkeletonSpine spine)
+    {
+        spine = new MaskSkeletonSpine
+        {
+            C = new List<Vector2>(),
+            N = new List<Vector2>(),
+            R = new List<float>(),
+            totalLengthM = 0f,
+            maxHalfWidthM = 0.05f
+        };
+        if (legMaskPoly == null || legMaskPoly.Count < 3) return false;
+
+        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+        for (int i = 0; i < legMaskPoly.Count; i++)
+        {
+            Vector2 p = legMaskPoly[i];
+            if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        }
+        float step = Mathf.Clamp(gridResM, 0.004f, 0.012f);
+        float pad = step * 2f;
+        minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+        int nx = Mathf.Clamp(Mathf.CeilToInt((maxX - minX) / step) + 1, 16, 180);
+        int ny = Mathf.Clamp(Mathf.CeilToInt((maxY - minY) / step) + 1, 16, 180);
+        float dx = (maxX - minX) / (nx - 1);
+        float dy = (maxY - minY) / (ny - 1);
+        float avgStep = 0.5f * (dx + dy);
+
+        bool[,] inside = new bool[nx, ny];
+        var insidePts = new List<Vector2>(nx * ny / 2);
+        for (int ix = 0; ix < nx; ix++)
+        {
+            float wx = minX + ix * dx;
+            for (int iy = 0; iy < ny; iy++)
+            {
+                float wy = minY + iy * dy;
+                if (IsPointInPolygonXZ(new Vector2(wx, wy), legMaskPoly))
+                {
+                    inside[ix, iy] = true;
+                    insidePts.Add(new Vector2(wx, wy));
+                }
+            }
+        }
+        if (insidePts.Count < 16) return false;
+
+        // 2-pass Chamfer / Euclidean Distance Transform (EDT) tính khoảng cách tới biên mask
+        float[,] dist = new float[nx, ny];
+        const float INF = 1e6f;
+        const float DIAG = 1.41421356f;
+        for (int ix = 0; ix < nx; ix++)
+            for (int iy = 0; iy < ny; iy++)
+                dist[ix, iy] = inside[ix, iy] ? INF : 0f;
+
+        for (int ix = 0; ix < nx; ix++)
+        {
+            for (int iy = 0; iy < ny; iy++)
+            {
+                float d = dist[ix, iy];
+                if (d == 0f) continue;
+                if (ix > 0) d = Mathf.Min(d, dist[ix - 1, iy] + 1f);
+                if (iy > 0) d = Mathf.Min(d, dist[ix, iy - 1] + 1f);
+                if (ix > 0 && iy > 0) d = Mathf.Min(d, dist[ix - 1, iy - 1] + DIAG);
+                if (ix > 0 && iy + 1 < ny) d = Mathf.Min(d, dist[ix - 1, iy + 1] + DIAG);
+                dist[ix, iy] = d;
+            }
+        }
+        for (int ix = nx - 1; ix >= 0; ix--)
+        {
+            for (int iy = ny - 1; iy >= 0; iy--)
+            {
+                float d = dist[ix, iy];
+                if (d == 0f) continue;
+                if (ix + 1 < nx) d = Mathf.Min(d, dist[ix + 1, iy] + 1f);
+                if (iy + 1 < ny) d = Mathf.Min(d, dist[ix, iy + 1] + 1f);
+                if (ix + 1 < nx && iy + 1 < ny) d = Mathf.Min(d, dist[ix + 1, iy + 1] + DIAG);
+                if (ix + 1 < nx && iy > 0) d = Mathf.Min(d, dist[ix + 1, iy - 1] + DIAG);
+                dist[ix, iy] = d;
+            }
+        }
+
+        // Tính trục dài PCA của mask ống quần để quét lát cắt trích xuất sống trục Medial Axis từ đùi -> gấu
+        ComputePcaAxes2D(insidePts, Vector2.up, out Vector2 centroid, out Vector2 uAx, out Vector2 vAx);
+        float minU = float.MaxValue, maxU = float.MinValue;
+        for (int i = 0; i < insidePts.Count; i++)
+        {
+            float u = Vector2.Dot(insidePts[i] - centroid, uAx);
+            if (u < minU) minU = u;
+            if (u > maxU) maxU = u;
+        }
+        float uSpan = maxU - minU;
+        if (uSpan < 0.04f) return false;
+
+        int nSlices = 30;
+        float sliceHalf = Mathf.Max(avgStep * 1.15f, uSpan / (nSlices * 1.4f));
+        var rawC = new List<Vector2>(nSlices + 1);
+        var rawR = new List<float>(nSlices + 1);
+
+        for (int s = 0; s <= nSlices; s++)
+        {
+            float uTarget = Mathf.Lerp(minU + avgStep, maxU - avgStep, (float)s / nSlices);
+            float maxD = 0f;
+            float vMinSl = float.MaxValue, vMaxSl = float.MinValue;
+            // Thu tập điểm trong lát cắt quanh uTarget
+            var slicePts = new List<(Vector2 pt, float edtM)>();
+            for (int ix = 0; ix < nx; ix++)
+            {
+                float wx = minX + ix * dx;
+                for (int iy = 0; iy < ny; iy++)
+                {
+                    if (!inside[ix, iy]) continue;
+                    float wy = minY + iy * dy;
+                    Vector2 p = new Vector2(wx, wy);
+                    float u = Vector2.Dot(p - centroid, uAx);
+                    if (Mathf.Abs(u - uTarget) > sliceHalf) continue;
+                    float edtM = dist[ix, iy] * avgStep;
+                    if (edtM > maxD) maxD = edtM;
+                    float v = Vector2.Dot(p - centroid, vAx);
+                    if (v < vMinSl) vMinSl = v;
+                    if (v > vMaxSl) vMaxSl = v;
+                    slicePts.Add((p, edtM));
+                }
+            }
+            if (slicePts.Count == 0 || maxD < 0.004f) continue;
+
+            // Lấy tâm trọng số của các pixel gần cực đại EDT (>= 82% maxD) -> trục giữa Medial Axis trơn, không răng cưa!
+            Vector2 sumP = Vector2.zero;
+            float sumW = 0f;
+            float thresh = maxD * 0.82f;
+            for (int i = 0; i < slicePts.Count; i++)
+            {
+                if (slicePts[i].edtM >= thresh)
+                {
+                    float w = slicePts[i].edtM;
+                    sumP += slicePts[i].pt * w;
+                    sumW += w;
+                }
+            }
+            if (sumW > 1e-6f)
+            {
+                Vector2 cPt = sumP / sumW;
+                float halfSpan = 0.5f * Mathf.Max(0.012f, vMaxSl - vMinSl);
+                float localR = Mathf.Max(maxD, halfSpan * 0.92f);
+                rawC.Add(cPt);
+                rawR.Add(localR);
+            }
+        }
+        if (rawC.Count < 4) return false;
+
+        // Lọc nhánh nhiễu & làm mượt trục giữa (2 lượt moving average 3 điểm)
+        for (int pass = 0; pass < 2; pass++)
+        {
+            var smC = new List<Vector2>(rawC.Count);
+            var smR = new List<float>(rawR.Count);
+            for (int i = 0; i < rawC.Count; i++)
+            {
+                if (i == 0 || i == rawC.Count - 1)
+                {
+                    smC.Add(rawC[i]);
+                    smR.Add(rawR[i]);
+                }
+                else
+                {
+                    smC.Add(0.25f * rawC[i - 1] + 0.50f * rawC[i] + 0.25f * rawC[i + 1]);
+                    smR.Add(0.25f * rawR[i - 1] + 0.50f * rawR[i] + 0.25f * rawR[i + 1]);
+                }
+            }
+            rawC = smC;
+            rawR = smR;
+        }
+
+        // Hướng trục thống nhất (đầu rộng hơn là đùi -> đầu hẹp hơn là gấu)
+        if (rawR[0] < rawR[rawR.Count - 1])
+        {
+            rawC.Reverse();
+            rawR.Reverse();
+        }
+
+        float totalLen = 0f;
+        float maxR = 0.02f;
+        for (int i = 0; i < rawC.Count; i++)
+        {
+            if (i > 0) totalLen += Vector2.Distance(rawC[i - 1], rawC[i]);
+            if (rawR[i] > maxR) maxR = rawR[i];
+            Vector2 tan = (i == 0) ? (rawC[1] - rawC[0])
+                : (i == rawC.Count - 1 ? (rawC[i] - rawC[i - 1]) : (rawC[i + 1] - rawC[i - 1]));
+            if (tan.sqrMagnitude < 1e-8f) tan = uAx;
+            else tan.Normalize();
+            Vector2 nrm = new Vector2(-tan.y, tan.x);
+            if (spine.N.Count > 0 && Vector2.Dot(nrm, spine.N[spine.N.Count - 1]) < 0f) nrm = -nrm;
+            spine.C.Add(rawC[i]);
+            spine.N.Add(nrm);
+            spine.R.Add(rawR[i]);
+        }
+        spine.totalLengthM = Mathf.Max(0.05f, totalLen);
+        spine.maxHalfWidthM = maxR;
+        return spine.C.Count >= 4;
+    }
+
+    private static void SampleSpineAtT(MaskSkeletonSpine spine, float t01, out Vector2 centerPt, out Vector2 normalVec, out float halfWidthM)
+    {
+        int n = spine.C.Count;
+        float f = Mathf.Clamp01(t01) * (n - 1);
+        int i0 = Mathf.Clamp(Mathf.FloorToInt(f), 0, n - 2);
+        float u = Mathf.Clamp01(f - i0);
+        centerPt = Vector2.Lerp(spine.C[i0], spine.C[i0 + 1], u);
+        normalVec = Vector2.Lerp(spine.N[i0], spine.N[i0 + 1], u);
+        if (normalVec.sqrMagnitude < 1e-6f) normalVec = spine.N[i0];
+        else normalVec.Normalize();
+        halfWidthM = Mathf.Max(0.008f, Mathf.Lerp(spine.R[i0], spine.R[i0 + 1], u));
+    }
+
+    public static List<DobotCR10AIKController.WaypointData> GenerateP2ShapeSkeleton(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
+        SprayTechParams tech,
+        P2SkeletonConfig p2Cfg,
+        out P2ExecutionResult p2Exec,
+        out float genTimeSec)
+    {
         float t0 = Time.realtimeSinceStartup;
+        p2Exec = new P2ExecutionResult();
         var strokesWorld = new List<List<Vector3>>();
 
-        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12)
+        if (ctrl == null)
         {
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
 
-        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
-        Vector2[] dst12XZ = new Vector2[12];
-        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+        if (p2Cfg == null) p2Cfg = new P2SkeletonConfig();
+        float spacingMm = p2Cfg.EffectiveSpacingSMm;
+        p2Exec.effectiveSpacingMm = spacingMm;
+        float stepSM = Mathf.Clamp(spacingMm, 6f, 110f) * 0.001f;
+        float borderEMm = Mathf.Clamp(p2Cfg.borderMarginEMm, 4f, 40f);
+        float minPassLenM = Mathf.Clamp(p2Cfg.minPassLengthMm, 12f, 180f) * 0.001f;
+        float sampleStepM = 0.009f; // Lấy mẫu mịn 9mm để cắt biên bật/tắt súng sắc nét
 
-        var legTemplatePts = new List<Vector2>[2] { new List<Vector2>(), new List<Vector2>() };
-        if (templateStrokesUV != null)
+        bool has12Landmarks = (ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12);
+        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
+        Vector2[] dst12XZ = null;
+        if (has12Landmarks)
         {
-            Vector2 thighL = dst12XZ[4], kneeL = dst12XZ[6];
-            Vector2 thighR = dst12XZ[5], kneeR = dst12XZ[7];
-            for (int s = 0; s < templateStrokesUV.Count; s++)
+            dst12XZ = new Vector2[12];
+            for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+        }
+
+        // Bước 1: Tách đầy đủ 2 vùng Mask ống quần trái/phải từ toàn bộ `garmentContourWorld` (đùi -> gấu, KHÔNG bị bó vào ô đùi nhỏ!)
+        var legMaskPolys = ExtractLegMaskPolygonsFromMask2D(ctrl, 0.004f, preferFullGarmentSplit: true);
+        if (legMaskPolys.Count == 0 && has12Landmarks)
+        {
+            AnatomicalLegChain chL = BuildLegChain(dst12XZ, true);
+            AnatomicalLegChain chR = BuildLegChain(dst12XZ, false);
+            var pL = BuildAnatomicalLegStripPolygon2D(chL, 0.65f, 2.75f, -0.88f, 0.88f);
+            var pR = BuildAnatomicalLegStripPolygon2D(chR, 0.65f, 2.75f, -0.88f, 0.88f);
+            if (pL != null && pL.Count >= 3) legMaskPolys.Add(pL);
+            if (pR != null && pR.Count >= 3) legMaskPolys.Add(pR);
+        }
+        if (legMaskPolys.Count == 0)
+        {
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+
+        // Bước 2: Tính Trục giữa THẬT (Skeleton / Medial Axis) trực tiếp từ Mask nhị phân + Exact Distance Transform (EDT)
+        var legSpines = new List<MaskSkeletonSpine>();
+        var validLegMasks = new List<List<Vector2>>();
+        for (int li = 0; li < legMaskPolys.Count; li++)
+        {
+            if (ExtractRealMaskSkeletonByEDT(legMaskPolys[li], 0.006f, out MaskSkeletonSpine sp))
             {
-                var raw = templateStrokesUV[s];
-                if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.015f);
-                for (int p = 0; p < resampled.Count; p++)
+                legSpines.Add(sp);
+                validLegMasks.Add(legMaskPolys[li]);
+            }
+        }
+        if (legSpines.Count == 0)
+        {
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+
+        // Xác định hình học "Chỗ cần phun" (theo hình/mẫu đã vẽ hoặc toàn mask 2 ống quần)
+        var targetPolysXZ = new List<List<Vector2>>();
+        bool flat2DMode = (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D);
+        float flatY = (plyLoader != null) ? (plyLoader.estimatedTableY + 0.025f) : 0.025f;
+
+        if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
+        {
+            if (ctrl.HasCustomDrawnRegions2D)
+            {
+                var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+                for (int i = 0; i < directRegionsXZ.Count; i++)
                 {
-                    Vector2 wpt = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
-                    float dL = DistToSegment2D(wpt, thighL, kneeL);
-                    float dR = DistToSegment2D(wpt, thighR, kneeR);
-                    legTemplatePts[dL <= dR ? 0 : 1].Add(wpt);
+                    if (directRegionsXZ[i] != null && directRegionsXZ[i].Count >= 3)
+                        targetPolysXZ.Add(directRegionsXZ[i]);
+                }
+            }
+            else if (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0)
+            {
+                var closedUserLoops = new List<List<Vector2>>();
+                var openStrokesWorld2D = new List<List<Vector2>>();
+                float dpEpsM = 0.003f;
+
+                for (int s = 0; s < templateStrokesUV.Count; s++)
+                {
+                    var st = templateStrokesUV[s];
+                    if (st == null || st.Count < 2) continue;
+
+                    var warped = new List<Vector2>(st.Count);
+                    float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+                    float arcLen = 0f;
+                    for (int p = 0; p < st.Count; p++)
+                    {
+                        Vector2 wp = WarpPointBarycentric12(st[p], src12, dst12XZ);
+                        if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
+                        warped.Add(wp);
+                        if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
+                        if (wp.y < minY) minY = wp.y; if (wp.y > maxY) maxY = wp.y;
+                    }
+                    float diag = Mathf.Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
+                    float endGap = Vector2.Distance(warped[0], warped[warped.Count - 1]);
+                    float area = ComputePolygonAreaSqM(warped);
+
+                    bool isLoopShape = (warped.Count >= 6 && diag > 0.020f && area >= 0.00020f)
+                        && (endGap <= Mathf.Max(0.065f, diag * 0.42f) || (endGap > 1e-4f && arcLen / endGap >= 2.2f));
+                    if (isLoopShape) closedUserLoops.Add(warped);
+                    else openStrokesWorld2D.Add(warped);
+                }
+
+                for (int i = 0; i < closedUserLoops.Count; i++)
+                {
+                    var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
+                    if (simp.Count >= 3) targetPolysXZ.Add(simp);
+                }
+
+                if (openStrokesWorld2D.Count > 0)
+                {
+                    float bandRadiusM = Mathf.Clamp(p2Cfg.openStrokeSprayWidthMm * 0.5f, 6f, 60f) * 0.001f;
+                    var strokePolys = BuildMaskPolygonsFromOpenStrokes2D(openStrokesWorld2D, bandRadiusM, dpEpsM);
+                    for (int i = 0; i < strokePolys.Count; i++)
+                    {
+                        if (strokePolys[i] != null && strokePolys[i].Count >= 3)
+                            targetPolysXZ.Add(strokePolys[i]);
+                    }
                 }
             }
         }
 
-        float stepSM = Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 90f) * 0.001f;
-        float sampleStepM = 0.016f;
-        float corridorRadiusM = Mathf.Max(stepSM * 0.85f, 0.026f);
+        bool isFullMaskMode = (p2Cfg.regionScope == P2RegionScopeMode.FullLegMask || targetPolysXZ.Count == 0);
+        if (isFullMaskMode)
+        {
+            targetPolysXZ.Clear();
+            for (int li = 0; li < validLegMasks.Count; li++) targetPolysXZ.Add(validLegMasks[li]);
+        }
 
-        float[] marginAttempts = { tech.borderMarginMm, tech.borderMarginMm * 0.35f, 0f };
+        // Lưu đa giác 3D "Chỗ cần phun" và Trục giữa (Skeleton) thật của 2 ống quần trên bề mặt vải
+        for (int i = 0; i < targetPolysXZ.Count; i++)
+        {
+            p2Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(targetPolysXZ[i], ctrl, plyLoader, flat2DMode, flatY));
+        }
+        for (int li = 0; li < legSpines.Count; li++)
+        {
+            var sp = legSpines[li];
+            var skelPts = new List<Vector3>(sp.C.Count);
+            for (int k = 0; k < sp.C.Count; k++)
+            {
+                Vector2 cPt = sp.C[k];
+                float yC = flat2DMode ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, cPt.x, cPt.y);
+                skelPts.Add(new Vector3(cPt.x, yC + 0.003f, cPt.y));
+            }
+            p2Exec.skeletonAxesWorld.Add(skelPts);
+        }
+
+        // Bước 3..6: Sinh các lượt QUỸ ĐẠO QUÉT dọc theo Trục giữa Mask thật (Cách A) hoặc Offset đồng tâm từ biên (Cách B)
+        var perPassSprayFlags = new List<List<bool>>();
+        float[] marginAttempts = { borderEMm, borderEMm * 0.35f, 0f };
         for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0; attempt++)
         {
             float activeMargin = marginAttempts[attempt];
             List<Vector3> activeContour = (attempt < 2) ? ctrl.garmentContourWorld : null;
             float marginM = activeMargin * 0.001f;
+            p2Exec.leftLegPassCount = 0;
+            p2Exec.rightLegPassCount = 0;
+            p2Exec.truncatedOuterPassCount = 0;
 
-            for (int leg = 0; leg < 2; leg++)
+            for (int leg = 0; leg < legSpines.Count; leg++)
             {
-                // Bước 1: Tính trục giữa (Skeleton) cong mượt dọc ống (Hông/Đũng -> Đùi -> Gối -> Gấu) và bán kính bề rộng ống R(s)
-                AnatomicalLegChain chain = BuildLegChain(dst12XZ, leg == 0);
-                float maxHalfWidthM = Mathf.Max(chain.R[1], Mathf.Max(chain.R[2], Mathf.Max(chain.R[3], chain.R[4])));
-                int maxSidePasses = Mathf.Clamp(Mathf.CeilToInt(maxHalfWidthM / stepSM), 1, 8);
+                MaskSkeletonSpine sp = legSpines[leg];
+                List<Vector2> legMaskPoly = validLegMasks[leg];
+                int steps = Mathf.Clamp(Mathf.CeilToInt(sp.totalLengthM / sampleStepM), 24, 120);
+                var candidateLegPaths = new List<List<Vector3>>();
 
-                float legLenM = Vector2.Distance(chain.C[1], chain.C[2])
-                              + Vector2.Distance(chain.C[2], chain.C[3])
-                              + Vector2.Distance(chain.C[3], chain.C[4]);
-                int steps = Mathf.Clamp(Mathf.CeilToInt(legLenM / sampleStepM), 14, 90);
-
-                // Bước 2: Sinh các đường song song với trục giữa cách đều bước s (từ ngoài vào tâm rồi sang mép đối diện)
-                for (int kPass = -maxSidePasses; kPass <= maxSidePasses; kPass++)
+                if (p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel)
                 {
-                    float offsetMeters = kPass * stepSM;
-                    bool reverse = ((kPass + maxSidePasses) % 2 == 1);
-                    var currentSeg = new List<Vector3>();
+                    // CÁCH A — Song song với Trục giữa thật (EDT Medial Axis): khoảng cách kPass * s ra 2 bên
+                    int maxAbsIdx = Mathf.Clamp(Mathf.CeilToInt((sp.maxHalfWidthM - marginM * 0.4f) / stepSM) + 1, 1, 14);
+                    List<int> passIndices = BuildOrderedPassIndices(-maxAbsIdx, maxAbsIdx, p2Cfg.passOrdering);
 
-                    for (int k = 0; k <= steps; k++)
+                    for (int pIdx = 0; pIdx < passIndices.Count; pIdx++)
                     {
-                        float frac = reverse ? (1f - (float)k / steps) : ((float)k / steps);
-                        float sVal = Mathf.Lerp(1.05f, 3.85f, frac);
-                        int seg = Mathf.Clamp(Mathf.FloorToInt(sVal), 1, 3);
-                        float uLocal = Mathf.Clamp01(sVal - seg);
+                        int kPass = passIndices[pIdx];
+                        float offsetMeters = kPass * stepSM;
+                        var currentSeg = new List<Vector3>();
+                        bool wasTruncatedByNarrowing = false;
 
-                        Vector2 centerPt = chain.C[seg] + (chain.C[seg + 1] - chain.C[seg]) * uLocal;
-                        Vector2 normalVec = Vector2.Lerp(chain.N[seg], chain.N[seg + 1], uLocal);
-                        if (normalVec.sqrMagnitude < 1e-6f) normalVec = chain.N[seg];
-                        else normalVec.Normalize();
-                        float localHalfWidthM = Mathf.Lerp(chain.R[seg], chain.R[seg + 1], uLocal);
-
-                        // Bước 3: Cắt lượt ngoài khi ống quần thu hẹp từ đùi xuống gấu (|offset| > bề rộng ống tại trạm - biên e)
-                        float usableHalfWidth = Mathf.Max(0.015f, localHalfWidthM - marginM * 0.6f);
-                        if (Mathf.Abs(offsetMeters) > usableHalfWidth)
+                        for (int k = 0; k <= steps; k++)
                         {
-                            if (currentSeg.Count >= 2)
+                            float frac = (float)k / steps;
+                            SampleSpineAtT(sp, frac, out Vector2 centerPt, out Vector2 normalVec, out float localHalfWidthM);
+
+                            // Bước 5: Xử lý thay đổi bề rộng thật của mask ống quần — cắt lượt ngoài khi ống thu hẹp xuống gấu
+                            float usableHalfWidth = Mathf.Max(0.010f, localHalfWidthM - marginM * 0.55f);
+                            if (Mathf.Abs(offsetMeters) > usableHalfWidth)
                             {
-                                strokesWorld.Add(currentSeg);
+                                wasTruncatedByNarrowing = true;
+                                FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
                                 currentSeg = new List<Vector3>();
+                                continue;
+                            }
+
+                            Vector2 ptXZ = centerPt + normalVec * offsetMeters;
+                            bool inMask = IsPointInPolygonXZ(ptXZ, legMaskPoly);
+                            bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, ctrl.landmarksWorldPos, activeMargin, out _));
+                            if (inSafe)
+                            {
+                                currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
                             }
                             else
                             {
-                                currentSeg.Clear();
+                                FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
+                                currentSeg = new List<Vector3>();
                             }
-                            continue;
                         }
+                        FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
+                        if (wasTruncatedByNarrowing && kPass != 0) p2Exec.truncatedOuterPassCount++;
+                    }
+                }
+                else
+                {
+                    // CÁCH B — Offset đồng tâm từ biên mask thật vào phía trong theo từng bước ring * s
+                    int maxRings = Mathf.Clamp(Mathf.FloorToInt((sp.maxHalfWidthM - marginM * 0.45f) / stepSM) + 1, 1, 10);
 
-                        Vector2 ptXZ = centerPt + normalVec * offsetMeters;
-                        if (IsPointInTemplateRegionR(ptXZ, leg, legTemplatePts[leg], corridorRadiusM, activeContour, ctrl.landmarksWorldPos, activeMargin))
+                    for (int ring = 0; ring < maxRings; ring++)
+                    {
+                        float inwardOffsetM = ring * stepSM;
+                        bool anyTruncatedInRing = false;
+
+                        for (int side = -1; side <= 1; side += 2)
                         {
-                            currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
+                            var currentSeg = new List<Vector3>();
+                            for (int k = 0; k <= steps; k++)
+                            {
+                                float frac = (float)k / steps;
+                                SampleSpineAtT(sp, frac, out Vector2 centerPt, out Vector2 normalVec, out float localHalfWidthM);
+
+                                float outerBoundM = (side < 0)
+                                    ? -(localHalfWidthM - marginM * 0.55f)
+                                    : +(localHalfWidthM - marginM * 0.55f);
+                                float offsetMeters = (side < 0) ? (outerBoundM + inwardOffsetM) : (outerBoundM - inwardOffsetM);
+
+                                if ((side < 0 && offsetMeters > -0.25f * stepSM && ring > 0) ||
+                                    (side > 0 && offsetMeters < +0.25f * stepSM && ring > 0))
+                                {
+                                    anyTruncatedInRing = true;
+                                    FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
+                                    currentSeg = new List<Vector3>();
+                                    continue;
+                                }
+
+                                Vector2 ptXZ = centerPt + normalVec * offsetMeters;
+                                bool inMask = IsPointInPolygonXZ(ptXZ, legMaskPoly);
+                                bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, ctrl.landmarksWorldPos, activeMargin, out _));
+                                if (inSafe)
+                                {
+                                    currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
+                                }
+                                else
+                                {
+                                    FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
+                                    currentSeg = new List<Vector3>();
+                                }
+                            }
+                            FlushValidCandidatePath(currentSeg, minPassLenM, candidateLegPaths);
                         }
-                        else if (currentSeg.Count >= 2)
+                        if (anyTruncatedInRing) p2Exec.truncatedOuterPassCount++;
+                    }
+                }
+
+                // Bước 6: Sắp xếp thứ tự và đảo chiều đầu-cuối các lượt để đi quét qua lại liên tục kiểu máy in 3D
+                List<List<Vector3>> orderedLegPaths = OrderPathsForP2(candidateLegPaths, p2Cfg.passOrdering);
+
+                // Bước 6b: Gắn cờ BẬT/TẮT súng chính xác tại giao cắt với Chỗ cần phun (targetPolysXZ)
+                var legFinalPaths = new List<List<Vector3>>();
+                var legFinalFlags = new List<List<bool>>();
+                bool gateByTarget = (!isFullMaskMode && targetPolysXZ.Count > 0);
+
+                for (int pi = 0; pi < orderedLegPaths.Count; pi++)
+                {
+                    if (!gateByTarget)
+                    {
+                        var fullPass = orderedLegPaths[pi];
+                        var allOn = new List<bool>(fullPass.Count);
+                        for (int k = 0; k < fullPass.Count; k++) allOn.Add(k > 0);
+                        legFinalPaths.Add(fullPass);
+                        legFinalFlags.Add(allOn);
+                    }
+                    else if (p2Cfg.continuousScanLike3DPrinter)
+                    {
+                        GateContinuousScanPassWithTarget(
+                            orderedLegPaths[pi], targetPolysXZ,
+                            out List<Vector3> gatedPts, out List<bool> gatedFlags, out bool anySprayOn);
+                        if (anySprayOn && gatedPts.Count >= 2)
                         {
-                            strokesWorld.Add(currentSeg);
-                            currentSeg = new List<Vector3>();
-                        }
-                        else
-                        {
-                            currentSeg.Clear();
+                            legFinalPaths.Add(gatedPts);
+                            legFinalFlags.Add(gatedFlags);
                         }
                     }
-                    if (currentSeg.Count >= 2) strokesWorld.Add(currentSeg);
+                    else
+                    {
+                        ExtractClippedSpraySegmentsFromPass(orderedLegPaths[pi], targetPolysXZ, 0.004f, out List<List<Vector3>> clippedSegs);
+                        for (int ci = 0; ci < clippedSegs.Count; ci++)
+                        {
+                            var segPts = clippedSegs[ci];
+                            var segFlags = new List<bool>(segPts.Count);
+                            for (int k = 0; k < segPts.Count; k++) segFlags.Add(k > 0);
+                            legFinalPaths.Add(segPts);
+                            legFinalFlags.Add(segFlags);
+                        }
+                    }
                 }
+
+                if (leg == 0) p2Exec.leftLegPassCount = legFinalPaths.Count;
+                else p2Exec.rightLegPassCount += legFinalPaths.Count;
+
+                strokesWorld.AddRange(legFinalPaths);
+                perPassSprayFlags.AddRange(legFinalFlags);
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P2_SKELETON", useFixedVerticalNormal: false);
+        // Bước 7 & 8: Gán tọa độ Z, hướng súng, bật/tắt súng theo từng đoạn và kiểm tra quỹ đạo
+        bool useFixedVert = (p2Cfg.gunOrientation != P2GunOrientationMode.SmoothSurfaceNormal25D);
+        bool useFlat2D = (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D);
+
+        var wps = BuildSprayWaypointsFromWorldStrokes(
+            strokesWorld, ctrl, plyLoader, tech,
+            p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel ? "P2_SKELETON" : "P2_OFFSET",
+            useFixedVerticalNormal: useFixedVert,
+            useFlatPlaneZ: useFlat2D,
+            flatPlaneWorldY: flatY,
+            overrideStandoffMm: p2Cfg.sprayDistanceDMm,
+            perPointSprayOn: perPassSprayFlags);
+
+        // Trích xuất các đoạn BẬT súng (Đường phun) vs đoạn TẮT súng (Đường quỹ đạo không phun / quay đầu)
+        PopulateP2ExecutionMetricsFromWaypoints(wps, p2Exec);
+
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
     }
 
+    private static bool IsPointInAnyPolygonXZ(Vector2 ptXZ, List<List<Vector2>> polys)
+    {
+        if (polys == null) return false;
+        for (int i = 0; i < polys.Count; i++)
+        {
+            var poly = polys[i];
+            if (poly != null && poly.Count >= 3 && IsPointInPolygonXZ(ptXZ, poly)) return true;
+        }
+        return false;
+    }
+
     /// <summary>
-    /// P3 — Quỹ đạo mẫu theo mốc (Tham số hóa Tọa độ Trọng tâm Barycentric trên Lưới Tam Giác 12 Mốc, Chuẩn trang 7 file góp ý):
-    /// 1. Chia quần chuẩn thành lưới 14 tam giác theo 12 mốc giải phẫu (YOLO11-pose).
-    /// 2. Biểu diễn mỗi điểm quỹ đạo mẫu bằng tọa độ trọng tâm (u, v, w) trong tam giác chứa nó.
-    /// 3. Với quần mới: dựng lại lưới từ 12 mốc thực -> biến đổi affine từng mảnh (u*A' + v*B' + w*C') -> cắt vùng cấm -> gán Z + pháp tuyến 3D.
+    /// Kiểu máy in 3D: giữ nguyên toàn bộ lượt quét liên tục qua lại, tìm chính xác điểm cắt mép
+    /// Chỗ cần phun (binary search 6 bước) để bật súng (sprayOn = true) ĐÚNG trong vùng mẫu và tắt súng (sprayOn = false) ngoài vùng mẫu.
+    /// </summary>
+    private static void GateContinuousScanPassWithTarget(
+        List<Vector3> passPts,
+        List<List<Vector2>> targetPolysXZ,
+        out List<Vector3> outPts,
+        out List<bool> outFlags,
+        out bool anySprayOn)
+    {
+        outPts = new List<Vector3>();
+        outFlags = new List<bool>();
+        anySprayOn = false;
+        if (passPts == null || passPts.Count < 2) return;
+
+        Vector3 prevP = passPts[0];
+        bool prevIn = IsPointInAnyPolygonXZ(new Vector2(prevP.x, prevP.z), targetPolysXZ);
+        outPts.Add(prevP);
+        outFlags.Add(false); // Điểm bắt đầu lượt luôn là di chuyển tới (TẮT súng)
+
+        for (int i = 1; i < passPts.Count; i++)
+        {
+            Vector3 curP = passPts[i];
+            bool curIn = IsPointInAnyPolygonXZ(new Vector2(curP.x, curP.z), targetPolysXZ);
+
+            if (curIn != prevIn)
+            {
+                // Tìm chính xác điểm cắt biên giữa prevP và curP
+                float lo = 0f, hi = 1f;
+                for (int it = 0; it < 6; it++)
+                {
+                    float mid = 0.5f * (lo + hi);
+                    Vector3 mp = Vector3.Lerp(prevP, curP, mid);
+                    bool mIn = IsPointInAnyPolygonXZ(new Vector2(mp.x, mp.z), targetPolysXZ);
+                    if (mIn == prevIn) lo = mid;
+                    else hi = mid;
+                }
+                Vector3 crossP = Vector3.Lerp(prevP, curP, 0.5f * (lo + hi));
+                if (Vector3.Distance(outPts[outPts.Count - 1], crossP) > 0.0008f)
+                {
+                    // Đoạn từ prevP -> crossP mang trạng thái của prevIn
+                    outPts.Add(crossP);
+                    outFlags.Add(prevIn);
+                    if (prevIn) anySprayOn = true;
+                }
+                // Đoạn từ crossP -> curP mang trạng thái của curIn
+                if (Vector3.Distance(outPts[outPts.Count - 1], curP) > 0.0008f)
+                {
+                    outPts.Add(curP);
+                    outFlags.Add(curIn);
+                    if (curIn) anySprayOn = true;
+                }
+            }
+            else
+            {
+                outPts.Add(curP);
+                outFlags.Add(curIn);
+                if (curIn) anySprayOn = true;
+            }
+
+            prevP = curP;
+            prevIn = curIn;
+        }
+    }
+
+    private static void ExtractClippedSpraySegmentsFromPass(
+        List<Vector3> passPts,
+        List<List<Vector2>> targetPolysXZ,
+        float minOnSegLenM,
+        out List<List<Vector3>> outSegments)
+    {
+        outSegments = new List<List<Vector3>>();
+        GateContinuousScanPassWithTarget(passPts, targetPolysXZ, out List<Vector3> pts, out List<bool> flags, out bool anyOn);
+        if (!anyOn || pts.Count < 2) return;
+
+        List<Vector3> cur = null;
+        for (int i = 1; i < pts.Count; i++)
+        {
+            if (flags[i])
+            {
+                if (cur == null) cur = new List<Vector3> { pts[i - 1] };
+                cur.Add(pts[i]);
+            }
+            else if (cur != null)
+            {
+                FlushValidCandidatePath(cur, minOnSegLenM, outSegments);
+                cur = null;
+            }
+        }
+        if (cur != null) FlushValidCandidatePath(cur, minOnSegLenM, outSegments);
+    }
+
+    private static float SampleSurfaceHeightOnly(DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, float wx, float wz)
+    {
+        if (ctrl != null && ctrl.SampleCompensatedSurface(wx, wz, out float cy, out _)) return cy;
+        if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(wx, wz, out float py, out _)) return py;
+        return 0.020f;
+    }
+
+    private static void FlushValidCandidatePath(List<Vector3> seg, float minLenM, List<List<Vector3>> outList)
+    {
+        if (seg == null || seg.Count < 2) return;
+        float lenM = 0f;
+        for (int i = 1; i < seg.Count; i++) lenM += Vector3.Distance(seg[i - 1], seg[i]);
+        if (lenM >= minLenM)
+        {
+            outList.Add(new List<Vector3>(seg));
+        }
+    }
+
+    private static List<int> BuildOrderedPassIndices(int minIdx, int maxIdx, P2PassOrderingMode mode)
+    {
+        var list = new List<int>();
+        if (mode == P2PassOrderingMode.CenterOutAlternating)
+        {
+            if (0 >= minIdx && 0 <= maxIdx) list.Add(0);
+            int maxAbs = Mathf.Max(Mathf.Abs(minIdx), Mathf.Abs(maxIdx));
+            for (int d = 1; d <= maxAbs; d++)
+            {
+                if (-d >= minIdx && -d <= maxIdx) list.Add(-d);
+                if (+d >= minIdx && +d <= maxIdx) list.Add(+d);
+            }
+        }
+        else if (mode == P2PassOrderingMode.OuterToInner)
+        {
+            int l = minIdx, r = maxIdx;
+            while (l <= r)
+            {
+                list.Add(l);
+                if (r != l) list.Add(r);
+                l++;
+                r--;
+            }
+        }
+        else
+        {
+            for (int k = minIdx; k <= maxIdx; k++) list.Add(k);
+        }
+        return list;
+    }
+
+    private static List<List<Vector3>> OrderPathsForP2(List<List<Vector3>> paths, P2PassOrderingMode mode)
+    {
+        if (paths == null || paths.Count <= 1) return paths ?? new List<List<Vector3>>();
+
+        if (mode != P2PassOrderingMode.MinimumTravelGreedy)
+        {
+            var alt = new List<List<Vector3>>(paths.Count);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                var p = new List<Vector3>(paths[i]);
+                if (i % 2 == 1) p.Reverse();
+                alt.Add(p);
+            }
+            return alt;
+        }
+
+        // Greedy nearest-neighbor endpoint ordering (order_for_minimum_travel)
+        var remaining = new List<List<Vector3>>(paths);
+        var ordered = new List<List<Vector3>>(paths.Count);
+        ordered.Add(new List<Vector3>(remaining[0]));
+        remaining.RemoveAt(0);
+
+        while (remaining.Count > 0)
+        {
+            Vector3 lastEnd = ordered[ordered.Count - 1][ordered[ordered.Count - 1].Count - 1];
+            int bestIdx = 0;
+            bool bestReverse = false;
+            float bestDist = float.MaxValue;
+
+            for (int i = 0; i < remaining.Count; i++)
+            {
+                var cand = remaining[i];
+                float dStart = Vector3.Distance(lastEnd, cand[0]);
+                float dEnd = Vector3.Distance(lastEnd, cand[cand.Count - 1]);
+                if (dStart < bestDist)
+                {
+                    bestDist = dStart;
+                    bestIdx = i;
+                    bestReverse = false;
+                }
+                if (dEnd < bestDist)
+                {
+                    bestDist = dEnd;
+                    bestIdx = i;
+                    bestReverse = true;
+                }
+            }
+
+            var chosen = new List<Vector3>(remaining[bestIdx]);
+            if (bestReverse) chosen.Reverse();
+            ordered.Add(chosen);
+            remaining.RemoveAt(bestIdx);
+        }
+
+        return ordered;
+    }
+
+    private static void PopulateP2ExecutionMetricsFromWaypoints(
+        List<DobotCR10AIKController.WaypointData> wps,
+        P2ExecutionResult exec)
+    {
+        if (exec == null) return;
+        exec.sprayOnPathsWorld.Clear();
+        exec.sprayOffConnectorsWorld.Clear();
+        exec.totalSprayLengthMm = 0f;
+        exec.totalTravelLengthMm = 0f;
+        exec.turnaroundCount = 0;
+        exec.sprayOnSegmentCount = 0;
+
+        if (wps == null || wps.Count < 2) return;
+
+        List<Vector3> curSprayOn = null;
+        List<Vector3> curTravelOff = null;
+        for (int i = 1; i < wps.Count; i++)
+        {
+            float dMm = Vector3.Distance(wps[i - 1].targetPosGlobal_mm, wps[i].targetPosGlobal_mm);
+            bool sameSeg = string.IsNullOrEmpty(wps[i - 1].segmentName) || string.IsNullOrEmpty(wps[i].segmentName)
+                || wps[i - 1].segmentName == wps[i].segmentName;
+            bool isOn = wps[i].sprayOn && sameSeg;
+
+            if (isOn)
+            {
+                if (curTravelOff != null && curTravelOff.Count >= 2)
+                {
+                    exec.sprayOffConnectorsWorld.Add(curTravelOff);
+                }
+                curTravelOff = null;
+
+                exec.totalSprayLengthMm += dMm;
+                if (curSprayOn == null) curSprayOn = new List<Vector3> { wps[i - 1].targetPosWorld_m };
+                curSprayOn.Add(wps[i].targetPosWorld_m);
+            }
+            else
+            {
+                if (curSprayOn != null && curSprayOn.Count >= 2)
+                {
+                    exec.sprayOnPathsWorld.Add(curSprayOn);
+                }
+                curSprayOn = null;
+
+                exec.totalTravelLengthMm += dMm;
+                if (!sameSeg) exec.turnaroundCount++;
+
+                if (curTravelOff == null) curTravelOff = new List<Vector3> { wps[i - 1].targetPosWorld_m };
+                curTravelOff.Add(wps[i].targetPosWorld_m);
+            }
+        }
+        if (curSprayOn != null && curSprayOn.Count >= 2) exec.sprayOnPathsWorld.Add(curSprayOn);
+        if (curTravelOff != null && curTravelOff.Count >= 2) exec.sprayOffConnectorsWorld.Add(curTravelOff);
+        exec.sprayOnSegmentCount = exec.sprayOnPathsWorld.Count;
+
+        exec.summaryText =
+            $"Lượt quét: Trái {exec.leftLegPassCount} + Phải {exec.rightLegPassCount} | Đoạn phun ON: {exec.sprayOnSegmentCount} | " +
+            $"Phun: {exec.totalSprayLengthMm:F0} mm | Quỹ đạo tắt: {exec.totalTravelLengthMm:F0} mm";
+    }
+
+    /// <summary>
+    /// Phát hiện tự động 12 mốc hình học trực tiếp trên Contour quần (điểm lồi/lõm, điểm chẻ đáy đũng, giao trục giữa)
+    /// KHÔNG cần mô hình keypoint YOLO11-pose (đúng Mục 2 & Bước 3 tài liệu P3).
+    /// </summary>
+    public static bool DetectLandmarksFromContourGeometry(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        out Vector2[] landmarksXZ,
+        out List<Vector3> landmarksWorld)
+    {
+        landmarksXZ = null;
+        landmarksWorld = new List<Vector3>();
+        if (ctrl == null || ctrl.garmentContourWorld == null || ctrl.garmentContourWorld.Count < 8) return false;
+
+        var rawG = new List<Vector2>(ctrl.garmentContourWorld.Count);
+        for (int i = 0; i < ctrl.garmentContourWorld.Count; i++)
+            rawG.Add(new Vector2(ctrl.garmentContourWorld[i].x, ctrl.garmentContourWorld[i].z));
+
+        ComputePcaAxes2D(rawG, Vector2.up, out Vector2 centroid, out Vector2 majorAx, out Vector2 minorAx);
+        float minU = float.MaxValue, maxU = float.MinValue;
+        float minVAll = float.MaxValue, maxVAll = float.MinValue;
+        for (int i = 0; i < rawG.Count; i++)
+        {
+            Vector2 rel = rawG[i] - centroid;
+            float u = Vector2.Dot(rel, majorAx);
+            float v = Vector2.Dot(rel, minorAx);
+            if (u < minU) minU = u; if (u > maxU) maxU = u;
+            if (v < minVAll) minVAll = v; if (v > maxVAll) maxVAll = v;
+        }
+        float uSpan = Mathf.Max(0.10f, maxU - minU);
+
+        // Xác định chiều Cạp (liền khối ở trục giữa v=0) -> Gấu (tách 2 ống trống ở v=0)
+        int midAtMin = 0, midAtMax = 0;
+        for (int k = 1; k <= 5; k++)
+        {
+            float frac = 0.08f + 0.04f * k;
+            if (IsPointInPolygonXZ(centroid + majorAx * (minU + frac * uSpan), rawG)) midAtMin++;
+            if (IsPointInPolygonXZ(centroid + majorAx * (maxU - frac * uSpan), rawG)) midAtMax++;
+        }
+        if (midAtMax > midAtMin)
+        {
+            majorAx = -majorAx;
+            minorAx = -minorAx;
+            float oldMin = minU; minU = -maxU; maxU = -oldMin;
+            float oldMinV = minVAll; minVAll = -maxVAll; maxVAll = -oldMinV;
+        }
+
+        // Tìm điểm lõm đáy đũng (crotch notch) dọc theo trục giữa v = 0
+        float uCrotch = minU + 0.34f * uSpan;
+        for (int s = 12; s <= 62; s++)
+        {
+            float uTest = minU + (s / 100f) * uSpan;
+            if (IsPointInPolygonXZ(centroid + majorAx * uTest, rawG)) uCrotch = uTest;
+            else if (uTest > minU + 0.22f * uSpan) break;
+        }
+
+        float vSearchMax = Mathf.Max(0.28f, Mathf.Max(Mathf.Abs(minVAll), Mathf.Abs(maxVAll)) + 0.03f);
+        Func<float, float, float, Vector2> findExtremeV = (uPos, vLo, vHi) =>
+        {
+            float bestMin = float.MaxValue, bestMax = float.MinValue;
+            for (int k = 0; k <= 48; k++)
+            {
+                float v = Mathf.Lerp(vLo, vHi, k / 48f);
+                if (IsPointInPolygonXZ(centroid + majorAx * uPos + minorAx * v, rawG))
+                {
+                    if (v < bestMin) bestMin = v;
+                    if (v > bestMax) bestMax = v;
+                }
+            }
+            if (bestMin > bestMax) return new Vector2(0.5f * (vLo + vHi), 0.5f * (vLo + vHi));
+            return new Vector2(bestMin, bestMax);
+        };
+
+        float uWaist = minU + 0.04f * uSpan;
+        Vector2 wSpan = findExtremeV(uWaist, -vSearchMax, vSearchMax);
+        Vector2 waistL = centroid + majorAx * uWaist + minorAx * wSpan.x;
+        Vector2 waistC = centroid + majorAx * uWaist + minorAx * (0.5f * (wSpan.x + wSpan.y));
+        Vector2 waistR = centroid + majorAx * uWaist + minorAx * wSpan.y;
+        Vector2 crotch = centroid + majorAx * uCrotch;
+
+        float legLenU = Mathf.Max(0.15f, (maxU - 0.03f * uSpan) - uCrotch);
+        float uThigh = uCrotch + 0.26f * legLenU;
+        float uKnee = uCrotch + 0.58f * legLenU;
+        float uCuff = maxU - 0.03f * uSpan;
+
+        Vector2 thL = findExtremeV(uThigh, -vSearchMax, -0.004f);
+        Vector2 thR = findExtremeV(uThigh, 0.004f, vSearchMax);
+        Vector2 knL = findExtremeV(uKnee, -vSearchMax, -0.004f);
+        Vector2 knR = findExtremeV(uKnee, 0.004f, vSearchMax);
+        Vector2 cfL = findExtremeV(uCuff, -vSearchMax, -0.004f);
+        Vector2 cfR = findExtremeV(uCuff, 0.004f, vSearchMax);
+
+        landmarksXZ = new Vector2[12]
+        {
+            waistL,
+            waistC,
+            waistR,
+            crotch,
+            centroid + majorAx * uThigh + minorAx * (0.5f * (thL.x + thL.y)), // 4: thigh_left
+            centroid + majorAx * uThigh + minorAx * (0.5f * (thR.x + thR.y)), // 5: thigh_right
+            centroid + majorAx * uKnee  + minorAx * (0.5f * (knL.x + knL.y)), // 6: knee_left
+            centroid + majorAx * uKnee  + minorAx * (0.5f * (knR.x + knR.y)), // 7: knee_right
+            centroid + majorAx * uCuff  + minorAx * cfL.x,                    // 8: cuff_left_outer
+            centroid + majorAx * uCuff  + minorAx * cfL.y,                    // 9: cuff_left_inner
+            centroid + majorAx * uCuff  + minorAx * cfR.x,                    // 10: cuff_right_inner
+            centroid + majorAx * uCuff  + minorAx * cfR.y                     // 11: cuff_right_outer
+        };
+
+        for (int i = 0; i < 12; i++)
+        {
+            float y = SampleSurfaceHeightOnly(ctrl, plyLoader, landmarksXZ[i].x, landmarksXZ[i].y);
+            landmarksWorld.Add(new Vector3(landmarksXZ[i].x, y, landmarksXZ[i].y));
+        }
+        return true;
+    }
+
+    private static float SignedArea2D(Vector2 a, Vector2 b, Vector2 c)
+    {
+        return 0.5f * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    }
+
+    /// <summary>
+    /// Overload tương thích ngược cho bộ so sánh P1 / P2 / P3 / P4.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP3LandmarkTemplate(
         DobotCR10AIKController ctrl,
@@ -1205,57 +4198,312 @@ public static class TrajectoryEvaluationEngine
         SprayTechParams tech,
         out float genTimeSec)
     {
+        var cfg = (ctrl != null && ctrl.p3Config != null) ? ctrl.p3Config : new P3LandmarkConfig
+        {
+            sprayDistanceDMm = GetEffectiveSprayHeightMm(ctrl, tech),
+            borderMarginEMm = tech != null ? tech.borderMarginMm * 0.5f : 10f
+        };
+        return GenerateP3LandmarkTemplate(ctrl, plyLoader, templateStrokesUV, templateSize, tech, cfg, out _, out genTimeSec);
+    }
+
+    /// <summary>
+    /// P3 — Quỹ đạo mẫu theo mốc (Tham số hóa Tọa độ Trọng tâm Barycentric trên Lưới 32 Tam Giác, Đầy đủ 8 bước tài liệu P3):
+    /// Bước 1-2: Nhận quỹ đạo mẫu & bộ mốc hình học trên quần chuẩn (giữ đúng thứ tự mốc).
+    /// Bước 3: Phát hiện mốc trên quần mới bằng AI Keypoint (YOLO11-pose) HOẶC hình học trực tiếp trên Contour.
+    /// Bước 4: Chia lưới tam giác (32 tam giác cho 2 ống) trên quần chuẩn và quần mới; kiểm tra tam giác đảo ngược / méo.
+    /// Bước 5-6: Tham số hóa từng điểm mẫu bằng tọa độ trọng tâm (alpha, beta, gamma) và tái tạo P' = alpha*A' + beta*B' + gamma*C'.
+    /// Bước 7-8: Gán độ cao Z (2.5D/2D), hướng súng (pháp tuyến mượt / thẳng đứng), lùi khoảng d, kiểm tra robot & thống kê Mục 9.
+    /// </summary>
+    public static List<DobotCR10AIKController.WaypointData> GenerateP3LandmarkTemplate(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
+        SprayTechParams tech,
+        P3LandmarkConfig p3Cfg,
+        out P3ExecutionResult p3Exec,
+        out float genTimeSec)
+    {
         float t0 = Time.realtimeSinceStartup;
+        p3Exec = new P3ExecutionResult();
         var strokesWorld = new List<List<Vector3>>();
 
-        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12 || templateStrokesUV == null)
+        if (ctrl == null)
         {
+            p3Exec.warningMessage = "Thiếu bộ điều khiển phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
+        if (p3Cfg == null) p3Cfg = new P3LandmarkConfig();
 
-        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
-        Vector2[] dst12XZ = new Vector2[12];
-        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
-
-        for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+        // Bước 3: Lấy bộ mốc hình học trên quần mới (AI Keypoint 12 mốc HOẶC hình học trực tiếp trên Contour)
+        Vector2[] dst12XZ = null;
+        bool useContourLm = (p3Cfg.landmarkSource == P3LandmarkSourceMode.ContourGeometry);
+        if (!useContourLm && ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12)
         {
-            for (int s = 0; s < templateStrokesUV.Count; s++)
+            dst12XZ = new Vector2[12];
+            for (int i = 0; i < 12; i++)
             {
-                var raw = templateStrokesUV[s];
-                if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.018f);
-                List<Vector3> worldStroke = new List<Vector3>();
+                dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+                p3Exec.detectedLandmarksWorld.Add(ctrl.landmarksWorldPos[i]);
+            }
+            p3Exec.landmarkMethodUsed = "AI Keypoint (12 mốc)";
+        }
+        else if (DetectLandmarksFromContourGeometry(ctrl, plyLoader, out Vector2[] geoLmXZ, out List<Vector3> geoLmW))
+        {
+            dst12XZ = geoLmXZ;
+            p3Exec.detectedLandmarksWorld.AddRange(geoLmW);
+            p3Exec.landmarkMethodUsed = useContourLm ? "Hình học Contour (12 mốc)" : "Hình học Contour (dự phòng)";
+        }
+        else if (ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12)
+        {
+            dst12XZ = new Vector2[12];
+            for (int i = 0; i < 12; i++)
+            {
+                dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+                p3Exec.detectedLandmarksWorld.Add(ctrl.landmarksWorldPos[i]);
+            }
+            p3Exec.landmarkMethodUsed = "AI Keypoint (12 mốc)";
+        }
 
-                for (int p = 0; p < resampled.Count; p++)
+        if (dst12XZ == null)
+        {
+            p3Exec.warningMessage = "Không phát hiện được bộ mốc hình học cho P3 (cần 12 mốc AI hoặc đường bao contour).";
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+        p3Exec.landmarkCount = 12;
+
+        // Bước 4: Dựng lưới tam giác chuẩn & mới (16 tam giác ống trái + 16 tam giác ống phải = 32 tam giác), kiểm tra đảo/méo tam giác
+        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
+        bool flat2D = (p3Cfg.gunOrientation == P3GunOrientationMode.FlatPlane2D);
+        float flatY = (plyLoader != null) ? (plyLoader.estimatedTableY + 0.025f) : 0.025f;
+
+        p3Exec.totalTriangles = 0;
+        p3Exec.flippedTriangleCount = 0;
+        p3Exec.maxTriangleDistortion = 1f;
+        float totalAreaSrc = 0f, totalAreaDst = 0f;
+        var triAreaRatios = new List<float>(32);
+
+        for (int leg = 0; leg < 2; leg++)
+        {
+            bool isLeft = (leg == 0);
+            AnatomicalLegChain sCh = BuildLegChain(src12, isLeft);
+            AnatomicalLegChain dCh = BuildLegChain(dst12XZ, isLeft);
+            Vector2[] sV = new Vector2[15];
+            Vector2[] dV = new Vector2[15];
+            BuildLegStructuredVertices15(sCh, sV);
+            BuildLegStructuredVertices15(dCh, dV);
+
+            for (int t = 0; t < 16; t++)
+            {
+                int i0 = LegStripTriangles16[t, 0];
+                int i1 = LegStripTriangles16[t, 1];
+                int i2 = LegStripTriangles16[t, 2];
+
+                float aSrc = SignedArea2D(sV[i0], sV[i1], sV[i2]);
+                float aDst = SignedArea2D(dV[i0], dV[i1], dV[i2]);
+                // Trong hệ World XZ so với UV (v đi xuống), xác định dấu nhất quán theo ống (so với tam giác đầu)
+                bool flipped = (Mathf.Abs(aDst) < 1e-6f);
+                if (!flipped && t > 0)
                 {
-                    // Biến đổi Affine từng mảnh bằng tọa độ trọng tâm (Barycentric) trên lưới tam giác 12 mốc
-                    Vector2 wXZ = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
-                    Vector3 w = new Vector3(wXZ.x, 0.02f, wXZ.y);
-                    bool keep = (attempt == 0)
-                        ? IsInsideValidSprayZone(w.x, w.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
-                        : true;
-                    if (keep)
-                    {
-                        worldStroke.Add(w);
-                    }
-                    else if (worldStroke.Count >= 2)
-                    {
-                        strokesWorld.Add(worldStroke);
-                        worldStroke = new List<Vector3>();
-                    }
-                    else
-                    {
-                        worldStroke.Clear();
-                    }
+                    float refSign = SignedArea2D(dV[LegStripTriangles16[0, 0]], dV[LegStripTriangles16[0, 1]], dV[LegStripTriangles16[0, 2]]);
+                    if (refSign * aDst < 0f) flipped = true;
                 }
-                if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                if (flipped) p3Exec.flippedTriangleCount++;
+
+                totalAreaSrc += Mathf.Abs(aSrc);
+                totalAreaDst += Mathf.Abs(aDst);
+                if (Mathf.Abs(aSrc) > 1e-7f) triAreaRatios.Add(Mathf.Abs(aDst) / Mathf.Abs(aSrc));
+
+                Vector3 w0 = new Vector3(dV[i0].x, (flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, dV[i0].x, dV[i0].y)) + 0.002f, dV[i0].y);
+                Vector3 w1 = new Vector3(dV[i1].x, (flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, dV[i1].x, dV[i1].y)) + 0.002f, dV[i1].y);
+                Vector3 w2 = new Vector3(dV[i2].x, (flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, dV[i2].x, dV[i2].y)) + 0.002f, dV[i2].y);
+                p3Exec.meshTrianglesWorld.Add(new Vector3[] { w0, w1, w2 });
+                p3Exec.meshTriangleFlipped.Add(flipped);
+                p3Exec.totalTriangles++;
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P3_BARYCENTRIC12");
+        float meanRatio = (totalAreaSrc > 1e-7f) ? (totalAreaDst / totalAreaSrc) : 1f;
+        for (int i = 0; i < triAreaRatios.Count; i++)
+        {
+            float rel = (meanRatio > 1e-6f) ? (triAreaRatios[i] / meanRatio) : 1f;
+            float distor = rel >= 1f ? rel : (rel > 1e-4f ? 1f / rel : 10f);
+            if (distor > p3Exec.maxTriangleDistortion) p3Exec.maxTriangleDistortion = distor;
+        }
+        p3Exec.landmarkOrderConsistent = (p3Exec.flippedTriangleCount == 0);
+        if (p3Exec.flippedTriangleCount > 0)
+            p3Exec.warningMessage = $"Cảnh báo P3: có {p3Exec.flippedTriangleCount}/{p3Exec.totalTriangles} tam giác bị đảo ngược hoặc suy biến (kiểm tra thứ tự mốc)!";
+
+        // Bước 5 & 6: Lấy quỹ đạo mẫu (hỗ trợ cả vùng hình Tròn/Vuông/Đa giác đã vẽ LẪN các nét mẫu Canonical UV) và biến đổi Barycentric!
+        var activeCanonicalStrokes = new List<List<Vector2>>();
+        var regionPolysForOverlay = new List<List<Vector2>>();
+
+        if (ctrl.HasCustomDrawnRegions2D)
+        {
+            var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+            float fillStepMm = (tech != null) ? Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 60f) : 25f;
+            for (int r = 0; r < directRegionsXZ.Count; r++)
+            {
+                var polyXZ = directRegionsXZ[r];
+                if (polyXZ == null || polyXZ.Count < 3) continue;
+                regionPolysForOverlay.Add(polyXZ);
+
+                // Chuyển vùng hình vẽ (Tròn/Vuông/Đa giác) thành quỹ đạo mẫu trên quần chuẩn để biến đổi Barycentric chuẩn P3
+                var outline = new List<Vector3>(polyXZ.Count + 1);
+                for (int i = 0; i <= polyXZ.Count; i++)
+                {
+                    Vector2 p2 = polyXZ[i % polyXZ.Count];
+                    outline.Add(new Vector3(p2.x, 0.02f, p2.y));
+                }
+                strokesWorld.Add(outline);
+
+                if (p3Cfg.fillClosedDrawnRegions)
+                {
+                    var fillPasses = BuildSimpleFillPassesInsidePolygon2D(polyXZ, fillStepMm * 0.001f);
+                    for (int f = 0; f < fillPasses.Count; f++) strokesWorld.Add(fillPasses[f]);
+                }
+            }
+        }
+        else if (templateStrokesUV != null && templateStrokesUV.Count > 0)
+        {
+            activeCanonicalStrokes.AddRange(templateStrokesUV);
+        }
+
+        int totalCandidatePts = 0;
+        int insideGarmentPts = 0;
+
+        if (strokesWorld.Count == 0 && activeCanonicalStrokes.Count > 0)
+        {
+            float stepUV = Mathf.Clamp(p3Cfg.resampleStepUV, 0.006f, 0.04f);
+            float marginMm = Mathf.Clamp(p3Cfg.borderMarginEMm, 0f, 35f);
+            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+            {
+                totalCandidatePts = 0;
+                insideGarmentPts = 0;
+                for (int s = 0; s < activeCanonicalStrokes.Count; s++)
+                {
+                    var raw = activeCanonicalStrokes[s];
+                    if (raw == null || raw.Count < 2) continue;
+                    var resampled = ResampleUV(raw, stepUV);
+                    var worldStroke = new List<Vector3>();
+
+                    for (int p = 0; p < resampled.Count; p++)
+                    {
+                        // Biến đổi Affine từng mảnh chuẩn Barycentric: P' = alpha*A' + beta*B' + gamma*C'
+                        Vector2 wXZ = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
+                        Vector3 w = new Vector3(wXZ.x, 0.02f, wXZ.y);
+                        totalCandidatePts++;
+                        bool isIn = IsInsideValidSprayZone(w.x, w.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm * 0.5f, out _);
+                        if (isIn) insideGarmentPts++;
+
+                        bool keep = (!p3Cfg.clipToGarmentContour || attempt == 1) ? true : isIn;
+                        if (keep)
+                        {
+                            worldStroke.Add(w);
+                        }
+                        else if (worldStroke.Count >= 2)
+                        {
+                            strokesWorld.Add(worldStroke);
+                            worldStroke = new List<Vector3>();
+                        }
+                        else
+                        {
+                            worldStroke.Clear();
+                        }
+                    }
+                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                }
+            }
+        }
+        else if (strokesWorld.Count > 0)
+        {
+            for (int s = 0; s < strokesWorld.Count; s++)
+            {
+                for (int p = 0; p < strokesWorld[s].Count; p++)
+                {
+                    totalCandidatePts++;
+                    if (IsInsideValidSprayZone(strokesWorld[s][p].x, strokesWorld[s][p].z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
+                        insideGarmentPts++;
+                }
+            }
+        }
+
+        for (int i = 0; i < regionPolysForOverlay.Count; i++)
+            p3Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(regionPolysForOverlay[i], ctrl, plyLoader, flat2D, flatY));
+
+        // Bước 7 & 8: Gán độ cao Z, hướng súng, lùi khoảng d, giải IK 6-DOF & tính tiêu chí kiểm tra Mục 9
+        bool useFixedVert = (p3Cfg.gunOrientation != P3GunOrientationMode.SmoothSurfaceNormal25D);
+        var wps = BuildSprayWaypointsFromWorldStrokes(
+            strokesWorld, ctrl, plyLoader, tech, "P3_BARYCENTRIC12",
+            useFixedVerticalNormal: useFixedVert,
+            useFlatPlaneZ: flat2D,
+            flatPlaneWorldY: flatY,
+            overrideStandoffMm: p3Cfg.sprayDistanceDMm);
+
+        p3Exec.strokeCount = strokesWorld.Count;
+        p3Exec.inTargetRatioPct = totalCandidatePts > 0 ? (100f * insideGarmentPts / totalCandidatePts) : 100f;
+        ComputeSprayAndTravelLengths(wps, out p3Exec.totalSprayLengthMm, out p3Exec.totalTravelLengthMm);
+        p3Exec.summaryText =
+            $"Mốc: {p3Exec.landmarkMethodUsed} | Lưới: {p3Exec.totalTriangles} tam giác (đảo: {p3Exec.flippedTriangleCount}, méo max: {p3Exec.maxTriangleDistortion:F2}x) | " +
+            $"Trong vùng: {p3Exec.inTargetRatioPct:F0}% | Phun: {p3Exec.totalSprayLengthMm:F0} mm";
+
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
+    }
+
+    private static List<List<Vector3>> BuildSimpleFillPassesInsidePolygon2D(List<Vector2> polyXZ, float spacingM)
+    {
+        var passes = new List<List<Vector3>>();
+        if (polyXZ == null || polyXZ.Count < 3 || spacingM <= 1e-4f) return passes;
+        ComputePcaAxes2D(polyXZ, Vector2.up, out Vector2 centroid, out Vector2 majorAx, out Vector2 minorAx);
+        var polyUV = new List<Vector2>(polyXZ.Count);
+        float minV = float.MaxValue, maxV = float.MinValue;
+        for (int i = 0; i < polyXZ.Count; i++)
+        {
+            Vector2 rel = polyXZ[i] - centroid;
+            float u = Vector2.Dot(rel, majorAx);
+            float v = Vector2.Dot(rel, minorAx);
+            polyUV.Add(new Vector2(u, v));
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
+        }
+        int numLines = Mathf.Clamp(Mathf.FloorToInt((maxV - minV) / spacingM), 0, 40);
+        for (int li = 0; li < numLines; li++)
+        {
+            float vLine = Mathf.Lerp(minV + spacingM * 0.5f, maxV - spacingM * 0.5f, numLines == 1 ? 0.5f : (float)li / (numLines - 1));
+            var ivs = IntersectPolygonWithScanlineUV(polyUV, vLine);
+            for (int k = 0; k < ivs.Count; k++)
+            {
+                float u0 = (li % 2 == 0) ? ivs[k].x : ivs[k].y;
+                float u1 = (li % 2 == 0) ? ivs[k].y : ivs[k].x;
+                int sub = Mathf.Clamp(Mathf.CeilToInt(Mathf.Abs(u1 - u0) / 0.014f), 2, 40);
+                var seg = new List<Vector3>(sub + 1);
+                for (int p = 0; p <= sub; p++)
+                {
+                    Vector2 pt = centroid + majorAx * Mathf.Lerp(u0, u1, (float)p / sub) + minorAx * vLine;
+                    seg.Add(new Vector3(pt.x, 0.02f, pt.y));
+                }
+                if (seg.Count >= 2) passes.Add(seg);
+            }
+        }
+        return passes;
+    }
+
+    private static void ComputeSprayAndTravelLengths(List<DobotCR10AIKController.WaypointData> wps, out float sprayMm, out float travelMm)
+    {
+        sprayMm = 0f;
+        travelMm = 0f;
+        if (wps == null || wps.Count < 2) return;
+        for (int i = 1; i < wps.Count; i++)
+        {
+            float d = Vector3.Distance(wps[i - 1].targetPosGlobal_mm, wps[i].targetPosGlobal_mm);
+            bool sameSeg = string.IsNullOrEmpty(wps[i - 1].segmentName) || string.IsNullOrEmpty(wps[i].segmentName)
+                || wps[i - 1].segmentName == wps[i].segmentName;
+            if (wps[i].sprayOn && sameSeg) sprayMm += d;
+            else travelMm += d;
+        }
     }
 
     /// <summary>
@@ -1380,12 +4628,581 @@ public static class TrajectoryEvaluationEngine
     }
 
     /// <summary>
-    /// P4 — Quỹ đạo mẫu + Đăng ký đám mây điểm (Chuẩn 5 bước trang 8 file góp ý):
-    /// 1. Khởi tạo thô bằng lưới mốc Barycentric (P3).
-    /// 2. ICP cứng (Iterative Closest Point + Kabsch 2D) trên đám mây biên giảm mẫu (~5 mm) để khử tịnh tiến/quay.
-    /// 3. Đăng ký phi cứng Thin Plate Spline (TPS RBF thực r² ln r) từ các cặp điểm tương ứng sau ICP.
-    /// 4. Áp trường biến dạng lên quỹ đạo mẫu, chiếu lại lên bề mặt 3D thật, tính lại pháp tuyến, lùi khoảng d.
-    /// 5. Tính sai số dư sau đăng ký (registrationResidualMm); nếu vượt ngưỡng thì chặn & báo kỹ sư.
+    /// Giải phép quay cứng 3D Kabsch (R thuộc SO(3), t thuộc R^3) tối thiểu hóa sum || R * (p_i - cP) + cQ - q_i ||^2
+    /// bằng phân rã cực (Polar Decomposition: R = H * (H^T H)^(-1/2)) qua Jacobi 3x3 chuẩn xác.
+    /// </summary>
+    private static void SolveKabschRigid3D(
+        List<Vector3> srcPts,
+        List<Vector3> dstPts,
+        out Quaternion rotation,
+        out Vector3 centroidSrc,
+        out Vector3 centroidDst)
+    {
+        rotation = Quaternion.identity;
+        centroidSrc = Vector3.zero;
+        centroidDst = Vector3.zero;
+        int n = Mathf.Min(srcPts != null ? srcPts.Count : 0, dstPts != null ? dstPts.Count : 0);
+        if (n < 3) return;
+
+        for (int i = 0; i < n; i++) { centroidSrc += srcPts[i]; centroidDst += dstPts[i]; }
+        centroidSrc /= n;
+        centroidDst /= n;
+
+        // Ma trận hiệp phương sai theo đúng chuẩn Horn (1987): M = sum (p_i - cP) * (q_i - cQ)^T  (3x3)
+        double[,] H = new double[3, 3];
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 p = srcPts[i] - centroidSrc;
+            Vector3 q = dstPts[i] - centroidDst;
+            double[] pv = { p.x, p.y, p.z };
+            double[] qv = { q.x, q.y, q.z };
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++)
+                    H[r, c] += pv[r] * qv[c];
+        }
+
+        // Horn 1987: tìm quaternion quay tối ưu (eigenvector lớn nhất của ma trận đối xứng 4x4 Davenport/Horn N)
+        double Sxx = H[0, 0], Sxy = H[0, 1], Sxz = H[0, 2];
+        double Syx = H[1, 0], Syy = H[1, 1], Syz = H[1, 2];
+        double Szx = H[2, 0], Szy = H[2, 1], Szz = H[2, 2];
+
+        double[,] N = new double[4, 4]
+        {
+            { Sxx + Syy + Szz, Syz - Szy,       Szx - Sxz,       Sxy - Syx       },
+            { Syz - Szy,       Sxx - Syy - Szz, Sxy + Syx,       Szx + Sxz       },
+            { Szx - Sxz,       Sxy + Syx,      -Sxx + Syy - Szz, Syz + Szy       },
+            { Sxy - Syx,       Szx + Sxz,       Syz + Szy,      -Sxx - Syy + Szz }
+        };
+
+        // Jacobi eigendecomposition cho ma trận đối xứng 4x4 (20 lượt -> chính xác < 1e-12)
+        double[,] V = new double[4, 4];
+        for (int i = 0; i < 4; i++) V[i, i] = 1.0;
+
+        for (int sweep = 0; sweep < 20; sweep++)
+        {
+            for (int p = 0; p < 3; p++)
+            {
+                for (int q = p + 1; q < 4; q++)
+                {
+                    double apq = N[p, q];
+                    if (Math.Abs(apq) < 1e-12) continue;
+                    double tau = (N[q, q] - N[p, p]) / (2.0 * apq);
+                    double t = (tau >= 0.0)
+                        ? (1.0 / (tau + Math.Sqrt(1.0 + tau * tau)))
+                        : (-1.0 / (-tau + Math.Sqrt(1.0 + tau * tau)));
+                    double c = 1.0 / Math.Sqrt(1.0 + t * t);
+                    double s = t * c;
+
+                    double app = N[p, p], aqq = N[q, q];
+                    N[p, p] = app - t * apq;
+                    N[q, q] = aqq + t * apq;
+                    N[p, q] = N[q, p] = 0.0;
+
+                    for (int k = 0; k < 4; k++)
+                    {
+                        if (k == p || k == q) continue;
+                        double akp = N[k, p], akq = N[k, q];
+                        N[k, p] = N[p, k] = c * akp - s * akq;
+                        N[k, q] = N[q, k] = s * akp + c * akq;
+                    }
+                    for (int k = 0; k < 4; k++)
+                    {
+                        double vkp = V[k, p], vkq = V[k, q];
+                        V[k, p] = c * vkp - s * vkq;
+                        V[k, q] = s * vkp + c * vkq;
+                    }
+                }
+            }
+        }
+
+        int bestCol = 0;
+        double bestEig = N[0, 0];
+        for (int i = 1; i < 4; i++)
+        {
+            if (N[i, i] > bestEig) { bestEig = N[i, i]; bestCol = i; }
+        }
+
+        // Quaternion dạng (w, x, y, z) từ eigenvector cột bestCol + kiểm chứng trực tiếp chiều quay tối ưu
+        float qw = (float)V[0, bestCol];
+        float qx = (float)V[1, bestCol];
+        float qy = (float)V[2, bestCol];
+        float qz = (float)V[3, bestCol];
+        Quaternion qBest = new Quaternion(qx, qy, qz, qw);
+        float mag = Mathf.Sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+        qBest = mag > 1e-6f ? Quaternion.Normalize(qBest) : Quaternion.identity;
+        Quaternion qInv = Quaternion.Inverse(qBest);
+
+        float errFwd = 0f, errInv = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 p = srcPts[i] - centroidSrc;
+            Vector3 q = dstPts[i] - centroidDst;
+            errFwd += (qBest * p - q).sqrMagnitude;
+            errInv += (qInv * p - q).sqrMagnitude;
+        }
+        rotation = (errInv < errFwd) ? qInv : qBest;
+    }
+
+    private static void RunRigidKabschIcp3D(
+        List<Vector3> sourceCloud,
+        List<Vector3> targetCloud,
+        int maxIterations,
+        float maxMatchRadiusM,
+        out Quaternion totalRot,
+        out Vector3 totalTrans)
+    {
+        totalRot = Quaternion.identity;
+        totalTrans = Vector3.zero;
+        if (sourceCloud == null || targetCloud == null || sourceCloud.Count < 6 || targetCloud.Count < 6) return;
+
+        int n = sourceCloud.Count;
+        Vector3[] cur = new Vector3[n];
+        for (int i = 0; i < n; i++) cur[i] = sourceCloud[i];
+
+        float maxR2 = maxMatchRadiusM * maxMatchRadiusM;
+        var matchedSrc = new List<Vector3>(n);
+        var matchedDst = new List<Vector3>(n);
+
+        for (int iter = 0; iter < maxIterations; iter++)
+        {
+            matchedSrc.Clear();
+            matchedDst.Clear();
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 p = cur[i];
+                float bestD2 = maxR2;
+                int bestIdx = -1;
+                for (int j = 0; j < targetCloud.Count; j++)
+                {
+                    float d2 = (targetCloud[j] - p).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
+                }
+                if (bestIdx >= 0)
+                {
+                    matchedSrc.Add(p);
+                    matchedDst.Add(targetCloud[bestIdx]);
+                }
+            }
+            if (matchedSrc.Count < 6) break;
+
+            SolveKabschRigid3D(matchedSrc, matchedDst, out Quaternion dR, out Vector3 cSrc, out Vector3 cDst);
+            Vector3 dT = cDst - (dR * cSrc);
+
+            for (int i = 0; i < n; i++) cur[i] = dR * cur[i] + dT;
+            totalRot = dR * totalRot;
+            totalTrans = dR * totalTrans + dT;
+
+            if (Quaternion.Angle(Quaternion.identity, dR) < 0.05f && dT.magnitude < 0.0005f) break;
+        }
+    }
+
+    private static void ComputePcaInit3D(
+        List<Vector3> srcCloud,
+        List<Vector3> dstCloud,
+        out Quaternion initRot,
+        out Vector3 initCentroidSrc,
+        out Vector3 initCentroidDst,
+        out float initScale)
+    {
+        initRot = Quaternion.identity;
+        initCentroidSrc = Vector3.zero;
+        initCentroidDst = Vector3.zero;
+        initScale = 1f;
+        if (srcCloud == null || dstCloud == null || srcCloud.Count < 6 || dstCloud.Count < 6) return;
+
+        var src2D = new List<Vector2>(srcCloud.Count);
+        var dst2D = new List<Vector2>(dstCloud.Count);
+        for (int i = 0; i < srcCloud.Count; i++) { initCentroidSrc += srcCloud[i]; src2D.Add(new Vector2(srcCloud[i].x, srcCloud[i].z)); }
+        for (int i = 0; i < dstCloud.Count; i++) { initCentroidDst += dstCloud[i]; dst2D.Add(new Vector2(dstCloud[i].x, dstCloud[i].z)); }
+        initCentroidSrc /= srcCloud.Count;
+        initCentroidDst /= dstCloud.Count;
+
+        ComputePcaAxes2D(src2D, Vector2.up, out _, out Vector2 uS, out _);
+        ComputePcaAxes2D(dst2D, Vector2.up, out _, out Vector2 uD, out _);
+        if (Vector2.Dot(uS, uD) < 0f) uD = -uD;
+
+        float angDeg = Vector2.SignedAngle(uS, uD);
+        // Trong mặt phẳng XZ, quay quanh trục Y
+        initRot = Quaternion.AngleAxis(-angDeg, Vector3.up);
+
+        float radS = 0f, radD = 0f;
+        for (int i = 0; i < srcCloud.Count; i++) radS += (srcCloud[i] - initCentroidSrc).magnitude;
+        for (int i = 0; i < dstCloud.Count; i++) radD += (dstCloud[i] - initCentroidDst).magnitude;
+        radS /= srcCloud.Count;
+        radD /= dstCloud.Count;
+        if (radS > 1e-4f) initScale = Mathf.Clamp(radD / radS, 0.72f, 1.38f);
+    }
+
+    private struct RegularizedTps3DModel
+    {
+        public bool isValid;
+        public bool is25DFlatMode; // true nếu phôi phẳng 2.5D -> tránh suy biến cột Y trong hệ đa thức TPS 3D!
+        public Vector3 center;
+        public float invScale;
+        public List<Vector3> ctrlNorm;
+        public double[] wX;
+        public double[] wY;
+        public double[] wZ;
+    }
+
+    private static bool SolveTps3D(
+        List<Vector3> ctrlSrc,
+        List<Vector3> ctrlDst,
+        double lambda,
+        out RegularizedTps3DModel model)
+    {
+        model = new RegularizedTps3DModel { isValid = false };
+        int n = Mathf.Min(ctrlSrc != null ? ctrlSrc.Count : 0, ctrlDst != null ? ctrlDst.Count : 0);
+        if (n < 4) return false;
+
+        Vector3 minP = ctrlSrc[0], maxP = ctrlSrc[0], meanP = Vector3.zero;
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 p = ctrlSrc[i];
+            minP = Vector3.Min(minP, p);
+            maxP = Vector3.Max(maxP, p);
+            meanP += p;
+        }
+        meanP /= n;
+        float spanX = maxP.x - minP.x;
+        float spanY = maxP.y - minP.y;
+        float spanZ = maxP.z - minP.z;
+        float maxHoriz = Mathf.Max(0.05f, Mathf.Max(spanX, spanZ));
+        float scale = Mathf.Max(maxHoriz, spanY);
+        float invScale = 1f / scale;
+
+        // Nếu phôi nằm trên bàn phẳng (độ dày Y < 18% kích thước ngang XZ) -> giải TPS 2D chuẩn hóa trên (X, Z) + nội suy mượt Y
+        // để loại bỏ hoàn toàn hiện tượng suy biến ma trận (ill-conditioned) làm nổ trọng số!
+        bool use25D = (spanY < 0.18f * maxHoriz);
+
+        var ctrlNorm = new List<Vector3>(n);
+        for (int i = 0; i < n; i++) ctrlNorm.Add((ctrlSrc[i] - meanP) * invScale);
+
+        int polyDim = use25D ? 3 : 4;
+        int dim = n + polyDim;
+        double[,] K = new double[dim, dim];
+        double[] rhsX = new double[dim];
+        double[] rhsY = new double[dim];
+        double[] rhsZ = new double[dim];
+
+        double reg = Math.Max(lambda, 0.008);
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < n; j++)
+            {
+                if (i == j) K[i, j] = reg;
+                else
+                {
+                    double dx = ctrlNorm[i].x - ctrlNorm[j].x;
+                    double dy = ctrlNorm[i].y - ctrlNorm[j].y;
+                    double dz = ctrlNorm[i].z - ctrlNorm[j].z;
+                    if (use25D)
+                    {
+                        K[i, j] = TpsKernel(dx * dx + dz * dz);
+                    }
+                    else
+                    {
+                        K[i, j] = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                    }
+                }
+            }
+
+            if (use25D)
+            {
+                K[i, n] = 1.0; K[i, n + 1] = ctrlNorm[i].x; K[i, n + 2] = ctrlNorm[i].z;
+                K[n, i] = 1.0; K[n + 1, i] = ctrlNorm[i].x; K[n + 2, i] = ctrlNorm[i].z;
+            }
+            else
+            {
+                K[i, n] = 1.0; K[i, n + 1] = ctrlNorm[i].x; K[i, n + 2] = ctrlNorm[i].y; K[i, n + 3] = ctrlNorm[i].z;
+                K[n, i] = 1.0; K[n + 1, i] = ctrlNorm[i].x; K[n + 2, i] = ctrlNorm[i].y; K[n + 3, i] = ctrlNorm[i].z;
+            }
+
+            // Giải theo phần dư dịch chuyển (dst - src) để cực kỳ ổn định số học!
+            Vector3 disp = ctrlDst[i] - ctrlSrc[i];
+            rhsX[i] = disp.x;
+            rhsY[i] = disp.y;
+            rhsZ[i] = disp.z;
+        }
+        // Điều chuẩn nhỏ cho khối đa thức chống suy biến
+        for (int p = 0; p < polyDim; p++) K[n + p, n + p] = 1e-6;
+
+        if (!SolveLinearSystem(K, rhsX, out double[] wX) ||
+            !SolveLinearSystem(K, rhsY, out double[] wY) ||
+            !SolveLinearSystem(K, rhsZ, out double[] wZ))
+        {
+            return false;
+        }
+
+        model = new RegularizedTps3DModel
+        {
+            isValid = true,
+            is25DFlatMode = use25D,
+            center = meanP,
+            invScale = invScale,
+            ctrlNorm = ctrlNorm,
+            wX = wX,
+            wY = wY,
+            wZ = wZ
+        };
+        return true;
+    }
+
+    private static Vector3 EvalTps3D(Vector3 q, RegularizedTps3DModel model, float maxDeformMeters = 0.045f)
+    {
+        if (!model.isValid || model.ctrlNorm == null) return q;
+        Vector3 qn = (q - model.center) * model.invScale;
+        int n = model.ctrlNorm.Count;
+
+        double dxOut, dyOut, dzOut;
+        if (model.is25DFlatMode)
+        {
+            dxOut = model.wX[n] + model.wX[n + 1] * qn.x + model.wX[n + 2] * qn.z;
+            dyOut = model.wY[n] + model.wY[n + 1] * qn.x + model.wY[n + 2] * qn.z;
+            dzOut = model.wZ[n] + model.wZ[n + 1] * qn.x + model.wZ[n + 2] * qn.z;
+        }
+        else
+        {
+            dxOut = model.wX[n] + model.wX[n + 1] * qn.x + model.wX[n + 2] * qn.y + model.wX[n + 3] * qn.z;
+            dyOut = model.wY[n] + model.wY[n + 1] * qn.x + model.wY[n + 2] * qn.y + model.wY[n + 3] * qn.z;
+            dzOut = model.wZ[n] + model.wZ[n + 1] * qn.x + model.wZ[n + 2] * qn.y + model.wZ[n + 3] * qn.z;
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            double dx = qn.x - model.ctrlNorm[i].x;
+            double dy = qn.y - model.ctrlNorm[i].y;
+            double dz = qn.z - model.ctrlNorm[i].z;
+            double k = model.is25DFlatMode ? TpsKernel(dx * dx + dz * dz) : Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            dxOut += model.wX[i] * k;
+            dyOut += model.wY[i] * k;
+            dzOut += model.wZ[i] * k;
+        }
+
+        Vector3 disp = new Vector3((float)dxOut, (float)dyOut, (float)dzOut);
+        if (float.IsNaN(disp.x) || float.IsNaN(disp.y) || float.IsNaN(disp.z) || float.IsInfinity(disp.sqrMagnitude))
+            return q;
+        if (maxDeformMeters > 0f && disp.magnitude > maxDeformMeters)
+            disp = disp.normalized * maxDeformMeters;
+        return q + disp;
+    }
+
+    private struct NonRigidCpd3DModel
+    {
+        public bool isValid;
+        public List<Vector3> ctrlY; // Các điểm nguồn đại diện (M <= 42) sau ICP cứng
+        public Vector3[] weightsW;  // Ma trận trọng số dịch chuyển W (M x 3)
+        public float twoBetaSq;     // 2 * beta^2
+    }
+
+    /// <summary>
+    /// Đăng ký phi cứng Non-Rigid CPD 3D (Myronenko & Song, 2010 — Coherent Point Drift):
+    /// Tối thiểu hóa hàm năng lượng Gaussian Motion Coherence với tham số độ cứng lambda (cpdLambda) và độ mượt beta (cpdBetaM).
+    /// Hệ tuyến tính (diag(P1) * G + lambda * sigma^2 * I) * W = PX - diag(P1) * Y luôn xác định dương -> ổn định tuyệt đối trên cả phôi 2.5D và 3D!
+    /// </summary>
+    private static bool SolveNonRigidCpd3D(
+        List<Vector3> alignedSourceCloud,
+        List<Vector3> targetCloud,
+        float cpdLambda,
+        float cpdBetaM,
+        int maxIterations,
+        out NonRigidCpd3DModel model)
+    {
+        model = new NonRigidCpd3DModel { isValid = false };
+        if (alignedSourceCloud == null || targetCloud == null || alignedSourceCloud.Count < 8 || targetCloud.Count < 8)
+            return false;
+
+        // Chọn tối đa M = 40 điểm điều khiển phân bố đều trên đám mây nguồn để giải hệ 40x40 trong ~10 ms
+        var Y = new List<Vector3>(42);
+        int stepY = Mathf.Max(1, alignedSourceCloud.Count / 40);
+        for (int i = 0; i < alignedSourceCloud.Count && Y.Count < 40; i += stepY) Y.Add(alignedSourceCloud[i]);
+
+        // Giảm đám mây đích X xuống <= 220 điểm để E-step nhanh (< 1 ms/vòng)
+        var X = new List<Vector3>(230);
+        int stepX = Mathf.Max(1, targetCloud.Count / 220);
+        for (int i = 0; i < targetCloud.Count && X.Count < 220; i += stepX) X.Add(targetCloud[i]);
+
+        int M = Y.Count;
+        int N = X.Count;
+        float beta = Mathf.Clamp(cpdBetaM, 0.04f, 0.80f);
+        float twoBetaSq = 2f * beta * beta;
+        float lambda = Mathf.Clamp(cpdLambda, 0.2f, 20f);
+        const double outlierW = 0.12;
+
+        // Ma trận kernel tương quan mượt G[i, j] = exp(-||Y_i - Y_j||^2 / (2 * beta^2))
+        double[,] G = new double[M, M];
+        for (int i = 0; i < M; i++)
+        {
+            G[i, i] = 1.0;
+            for (int j = i + 1; j < M; j++)
+            {
+                double d2 = (Y[i] - Y[j]).sqrMagnitude;
+                double val = Math.Exp(-d2 / twoBetaSq);
+                G[i, j] = val;
+                G[j, i] = val;
+            }
+        }
+
+        Vector3[] T = new Vector3[M];
+        Vector3[] W = new Vector3[M];
+        for (int i = 0; i < M; i++) T[i] = Y[i];
+
+        // Khởi tạo phương sai sigma^2
+        double sigma2 = 0.0;
+        for (int m = 0; m < M; m++)
+        {
+            float minD2 = float.MaxValue;
+            for (int n = 0; n < N; n++)
+            {
+                float d2 = (X[n] - Y[m]).sqrMagnitude;
+                if (d2 < minD2) minD2 = d2;
+            }
+            sigma2 += minD2;
+        }
+        sigma2 = Math.Max(0.0004, (sigma2 / M) * 1.5); // ít nhất (20 mm)^2 để bắt cặp mượt ở vòng đầu
+
+        double[] P1 = new double[M];
+        double[] PX_x = new double[M];
+        double[] PX_y = new double[M];
+        double[] PX_z = new double[M];
+        double[] expBuf = new double[M];
+        double[,] A = new double[M, M];
+        double[] bx = new double[M];
+        double[] by = new double[M];
+        double[] bz = new double[M];
+
+        int iters = Mathf.Clamp(maxIterations, 4, 14);
+        for (int it = 0; it < iters; it++)
+        {
+            Array.Clear(P1, 0, M);
+            Array.Clear(PX_x, 0, M);
+            Array.Clear(PX_y, 0, M);
+            Array.Clear(PX_z, 0, M);
+
+            double twoSigma2 = 2.0 * sigma2;
+            double cOutlier = Math.Pow(Math.PI * twoSigma2, 1.5) * (outlierW / (1.0 - outlierW)) * ((double)M / N);
+            double npTotal = 0.0;
+
+            // E-step: tính xác suất tương ứng P(m | n)
+            for (int n = 0; n < N; n++)
+            {
+                Vector3 xn = X[n];
+                double denom = cOutlier;
+                for (int m = 0; m < M; m++)
+                {
+                    double d2 = (xn - T[m]).sqrMagnitude;
+                    double e = Math.Exp(-d2 / twoSigma2);
+                    expBuf[m] = e;
+                    denom += e;
+                }
+                if (denom < 1e-12) continue;
+                double invDenom = 1.0 / denom;
+                for (int m = 0; m < M; m++)
+                {
+                    double pmn = expBuf[m] * invDenom;
+                    P1[m] += pmn;
+                    PX_x[m] += pmn * xn.x;
+                    PX_y[m] += pmn * xn.y;
+                    PX_z[m] += pmn * xn.z;
+                    npTotal += pmn;
+                }
+            }
+            if (npTotal < 1e-6) break;
+
+            // M-step: (diag(P1) * G + lambda * sigma^2 * I) * W = PX - diag(P1) * Y
+            double regDiag = lambda * sigma2;
+            for (int i = 0; i < M; i++)
+            {
+                double p1i = P1[i];
+                for (int j = 0; j < M; j++)
+                {
+                    A[i, j] = p1i * G[i, j];
+                }
+                A[i, i] += regDiag + 1e-7;
+                bx[i] = PX_x[i] - p1i * Y[i].x;
+                by[i] = PX_y[i] - p1i * Y[i].y;
+                bz[i] = PX_z[i] - p1i * Y[i].z;
+            }
+
+            if (!SolveLinearSystem(A, bx, out double[] wx) ||
+                !SolveLinearSystem(A, by, out double[] wy) ||
+                !SolveLinearSystem(A, bz, out double[] wz))
+            {
+                break;
+            }
+
+            for (int i = 0; i < M; i++)
+                W[i] = new Vector3((float)wx[i], (float)wy[i], (float)wz[i]);
+
+            // Cập nhật T = Y + G * W và sigma^2
+            double newSigma2Num = 0.0;
+            for (int i = 0; i < M; i++)
+            {
+                Vector3 gw = Vector3.zero;
+                for (int j = 0; j < M; j++) gw += (float)G[i, j] * W[j];
+                T[i] = Y[i] + gw;
+                float bestD2 = float.MaxValue;
+                for (int n = 0; n < N; n++)
+                {
+                    float d2 = (X[n] - T[i]).sqrMagnitude;
+                    if (d2 < bestD2) bestD2 = d2;
+                }
+                if (bestD2 < float.MaxValue) newSigma2Num += bestD2;
+            }
+            sigma2 = Math.Max(0.00004, newSigma2Num / (3.0 * M));
+        }
+
+        model = new NonRigidCpd3DModel
+        {
+            isValid = true,
+            ctrlY = Y,
+            weightsW = W,
+            twoBetaSq = twoBetaSq
+        };
+        return true;
+    }
+
+    private static Vector3 EvalNonRigidCpd3D(Vector3 q, NonRigidCpd3DModel model, float maxDeformMeters = 0.045f)
+    {
+        if (!model.isValid || model.ctrlY == null || model.weightsW == null) return q;
+        Vector3 disp = Vector3.zero;
+        int M = model.ctrlY.Count;
+        float invTwoBetaSq = 1f / Mathf.Max(1e-5f, model.twoBetaSq);
+        for (int j = 0; j < M; j++)
+        {
+            float d2 = (q - model.ctrlY[j]).sqrMagnitude;
+            float g = Mathf.Exp(-d2 * invTwoBetaSq);
+            disp += g * model.weightsW[j];
+        }
+        if (float.IsNaN(disp.x) || float.IsNaN(disp.y) || float.IsNaN(disp.z) || float.IsInfinity(disp.sqrMagnitude))
+            return q;
+        if (maxDeformMeters > 0f && disp.magnitude > maxDeformMeters)
+            disp = disp.normalized * maxDeformMeters;
+        return q + disp;
+    }
+
+    private static float ComputeCloudToCloudRmsMm(List<Vector3> srcCloud, List<Vector3> dstCloud, int maxEvalSamples = 90)
+    {
+        if (srcCloud == null || dstCloud == null || srcCloud.Count == 0 || dstCloud.Count == 0) return 0f;
+        double sumSq = 0.0;
+        int cnt = 0;
+        int stride = Mathf.Max(1, srcCloud.Count / Mathf.Max(10, maxEvalSamples));
+        for (int i = 0; i < srcCloud.Count; i += stride)
+        {
+            Vector3 p = srcCloud[i];
+            float bestD2 = float.MaxValue;
+            for (int j = 0; j < dstCloud.Count; j++)
+            {
+                float d2 = (dstCloud[j] - p).sqrMagnitude;
+                if (d2 < bestD2) bestD2 = d2;
+            }
+            if (bestD2 < float.MaxValue) { sumSq += bestD2; cnt++; }
+        }
+        return cnt > 0 ? (float)(Math.Sqrt(sumSq / cnt) * 1000.0) : 0f;
+    }
+
+    /// <summary>
+    /// Overload tương thích ngược cho bộ so sánh P1 / P2 / P3 / P4.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP4RegistrationTpsIcp(
         DobotCR10AIKController ctrl,
@@ -1396,34 +5213,365 @@ public static class TrajectoryEvaluationEngine
         out float registrationResidualMm,
         out float genTimeSec)
     {
+        var cfg = (ctrl != null && ctrl.p4Config != null) ? ctrl.p4Config : new P4RegistrationConfig
+        {
+            sprayDistanceDMm = GetEffectiveSprayHeightMm(ctrl, tech),
+            residualThresholdMm = tech != null ? tech.registrationResidualThresholdMm : 12f
+        };
+        return GenerateP4RegistrationTpsIcp(ctrl, plyLoader, templateStrokesUV, templateSize, tech, cfg, out _, out registrationResidualMm, out genTimeSec);
+    }
+
+    /// <summary>
+    /// P4 — Quỹ đạo mẫu kết hợp Đăng ký Đám mây điểm 3D (Đầy đủ 9 bước tài liệu P4, trang 8):
+    /// Bước 1-2: Lấy point cloud quần chuẩn + quỹ đạo đã dạy và point cloud quần mới (giảm mẫu voxel ~5 mm).
+    /// Bước 3: Khởi tạo thô bằng bộ mốc P3 hoặc PCA 3D.
+    /// Bước 4: ICP cứng 3D (Kabsch/Horn SO(3)) khử quay và tịnh tiến tổng thể.
+    /// Bước 5: Đăng ký phi cứng (Non-Rigid CPD Gaussian Motion Coherence hoặc TPS RBF 3D/2.5D chuẩn hóa).
+    /// Bước 6-7: Áp trường biến dạng lên quỹ đạo mẫu, chiếu về bề mặt thật (điểm gần nhất), tính pháp tuyến và lùi khoảng d (p_TCP = p_surface + d*n).
+    /// Bước 8-9: Đánh giá sai số dư sau Init / sau ICP / sau phi cứng; nếu vượt ngưỡng thì gắn cờ từ chối & báo kỹ sư; kiểm tra robot trước khi xuất.
+    /// </summary>
+    public static List<DobotCR10AIKController.WaypointData> GenerateP4RegistrationTpsIcp(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
+        SprayTechParams tech,
+        P4RegistrationConfig p4Cfg,
+        out P4ExecutionResult p4Exec,
+        out float registrationResidualMm,
+        out float genTimeSec)
+    {
         float t0 = Time.realtimeSinceStartup;
+        p4Exec = new P4ExecutionResult();
         registrationResidualMm = 0f;
         var strokesWorld = new List<List<Vector3>>();
 
-        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12 || templateStrokesUV == null)
+        if (ctrl == null)
         {
+            p4Exec.warningMessage = "Thiếu bộ điều khiển phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
+        if (p4Cfg == null) p4Cfg = new P4RegistrationConfig();
+
+        float voxelM = Mathf.Clamp(p4Cfg.voxelSizeMm, 2.5f, 15f) * 0.001f;
+        bool flat2D = (p4Cfg.gunOrientation == P4GunOrientationMode.FlatPlane2D);
+        bool useFixedVert = (p4Cfg.gunOrientation != P4GunOrientationMode.SmoothSurfaceNormal25D);
+        float flatY = (plyLoader != null) ? (plyLoader.estimatedTableY + 0.025f) : 0.025f;
+
+        // Bước 2: Thu nhận & giảm mẫu voxel (~5 mm) đám mây điểm 3D của quần mới
+        List<Vector3> targetCloud3D = (plyLoader != null)
+            ? plyLoader.ExtractGarmentSurfaceCloudVoxelized(voxelM, ctrl.garmentContourWorld, 520)
+            : new List<Vector3>();
+        p4Exec.targetVoxelCount = targetCloud3D.Count;
+
+        // Chuẩn bị quỹ đạo mẫu 3D (nếu người dùng vừa vẽ hình Tròn/Vuông/Đa giác trực tiếp trên phôi hiện tại, trích luôn thành đường mẫu 3D!)
+        List<List<Vector3>> activeRefStrokes3D = null;
+        if (ctrl.HasCustomDrawnRegions2D &&
+            (string.IsNullOrEmpty(ctrl.templateReferenceSampleName) || ctrl.templateReferenceSampleName == ctrl.GetActiveCloudSampleName()))
+        {
+            var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+            float fillStepM = ((tech != null) ? Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 60f) : 25f) * 0.001f;
+            var built = new List<List<Vector3>>();
+            for (int r = 0; r < directRegionsXZ.Count; r++)
+            {
+                var polyXZ = directRegionsXZ[r];
+                if (polyXZ == null || polyXZ.Count < 3) continue;
+                p4Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(polyXZ, ctrl, plyLoader, flat2D, flatY));
+                var outline = new List<Vector3>(polyXZ.Count + 1);
+                for (int i = 0; i <= polyXZ.Count; i++)
+                {
+                    Vector2 p2 = polyXZ[i % polyXZ.Count];
+                    float y = flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, p2.x, p2.y);
+                    outline.Add(new Vector3(p2.x, y, p2.y));
+                }
+                built.Add(outline);
+                if (p4Cfg.fillClosedDrawnRegions)
+                {
+                    var fills = BuildSimpleFillPassesInsidePolygon2D(polyXZ, fillStepM);
+                    for (int f = 0; f < fills.Count; f++)
+                    {
+                        for (int k = 0; k < fills[f].Count; k++)
+                        {
+                            Vector3 pt = fills[f][k];
+                            pt.y = flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, pt.x, pt.z);
+                            fills[f][k] = pt;
+                        }
+                        built.Add(fills[f]);
+                    }
+                }
+            }
+            if (built.Count > 0)
+            {
+                activeRefStrokes3D = built;
+                if (ctrl.templateReferenceCloud3DWorld.Count < 30 && targetCloud3D.Count >= 30)
+                {
+                    ctrl.templateReferenceCloud3DWorld = new List<Vector3>(targetCloud3D);
+                    ctrl.templateReferenceStrokes3DWorld = built;
+                    ctrl.templateReferenceSampleName = ctrl.GetActiveCloudSampleName();
+                    if (ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12)
+                        ctrl.templateReferenceLandmarks3D = new List<Vector3>(ctrl.landmarksWorldPos);
+                }
+            }
+        }
+        if (activeRefStrokes3D == null && ctrl.templateReferenceStrokes3DWorld != null && ctrl.templateReferenceStrokes3DWorld.Count > 0)
+        {
+            activeRefStrokes3D = ctrl.templateReferenceStrokes3DWorld;
+        }
+
+        // NHÁNH CHÍNH CHUẨN P4 (9 BƯỚC TRANG 8): ĐĂNG KÝ ĐÁM MÂY ĐIỂM 3D THẬT (SOURCE CLOUD -> TARGET CLOUD)
+        bool hasRefCloud3D = (ctrl.templateReferenceCloud3DWorld != null && ctrl.templateReferenceCloud3DWorld.Count >= 30
+            && activeRefStrokes3D != null && activeRefStrokes3D.Count > 0
+            && targetCloud3D.Count >= 30);
+
+        if (hasRefCloud3D)
+        {
+            var srcCloud = ctrl.templateReferenceCloud3DWorld;
+            p4Exec.sourceVoxelCount = srcCloud.Count;
+
+            bool hasBoth12Lm = (ctrl.templateReferenceLandmarks3D != null && ctrl.templateReferenceLandmarks3D.Count >= 12
+                && ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12);
+            bool useLandmarksInit = (p4Cfg.initMode == P4InitMode.LandmarksP3Only && hasBoth12Lm)
+                || (p4Cfg.initMode == P4InitMode.AutoLandmarksOrPca && hasBoth12Lm);
+
+            // Bước 3: Khởi tạo thô 3D (bằng mốc P3 hoặc PCA 3D)
+            Quaternion initRot;
+            Vector3 initCSrc, initCDst;
+            float initScale = 1f;
+            if (useLandmarksInit)
+            {
+                SolveKabschRigid3D(ctrl.templateReferenceLandmarks3D, ctrl.landmarksWorldPos, out initRot, out initCSrc, out initCDst);
+                float rS = 0f, rD = 0f;
+                for (int i = 0; i < 12; i++)
+                {
+                    rS += (ctrl.templateReferenceLandmarks3D[i] - initCSrc).magnitude;
+                    rD += (ctrl.landmarksWorldPos[i] - initCDst).magnitude;
+                }
+                if (rS > 1e-4f) initScale = Mathf.Clamp(rD / rS, 0.72f, 1.38f);
+                p4Exec.initMethodUsed = "Mốc P3 (12 mốc)";
+            }
+            else
+            {
+                ComputePcaInit3D(srcCloud, targetCloud3D, out initRot, out initCSrc, out initCDst, out initScale);
+                p4Exec.initMethodUsed = "PCA 3D";
+            }
+
+            var initCloud3D = new List<Vector3>(srcCloud.Count);
+            for (int i = 0; i < srcCloud.Count; i++)
+                initCloud3D.Add(initRot * ((srcCloud[i] - initCSrc) * initScale) + initCDst);
+            p4Exec.residualAfterInitMm = ComputeCloudToCloudRmsMm(initCloud3D, targetCloud3D);
+
+            // Bước 4: ICP cứng 3D (Kabsch/Horn SO(3))
+            RunRigidKabschIcp3D(
+                initCloud3D, targetCloud3D,
+                Mathf.Clamp(p4Cfg.icpMaxIterations, 4, 30),
+                Mathf.Clamp(p4Cfg.icpMaxMatchRadiusMm, 25f, 200f) * 0.001f,
+                out Quaternion icpRot, out Vector3 icpTrans);
+
+            var icpCloud3D = new List<Vector3>(initCloud3D.Count);
+            for (int i = 0; i < initCloud3D.Count; i++)
+                icpCloud3D.Add(icpRot * initCloud3D[i] + icpTrans);
+            p4Exec.residualAfterIcpMm = ComputeCloudToCloudRmsMm(icpCloud3D, targetCloud3D);
+
+            // Bước 5: Đăng ký phi cứng (Non-Rigid CPD / TPS RBF / Rigid ICP Only)
+            bool okCpd = false;
+            NonRigidCpd3DModel cpdModel = default;
+            bool okTps = false;
+            RegularizedTps3DModel tpsModel = default;
+
+            if (p4Cfg.nonRigidMode == P4NonRigidMode.NonRigidCpd)
+            {
+                okCpd = SolveNonRigidCpd3D(icpCloud3D, targetCloud3D, p4Cfg.cpdLambda, p4Cfg.cpdBetaMm * 0.001f, 8, out cpdModel);
+                p4Exec.nonRigidMethodUsed = okCpd ? $"CPD phi cứng (λ={p4Cfg.cpdLambda:F1}, β={p4Cfg.cpdBetaMm:F0}mm)" : "ICP cứng (CPD dự phòng)";
+            }
+            else if (p4Cfg.nonRigidMode == P4NonRigidMode.TpsRbf)
+            {
+                var tpsSrc3D = new List<Vector3>(40);
+                var tpsDst3D = new List<Vector3>(40);
+                if (hasBoth12Lm)
+                {
+                    for (int i = 0; i < 12; i++)
+                    {
+                        Vector3 lmInit = initRot * ((ctrl.templateReferenceLandmarks3D[i] - initCSrc) * initScale) + initCDst;
+                        Vector3 lmIcp = icpRot * lmInit + icpTrans;
+                        tpsSrc3D.Add(lmIcp);
+                        tpsDst3D.Add(ctrl.landmarksWorldPos[i]);
+                    }
+                }
+                int strideSurf = Mathf.Max(1, icpCloud3D.Count / 26);
+                for (int i = 0; i < icpCloud3D.Count && tpsSrc3D.Count < 38; i += strideSurf)
+                {
+                    Vector3 p = icpCloud3D[i];
+                    bool tooClose = false;
+                    for (int j = 0; j < tpsSrc3D.Count; j++)
+                        if ((tpsSrc3D[j] - p).sqrMagnitude < 0.045f * 0.045f) { tooClose = true; break; }
+                    if (tooClose) continue;
+
+                    float bestD2 = 0.060f * 0.060f;
+                    int bestIdx = -1;
+                    for (int j = 0; j < targetCloud3D.Count; j++)
+                    {
+                        float d2 = (targetCloud3D[j] - p).sqrMagnitude;
+                        if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
+                    }
+                    if (bestIdx >= 0) { tpsSrc3D.Add(p); tpsDst3D.Add(targetCloud3D[bestIdx]); }
+                }
+                okTps = SolveTps3D(tpsSrc3D, tpsDst3D, p4Cfg.tpsLambda, out tpsModel);
+                p4Exec.nonRigidMethodUsed = okTps ? $"TPS RBF (λ={p4Cfg.tpsLambda:F3})" : "ICP cứng (TPS dự phòng)";
+            }
+            else
+            {
+                p4Exec.nonRigidMethodUsed = "Chỉ ICP cứng 3D";
+            }
+
+            // Tính đám mây đã đăng ký (registeredCloudWorld) & sai số dư sau đăng ký phi cứng (Bước 8)
+            var regCloud = new List<Vector3>(icpCloud3D.Count);
+            for (int i = 0; i < icpCloud3D.Count; i++)
+            {
+                Vector3 q = icpCloud3D[i];
+                if (okCpd) q = EvalNonRigidCpd3D(q, cpdModel, 0.045f);
+                else if (okTps) q = EvalTps3D(q, tpsModel, 0.045f);
+                regCloud.Add(q);
+            }
+            p4Exec.registeredCloudWorld = regCloud;
+            p4Exec.residualAfterNonRigidMm = ComputeCloudToCloudRmsMm(regCloud, targetCloud3D);
+            registrationResidualMm = p4Exec.residualAfterNonRigidMm;
+
+            float resGateMm = Mathf.Max(1f, p4Cfg.residualThresholdMm);
+            p4Exec.rejectedByResidualGate = (registrationResidualMm > resGateMm);
+            if (p4Exec.rejectedByResidualGate)
+            {
+                p4Exec.warningMessage = $"[CHẶN P4] Sai số dư đăng ký = {registrationResidualMm:F2} mm > ngưỡng {resGateMm:F1} mm. Dừng xuất & báo kỹ sư!";
+            }
+
+            // Bước 6 & 7: Áp biến dạng lên quỹ đạo mẫu -> chiếu về điểm bề mặt gần nhất trên quần mới
+            double sumSnapShiftMm = 0.0;
+            int snapCount = 0;
+            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+            {
+                for (int s = 0; s < activeRefStrokes3D.Count; s++)
+                {
+                    var refStroke = activeRefStrokes3D[s];
+                    if (refStroke == null || refStroke.Count < 2) continue;
+                    var worldStroke = new List<Vector3>(refStroke.Count);
+
+                    for (int p = 0; p < refStroke.Count; p++)
+                    {
+                        Vector3 pInit = initRot * ((refStroke[p] - initCSrc) * initScale) + initCDst;
+                        Vector3 pIcp = icpRot * pInit + icpTrans;
+                        Vector3 pDef = pIcp;
+                        if (okCpd) pDef = EvalNonRigidCpd3D(pIcp, cpdModel, 0.045f);
+                        else if (okTps) pDef = EvalTps3D(pIcp, tpsModel, 0.045f);
+
+                        // Chiếu về điểm bề mặt gần nhất trên đám mây điểm quần mới
+                        Vector3 snapped = pDef;
+                        if (flat2D)
+                        {
+                            snapped.y = flatY;
+                        }
+                        else if (ctrl.SampleCompensatedSurface(pDef.x, pDef.z, out float cy, out _))
+                        {
+                            snapped.y = cy;
+                        }
+                        else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(pDef.x, pDef.z, out float py, out _))
+                        {
+                            snapped.y = py;
+                        }
+                        else
+                        {
+                            float bestD2 = float.MaxValue;
+                            for (int j = 0; j < targetCloud3D.Count; j++)
+                            {
+                                float d2 = (targetCloud3D[j] - pDef).sqrMagnitude;
+                                if (d2 < bestD2) { bestD2 = d2; snapped = targetCloud3D[j]; }
+                            }
+                        }
+
+                        sumSnapShiftMm += Vector3.Distance(pDef, snapped) * 1000.0;
+                        snapCount++;
+
+                        bool keep = (!p4Cfg.clipToGarmentContour || attempt == 1)
+                            ? true
+                            : IsInsideValidSprayZone(snapped.x, snapped.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech != null ? tech.borderMarginMm * 0.5f : 8f, out _);
+                        if (keep)
+                        {
+                            worldStroke.Add(snapped);
+                        }
+                        else if (worldStroke.Count >= 2)
+                        {
+                            strokesWorld.Add(worldStroke);
+                            worldStroke = new List<Vector3>();
+                        }
+                        else
+                        {
+                            worldStroke.Clear();
+                        }
+                    }
+                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                }
+            }
+
+            if (strokesWorld.Count > 0)
+            {
+                string tag = p4Cfg.nonRigidMode == P4NonRigidMode.NonRigidCpd ? "P4_ICP3D_CPD3D"
+                    : (p4Cfg.nonRigidMode == P4NonRigidMode.TpsRbf ? "P4_ICP3D_TPS3D" : "P4_ICP3D_RIGID");
+                var wps3D = BuildSprayWaypointsFromWorldStrokes(
+                    strokesWorld, ctrl, plyLoader, tech, tag,
+                    useFixedVerticalNormal: useFixedVert,
+                    useFlatPlaneZ: flat2D,
+                    flatPlaneWorldY: flatY,
+                    overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+
+                p4Exec.meanSurfaceSnapShiftMm = snapCount > 0 ? (float)(sumSnapShiftMm / snapCount) : 0f;
+                p4Exec.normalStabilityStdDeg = ComputeNormalTiltStdDeg(wps3D);
+                p4Exec.strokeCount = strokesWorld.Count;
+                ComputeSprayAndTravelLengths(wps3D, out p4Exec.totalSprayLengthMm, out p4Exec.totalTravelLengthMm);
+                p4Exec.summaryText =
+                    $"{p4Exec.initMethodUsed} -> ICP3D -> {p4Exec.nonRigidMethodUsed} | " +
+                    $"Dư: Init {p4Exec.residualAfterInitMm:F1} -> ICP {p4Exec.residualAfterIcpMm:F1} -> Final {p4Exec.residualAfterNonRigidMm:F2} mm | " +
+                    $"Chiếu mặt: {p4Exec.meanSurfaceSnapShiftMm:F1} mm";
+
+                genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
+                return wps3D;
+            }
+        }
+
+        // NHÁNH DỰ PHÒNG (khi chưa chốt đám mây điểm 3D mẫu chuẩn): khởi tạo P3 + ICP 2D + TPS 2D
+        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12 || templateStrokesUV == null)
+        {
+            p4Exec.warningMessage = "Chưa có đám mây điểm 3D mẫu chuẩn hoặc 12 mốc AI để chạy P4.";
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+        p4Exec.initMethodUsed = "Mốc P3 (dự phòng 2D)";
+        p4Exec.nonRigidMethodUsed = "ICP 2D + TPS 2D (chưa chốt mẫu 3D)";
 
         Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
         Vector2[] dst12XZ = new Vector2[12];
         for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
 
-        // Bước 1: Khởi tạo thô bằng mốc (P3 Barycentric) và giảm mẫu biên ~5 mm (0.005 m)
+        // Bước 1: Khởi tạo thô bằng mốc (P3 Barycentric 32 tam giác) và giảm mẫu biên ~5 mm (0.005 m)
         Vector2[] polyTemplate = DobotCR10AIKController.GetJeansPolygonForSize(templateSize);
         var templateLoopUV = new List<Vector2>(polyTemplate);
         if (templateLoopUV.Count > 0) templateLoopUV.Add(templateLoopUV[0]);
         List<Vector2> denseTemplateEdgeUV = ResampleUV(templateLoopUV, 0.015f);
 
-        var initBoundaryCloud = new List<Vector2>(denseTemplateEdgeUV.Count);
+        AnatomicalLegChain dstChainL = BuildLegChain(dst12XZ, true);
+        AnatomicalLegChain dstChainR = BuildLegChain(dst12XZ, false);
+
+        var initBoundaryL = new List<Vector2>();
+        var initBoundaryR = new List<Vector2>();
         for (int i = 0; i < denseTemplateEdgeUV.Count; i++)
         {
-            initBoundaryCloud.Add(WarpPointBarycentric12(denseTemplateEdgeUV[i], src12, dst12XZ));
+            Vector2 wPt = WarpPointBarycentric12(denseTemplateEdgeUV[i], src12, dst12XZ);
+            if (denseTemplateEdgeUV[i].x <= 0.50f) initBoundaryL.Add(wPt);
+            else initBoundaryR.Add(wPt);
         }
 
-        // Giảm mẫu đám mây biên thực của quần mới với voxel ~5 mm (0.005 m) theo đúng Mục P4.3 trang 8
+        // Giảm mẫu đám mây biên thực của quần mới với voxel ~5 mm (0.005 m) theo đúng Mục P4.3 trang 8, tách theo 2 ống
         var targetContourCloud = new List<Vector2>();
+        var targetContourL = new List<Vector2>();
+        var targetContourR = new List<Vector2>();
         if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 12)
         {
             for (int k = 0; k < ctrl.garmentContourWorld.Count; k++)
@@ -1432,25 +5580,52 @@ public static class TrajectoryEvaluationEngine
                 if (targetContourCloud.Count == 0 || (cand - targetContourCloud[targetContourCloud.Count - 1]).sqrMagnitude >= 0.005f * 0.005f)
                 {
                     targetContourCloud.Add(cand);
+                    ProjectOntoLegChain(cand, dstChainL, out _, out _, out _, out float d2L);
+                    ProjectOntoLegChain(cand, dstChainR, out _, out _, out _, out float d2R);
+                    if (d2L <= d2R) targetContourL.Add(cand);
+                    else targetContourR.Add(cand);
                 }
             }
         }
 
-        // Bước 2: Chạy ICP cứng (Kabsch 2D, 10 vòng lặp) để khử tịnh tiến/quay giữa mẫu khởi tạo và đám mây biên thực
-        float icpCos = 1f, icpSin = 0f;
-        Vector2 icpCenter = Vector2.zero, icpTrans = Vector2.zero;
-        if (targetContourCloud.Count >= 6)
+        // Bước 2: Chạy ICP cứng độc lập cho từng ống (Kabsch 2D, 10 vòng lặp) để khử tịnh tiến/góc xòe riêng của ống trái & ống phải
+        float icpCosL = 1f, icpSinL = 0f, icpCosR = 1f, icpSinR = 0f;
+        Vector2 icpCenterL = Vector2.zero, icpTransL = Vector2.zero;
+        Vector2 icpCenterR = Vector2.zero, icpTransR = Vector2.zero;
+        if (targetContourL.Count >= 4 && initBoundaryL.Count >= 4)
         {
-            RunRigidKabschIcp2D(initBoundaryCloud, targetContourCloud, 10, 0.065f, out icpCos, out icpSin, out icpCenter, out icpTrans);
+            RunRigidKabschIcp2D(initBoundaryL, targetContourL, 10, 0.055f, out icpCosL, out icpSinL, out icpCenterL, out icpTransL);
+        }
+        if (targetContourR.Count >= 4 && initBoundaryR.Count >= 4)
+        {
+            RunRigidKabschIcp2D(initBoundaryR, targetContourR, 10, 0.055f, out icpCosR, out icpSinR, out icpCenterR, out icpTransR);
         }
 
-        // Bước 3: Lập tập cặp điểm tương ứng (12 mốc + các điểm biên sau ICP cứng) để giải trường biến dạng phi cứng TPS RBF
-        var tpsSrcList = new List<Vector2>(28);
-        var tpsDstList = new List<Vector2>(28);
+        // Bước 3: Lập tập cặp điểm tương ứng (12 mốc + các điểm biên khớp sau ICP cứng) để giải trường biến dạng phi cứng TPS RBF
+        var tpsSrcList = new List<Vector2>(30);
+        var tpsDstList = new List<Vector2>(30);
+        int[] leftLmIdx = { 0, 4, 6, 8, 9 };
+        bool[] isLeftLm = new bool[12];
+        for (int i = 0; i < leftLmIdx.Length; i++) isLeftLm[leftLmIdx[i]] = true;
+
         for (int i = 0; i < 12; i++)
         {
             Vector2 p3Pt = WarpPointBarycentric12(src12[i], src12, dst12XZ);
-            Vector2 icpPt = ApplyRigid2D(p3Pt, icpCos, icpSin, icpCenter, icpTrans);
+            Vector2 icpPt;
+            if (i == 1 || i == 3)
+            {
+                Vector2 lPt = ApplyRigid2D(p3Pt, icpCosL, icpSinL, icpCenterL, icpTransL);
+                Vector2 rPt = ApplyRigid2D(p3Pt, icpCosR, icpSinR, icpCenterR, icpTransR);
+                icpPt = 0.5f * (lPt + rPt);
+            }
+            else if (isLeftLm[i])
+            {
+                icpPt = ApplyRigid2D(p3Pt, icpCosL, icpSinL, icpCenterL, icpTransL);
+            }
+            else
+            {
+                icpPt = ApplyRigid2D(p3Pt, icpCosR, icpSinR, icpCenterR, icpTransR);
+            }
             tpsSrcList.Add(icpPt);
             tpsDstList.Add(dst12XZ[i]);
         }
@@ -1461,25 +5636,29 @@ public static class TrajectoryEvaluationEngine
         {
             for (int i = 0; i < polyTemplate.Length; i++)
             {
+                bool edgeIsLeft = (polyTemplate[i].x <= 0.50f);
                 Vector2 p3Edge = WarpPointBarycentric12(polyTemplate[i], src12, dst12XZ);
-                Vector2 icpEdge = ApplyRigid2D(p3Edge, icpCos, icpSin, icpCenter, icpTrans);
+                Vector2 icpEdge = edgeIsLeft
+                    ? ApplyRigid2D(p3Edge, icpCosL, icpSinL, icpCenterL, icpTransL)
+                    : ApplyRigid2D(p3Edge, icpCosR, icpSinR, icpCenterR, icpTransR);
 
                 bool tooCloseToExisting = false;
                 for (int j = 0; j < tpsSrcList.Count; j++)
                 {
-                    if (Vector2.Distance(icpEdge, tpsSrcList[j]) < 0.035f) { tooCloseToExisting = true; break; }
+                    if (Vector2.Distance(icpEdge, tpsSrcList[j]) < 0.032f) { tooCloseToExisting = true; break; }
                 }
                 if (tooCloseToExisting) continue;
 
+                var legContour = edgeIsLeft && targetContourL.Count >= 4 ? targetContourL : (targetContourR.Count >= 4 ? targetContourR : targetContourCloud);
                 Vector2 bestCand = icpEdge;
                 float bestD2 = float.MaxValue;
-                for (int k = 0; k < targetContourCloud.Count; k++)
+                for (int k = 0; k < legContour.Count; k++)
                 {
-                    float d2 = (targetContourCloud[k] - icpEdge).sqrMagnitude;
-                    if (d2 < bestD2) { bestD2 = d2; bestCand = targetContourCloud[k]; }
+                    float d2 = (legContour[k] - icpEdge).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; bestCand = legContour[k]; }
                 }
                 float distM = Mathf.Sqrt(bestD2);
-                if (distM <= 0.055f)
+                if (distM <= 0.050f)
                 {
                     tpsSrcList.Add(icpEdge);
                     tpsDstList.Add(bestCand);
@@ -1496,7 +5675,7 @@ public static class TrajectoryEvaluationEngine
         double[,] K = new double[dim, dim];
         double[] rhsX = new double[dim];
         double[] rhsZ = new double[dim];
-        const double lambda = 2e-4;
+        const double lambda = 1.5e-4;
 
         for (int i = 0; i < n; i++)
         {
@@ -1519,7 +5698,7 @@ public static class TrajectoryEvaluationEngine
         bool okX = SolveLinearSystem(K, rhsX, out double[] wX);
         bool okZ = SolveLinearSystem(K, rhsZ, out double[] wZ);
 
-        // Bước 5: Tính sai số dư sau đăng ký (RMS mm) trên 12 mốc + các cặp biên ICP
+        // Bước 5: Tính sai số dư sau đăng ký (RMS mm) trên toàn bộ các cặp điểm điều khiển sau khi khớp TPS
         double sumSqErr = 0.0;
         for (int i = 0; i < n; i++)
         {
@@ -1529,10 +5708,10 @@ public static class TrajectoryEvaluationEngine
             double errM = Vector2.Distance(pred, tpsDstList[i]);
             sumSqErr += errM * errM;
         }
-        double rmsM = Math.Sqrt((sumSqErr + 0.05 * boundaryErrSumSq) / Math.Max(1, n));
+        double rmsM = Math.Sqrt((sumSqErr + 0.02 * boundaryErrSumSq) / Math.Max(1, n));
         registrationResidualMm = (float)(rmsM * 1000.0);
 
-        // Bước 4: Áp chuỗi biến đổi (P3 Barycentric -> ICP cứng Kabsch -> TPS phi cứng) lên quỹ đạo mẫu & chiếu lên bề mặt 3D thật
+        // Bước 4: Áp chuỗi biến đổi (P3 Barycentric 32 tam giác -> ICP cứng theo ống -> TPS phi cứng) lên quỹ đạo mẫu & chiếu lên bề mặt 3D thật
         for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
         {
             for (int s = 0; s < templateStrokesUV.Count; s++)
@@ -1544,12 +5723,15 @@ public static class TrajectoryEvaluationEngine
 
                 for (int p = 0; p < resampled.Count; p++)
                 {
-                    Vector2 qP3 = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
-                    Vector2 qIcp = ApplyRigid2D(qP3, icpCos, icpSin, icpCenter, icpTrans);
+                    Vector2 uvPt = resampled[p];
+                    Vector2 qP3 = WarpPointBarycentric12(uvPt, src12, dst12XZ);
+                    Vector2 qIcp = (uvPt.x <= 0.50f)
+                        ? ApplyRigid2D(qP3, icpCosL, icpSinL, icpCenterL, icpTransL)
+                        : ApplyRigid2D(qP3, icpCosR, icpSinR, icpCenterR, icpTransR);
                     Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
-                    if (Vector2.Distance(qWarped, qP3) > 0.035f)
+                    if (Vector2.Distance(qWarped, qP3) > 0.032f)
                     {
-                        qWarped = qP3 + (qWarped - qP3).normalized * 0.035f;
+                        qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
                     }
 
                     bool keep = (attempt == 0)
@@ -1573,9 +5755,38 @@ public static class TrajectoryEvaluationEngine
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P4_ICP_TPS");
+        var wps = BuildSprayWaypointsFromWorldStrokes(
+            strokesWorld, ctrl, plyLoader, tech, "P4_ICP_TPS",
+            useFixedVerticalNormal: useFixedVert,
+            useFlatPlaneZ: flat2D,
+            flatPlaneWorldY: flatY,
+            overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+
+        p4Exec.residualAfterNonRigidMm = registrationResidualMm;
+        p4Exec.rejectedByResidualGate = (registrationResidualMm > Mathf.Max(1f, p4Cfg.residualThresholdMm));
+        if (p4Exec.rejectedByResidualGate)
+            p4Exec.warningMessage = $"[CHẶN P4] Sai số dư = {registrationResidualMm:F2} mm > ngưỡng {p4Cfg.residualThresholdMm:F1} mm!";
+        p4Exec.normalStabilityStdDeg = ComputeNormalTiltStdDeg(wps);
+        p4Exec.strokeCount = strokesWorld.Count;
+        ComputeSprayAndTravelLengths(wps, out p4Exec.totalSprayLengthMm, out p4Exec.totalTravelLengthMm);
+        p4Exec.summaryText = $"Dự phòng 2D (chưa chốt mẫu 3D) | Dư: {registrationResidualMm:F2} mm | Phun: {p4Exec.totalSprayLengthMm:F0} mm";
+
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
+    }
+
+    private static float ComputeNormalTiltStdDeg(List<DobotCR10AIKController.WaypointData> wps)
+    {
+        if (wps == null || wps.Count < 3) return 0f;
+        var diffs = new List<float>(wps.Count);
+        for (int i = 1; i < wps.Count; i++)
+        {
+            Vector3 n0 = wps[i - 1].microNormal.sqrMagnitude > 1e-4f ? wps[i - 1].microNormal.normalized : Vector3.up;
+            Vector3 n1 = wps[i].microNormal.sqrMagnitude > 1e-4f ? wps[i].microNormal.normalized : Vector3.up;
+            diffs.Add(Vector3.Angle(n0, n1));
+        }
+        float mean = Mean(diffs);
+        return StdDev(diffs, mean);
     }
 
     private static Vector2 EvalTps2D(Vector2 q, Vector2[] ctrlPts, double[] wX, double[] wZ)
@@ -1920,20 +6131,33 @@ public static class TrajectoryEvaluationEngine
         float regResidualMm,
         float engineeringScore1To5,
         bool renderHeatmap,
-        ref GameObject heatmapObj)
+        ref GameObject heatmapObj,
+        string groundTruthSourceLabel = "",
+        float tSetupMin = 1.0f,
+        string engineeringReason = "")
     {
+        bool hasRealGt = (referenceGroundTruth != null && referenceGroundTruth.Count >= 2);
         var res = new MethodEvaluationResult
         {
             methodName = methodName,
             sampleName = ctrl.selectedSampleName,
             waypointCount = wps != null ? wps.Count : 0,
+            hasGroundTruth = hasRealGt,
+            groundTruthSource = hasRealGt ? (string.IsNullOrEmpty(groundTruthSourceLabel) ? "Ground Truth ngoài" : groundTruthSourceLabel) : "Chưa có GT",
+            eGeoMeanMm = -1f,
+            eGeoP95Mm = -1f,
+            eGeoHausdorffMm = -1f,
             tGenSec = genTimeSec,
+            tSetupMin = Mathf.Max(0.05f, tSetupMin),
             regResidualMm = regResidualMm,
-            engineeringScore = engineeringScore1To5
+            engineeringScore = Mathf.Clamp(engineeringScore1To5, 1f, 5f),
+            engineeringReason = engineeringReason ?? ""
         };
+        PopulateQualitativeMetadata(res);
 
         if (wps == null || wps.Count < 2)
         {
+            res.gateFailReason = "Không sinh được quỹ đạo";
             res.notes = "Không sinh được quỹ đạo.";
             return res;
         }
@@ -1945,14 +6169,15 @@ public static class TrajectoryEvaluationEngine
 
         int feasiblePts = 0;
         int collisions = 0;
+        int singularities = 0;
         float totalCycleTimeSec = 0f;
 
         for (int i = 0; i < wps.Count; i++)
         {
             var wp = wps[i];
 
-            // 1. E_geo so với đường chuẩn (nếu không có reference riêng, so với điểm chiếu mặt vải chuẩn)
-            if (referenceGroundTruth != null && referenceGroundTruth.Count > 0)
+            // 1. E_geo: CHỈ tính khi có Ground Truth thật (dạy tay / marker vật lý ngoài — tuyệt đối không tự lấy P4 làm GT!)
+            if (hasRealGt)
             {
                 float minGeo = float.MaxValue;
                 for (int r = 0; r < referenceGroundTruth.Count; r++)
@@ -1961,10 +6186,6 @@ public static class TrajectoryEvaluationEngine
                     if (d < minGeo) minGeo = d;
                 }
                 geoErrs.Add(minGeo);
-            }
-            else
-            {
-                geoErrs.Add(wp.posError_mm);
             }
 
             // 2. E_d: Khoảng cách thực từ TCP -> bề mặt dọc trục súng so với độ cao lớp phun đặt
@@ -1993,11 +6214,14 @@ public static class TrajectoryEvaluationEngine
             float eTheta = Vector3.Angle(-gunAxisRobot, surfNormRobot);
             angleErrs.Add(eTheta);
 
-            // 4. Khả thi F: IK có nghiệm + trong giới hạn khớp + không va chạm bàn/links + góc <= theta_max
+            // 4. Khả thi F: IK có nghiệm + trong giới hạn khớp + không va chạm bàn/links + xa kỳ dị + góc <= theta_max
             bool ptCollision = false;
+            bool ptSingular = false;
             bool inLimits = wp.isSolved && DobotCR10AKinematics.IsWithinJointLimits(wp.jointAngles_deg, out _, out _);
             if (wp.isSolved)
             {
+                if (Mathf.Abs(wp.jointAngles_deg[4]) < 2.5f || wp.targetPosGlobal_mm.magnitude > 1135f)
+                    ptSingular = true;
                 Vector3[] jointPosMm = DobotCR10AKinematics.ForwardAllJointPositionsRobotMm(
                     wp.jointAngles_rad, ctrl.toolLength, ctrl.toolOffsetX, ctrl.toolOffsetY);
                 for (int j = 2; j < jointPosMm.Length; j++)
@@ -2006,6 +6230,7 @@ public static class TrajectoryEvaluationEngine
                 }
             }
             if (ptCollision) collisions++;
+            if (ptSingular) singularities++;
 
             float gunTiltFromUp = Vector3.Angle(-gunAxisRobot, new Vector3(0f, 0f, 1f));
             if (wp.isSolved && inLimits && !ptCollision && gunTiltFromUp <= tech.maxTiltDeg + 1.5f)
@@ -2034,11 +6259,14 @@ public static class TrajectoryEvaluationEngine
             }
         }
 
-        // Thống kê E_geo, E_d, E_theta
-        geoErrs.Sort();
-        res.eGeoMeanMm = Mean(geoErrs);
-        res.eGeoP95Mm = Percentile(geoErrs, 0.95f);
-        res.eGeoHausdorffMm = geoErrs.Count > 0 ? geoErrs[geoErrs.Count - 1] : 0f;
+        // Thống kê E_geo (chỉ khi có GT thật), E_d, E_theta
+        if (hasRealGt && geoErrs.Count > 0)
+        {
+            geoErrs.Sort();
+            res.eGeoMeanMm = Mean(geoErrs);
+            res.eGeoP95Mm = Percentile(geoErrs, 0.95f);
+            res.eGeoHausdorffMm = geoErrs[geoErrs.Count - 1];
+        }
 
         res.eDMeanMm = Mean(distErrs);
         res.eDMaxMm = Max(distErrs);
@@ -2048,6 +6276,7 @@ public static class TrajectoryEvaluationEngine
 
         res.feasibilityPct = (float)feasiblePts / wps.Count * 100f;
         res.collisionCount = collisions;
+        res.singularityCount = singularities;
         res.tCycleSec = totalCycleTimeSec;
 
         // V_cv (%): hệ số biến thiên (std / mean * 100) của tốc độ TCP trong đoạn phun
@@ -2058,57 +6287,218 @@ public static class TrajectoryEvaluationEngine
             res.vCvPercent = mV > 1e-3f ? (stdV / mV * 100f) : 0f;
         }
 
-        // 6. Mô phỏng lắng đọng Gauss (E_T, C, O)
+        // 6. Mô phỏng lắng đọng Gauss (E_T, C, O) & Hàm mục tiêu chung J (Trang 7)
         SimulateGaussianDepositionAndHeatmap(
             wps, ctrl, plyLoader, tech, renderHeatmap, ref heatmapObj,
             out res.eTPercent, out res.coveragePercent, out res.oversprayPercent);
+        float eTFrac = res.eTPercent * 0.01f;
+        float oFrac = res.oversprayPercent * 0.01f;
+        res.objectiveJ = eTFrac * eTFrac + 1.0f * oFrac + 0.01f * res.tCycleSec;
 
-        // 7. Ước lượng R_drop (độ bền vững theo sai số hình học & sai số góc pháp tuyến trên nếp gấp)
-        res.rDropMm = res.eGeoMeanMm * 0.35f + res.eDMeanMm * 0.15f;
+        // 7. Ước lượng R_drop (độ bền vững theo sai số hình học / sai số khoảng cách & góc pháp tuyến)
+        res.rDropMm = hasRealGt
+            ? (res.eGeoMeanMm * 0.35f + res.eDMeanMm * 0.15f)
+            : (res.eDMeanMm * 0.25f + res.eThetaMeanDeg * 0.05f);
 
-        // 8. Bước 1 — Ngưỡng loại (trang 11 file góp ý)
-        res.passedGate =
-            res.feasibilityPct >= 95f &&
-            res.collisionCount == 0 &&
-            res.eGeoMeanMm <= 5.0f &&
-            res.eGeoP95Mm <= 8.0f &&
-            res.tGenSec <= 60.0f;
+        // 8. Bước 1 — Ngưỡng loại chi tiết từng điều kiện (trang 11 file góp ý)
+        res.gateFeasibilityOk = (res.feasibilityPct >= 95f);
+        res.gateCollisionOk = (res.collisionCount == 0);
+        res.gateGeoOk = !hasRealGt || (res.eGeoMeanMm <= 5.0f && res.eGeoP95Mm <= 8.0f);
+        res.gateTimeOk = (res.tGenSec <= 60.0f);
+        res.passedGate = res.gateFeasibilityOk && res.gateCollisionOk && res.gateGeoOk && res.gateTimeOk;
 
-        // 9. Bước 2 — Chấm điểm có trọng số (trang 11–12 file góp ý)
+        var failReasons = new List<string>();
+        if (!res.gateFeasibilityOk) failReasons.Add($"F={res.feasibilityPct:F1}%<95%");
+        if (!res.gateCollisionOk) failReasons.Add($"Va chạm={res.collisionCount}");
+        if (!res.gateGeoOk) failReasons.Add($"E_geo={res.eGeoMeanMm:F1}/P95={res.eGeoP95Mm:F1}mm");
+        if (!res.gateTimeOk) failReasons.Add($"t_gen={res.tGenSec:F1}s>60s");
+        res.gateFailReason = failReasons.Count > 0 ? string.Join("; ", failReasons) : "Đạt tất cả ngưỡng bắt buộc";
+
+        // 9. Bước 2 — Chấm điểm có trọng số theo 6 nhóm tiêu chí (trang 11–12 file góp ý)
         // S_k = 100 * clip((x_worst - x) / (x_worst - x_target), 0, 1)
-        float sSprayQuality = (
+        res.scoreSprayQuality = (
             ScoreSmallerBetter(res.eTPercent, 10f, 80f) +
             ScoreLargerBetter(res.coveragePercent, 95f, 40f) +
             ScoreSmallerBetter(res.oversprayPercent, 2f, 25f)
         ) / 3f;
 
-        float sGeoAcc = (
-            ScoreSmallerBetter(res.eGeoMeanMm, 1.0f, 8.0f) +
-            ScoreSmallerBetter(res.eDMeanMm, 1.0f, 15.0f) +
-            ScoreSmallerBetter(res.eThetaMeanDeg, 2.0f, 25.0f)
-        ) / 3f;
+        res.scoreGeoAcc = hasRealGt
+            ? (ScoreSmallerBetter(res.eGeoMeanMm, 1.0f, 8.0f) +
+               ScoreSmallerBetter(res.eDMeanMm, 1.0f, 15.0f) +
+               ScoreSmallerBetter(res.eThetaMeanDeg, 2.0f, 25.0f)) / 3f
+            : (ScoreSmallerBetter(res.eDMeanMm, 1.0f, 15.0f) +
+               ScoreSmallerBetter(res.eThetaMeanDeg, 2.0f, 25.0f)) / 2f;
 
-        float sRobust = ScoreSmallerBetter(res.rDropMm, 0.5f, 6.0f);
+        res.scoreRobust = ScoreSmallerBetter(res.rDropMm, 0.5f, 6.0f);
 
-        float sFeasCycle = (
+        res.scoreFeasCycle = (
             ScoreLargerBetter(res.feasibilityPct, 100f, 85f) +
             ScoreSmallerBetter(res.vCvPercent, 3f, 35f) +
             ScoreSmallerBetter(res.tCycleSec, 8f, 45f)
         ) / 3f;
 
-        float sSpeed = ScoreSmallerBetter(res.tGenSec, 1.0f, 60.0f);
-        float sEng = Mathf.Clamp01((engineeringScore1To5 - 1f) / 4f) * 100f;
+        // Nhóm 5 (10%): Tốc độ sinh t_gen (s) + Thời gian thiết lập mã/cỡ mới t_setup (phút)
+        res.scoreSpeedSetup = 0.5f * ScoreSmallerBetter(res.tGenSec, 1.0f, 60.0f)
+                            + 0.5f * ScoreSmallerBetter(res.tSetupMin, 0.5f, 15.0f);
+
+        res.scoreEng = Mathf.Clamp01((res.engineeringScore - 1f) / 4f) * 100f;
 
         res.weightedScore =
-            0.30f * sSprayQuality +
-            0.20f * sGeoAcc +
-            0.15f * sRobust +
-            0.15f * sFeasCycle +
-            0.10f * sSpeed +
-            0.10f * sEng;
+            0.30f * res.scoreSprayQuality +
+            0.20f * res.scoreGeoAcc +
+            0.15f * res.scoreRobust +
+            0.15f * res.scoreFeasCycle +
+            0.10f * res.scoreSpeedSetup +
+            0.10f * res.scoreEng;
 
-        res.notes = res.passedGate ? "ĐẠT NGƯỠNG LOẠI" : "CHƯA ĐẠT NGƯỠNG";
+        res.notes = !hasRealGt
+            ? (res.passedGate ? "ĐẠT (Chưa có GT đo E_geo)" : $"LOẠI: {res.gateFailReason}")
+            : (res.passedGate ? "ĐẠT NGƯỠNG LOẠI" : $"LOẠI: {res.gateFailReason}");
         return res;
+    }
+
+    private static void PopulateQualitativeMetadata(MethodEvaluationResult res)
+    {
+        if (res == null || string.IsNullOrEmpty(res.methodName)) return;
+        if (res.methodName.StartsWith("P1"))
+        {
+            res.minInputDesc = "Mask 2D";
+            res.curvedSurfaceRating = "Kém";
+            res.sizePoseAdaptRating = "Tốt (theo mask)";
+            res.effectIntentRating = "Không";
+            res.implEffortRating = "Thấp";
+            if (string.IsNullOrEmpty(res.engineeringReason))
+                res.engineeringReason = "Cài đặt đơn giản, không cần mẫu chuẩn; chỉ chỉnh w, r, e, góc quét.";
+        }
+        else if (res.methodName.StartsWith("P2"))
+        {
+            res.minInputDesc = "Mask 2D";
+            res.curvedSurfaceRating = "Kém";
+            res.sizePoseAdaptRating = "Tốt (2 ống)";
+            res.effectIntentRating = "Một phần";
+            res.implEffortRating = "Thấp–vừa";
+            if (string.IsNullOrEmpty(res.engineeringReason))
+                res.engineeringReason = "Tách 2 ống + trục giữa EDT; ít quay đầu nhưng vùng cạp/đũng xử lý phức tạp.";
+        }
+        else if (res.methodName.StartsWith("P3"))
+        {
+            res.minInputDesc = "Mask/ảnh + mốc";
+            res.curvedSurfaceRating = "Vừa (2.5D)";
+            res.sizePoseAdaptRating = "Tốt nếu mốc đúng";
+            res.effectIntentRating = "Có";
+            res.implEffortRating = "Vừa";
+            if (string.IsNullOrEmpty(res.engineeringReason))
+                res.engineeringReason = "Dễ giải thích & kỹ sư chỉnh sửa trực tiếp; phụ thuộc độ chính xác mốc.";
+        }
+        else
+        {
+            res.minInputDesc = "Đám mây điểm 3D";
+            res.curvedSurfaceRating = "Tốt";
+            res.sizePoseAdaptRating = "Tốt";
+            res.effectIntentRating = "Có";
+            res.implEffortRating = "Vừa–cao";
+            if (string.IsNullOrEmpty(res.engineeringReason))
+                res.engineeringReason = "Xử lý được nếp nhăn 3D & đổi cỡ; cần chỉnh độ cứng CPD (λ, β) & khởi tạo tốt.";
+        }
+    }
+
+    /// <summary>
+    /// Kiểm tra độ nhạy trọng số theo đúng Trang 12 file góp ý:
+    /// Đổi từng trọng số trong 6 nhóm tiêu chí ±10 điểm phần trăm (chuẩn hóa lại tổng = 100%);
+    /// nêu rõ thứ hạng đầu có ổn định hay phương án nào thắng trong điều kiện nào.
+    /// </summary>
+    public static SensitivityAnalysisReport RunWeightSensitivityAnalysis(List<MethodEvaluationResult> results)
+    {
+        var report = new SensitivityAnalysisReport();
+        if (results == null || results.Count == 0) return report;
+
+        string[] groupNames =
+        {
+            "Chất lượng phun (30%)",
+            "Chính xác hình học (20%)",
+            "Bền vững nếp/tư thế (15%)",
+            "Khả thi & chu kỳ (15%)",
+            "Tốc độ sinh & thiết lập (10%)",
+            "Công cài đặt & bảo trì (10%)"
+        };
+        float[] baseW = { 0.30f, 0.20f, 0.15f, 0.15f, 0.10f, 0.10f };
+
+        float EvalWithWeights(MethodEvaluationResult r, float[] w)
+        {
+            return w[0] * r.scoreSprayQuality
+                 + w[1] * r.scoreGeoAcc
+                 + w[2] * r.scoreRobust
+                 + w[3] * r.scoreFeasCycle
+                 + w[4] * r.scoreSpeedSetup
+                 + w[5] * r.scoreEng;
+        }
+
+        // Chọn ứng viên hợp lệ theo Bước 1 (ưu tiên các phương án ĐẠT ngưỡng loại; nếu chưa phương án nào đạt hết thì so sánh tất cả)
+        var pool = new List<MethodEvaluationResult>();
+        for (int i = 0; i < results.Count; i++) if (results[i].passedGate) pool.Add(results[i]);
+        if (pool.Count == 0) pool.AddRange(results);
+
+        MethodEvaluationResult PickWinner(float[] w, out float bestSc)
+        {
+            MethodEvaluationResult best = pool[0];
+            bestSc = EvalWithWeights(best, w);
+            for (int i = 1; i < pool.Count; i++)
+            {
+                float sc = EvalWithWeights(pool[i], w);
+                if (sc > bestSc) { bestSc = sc; best = pool[i]; }
+            }
+            return best;
+        }
+
+        var baseWinner = PickWinner(baseW, out _);
+        report.baseWinnerName = baseWinner.methodName;
+
+        int total = 0;
+        int sameCount = 0;
+        var flipNotes = new List<string>();
+
+        for (int g = 0; g < 6; g++)
+        {
+            float[] deltas = { 0.10f, -0.10f };
+            for (int d = 0; d < deltas.Length; d++)
+            {
+                float[] w = (float[])baseW.Clone();
+                w[g] = Mathf.Clamp(w[g] + deltas[d], 0.0f, 0.60f);
+                float remTarget = 1.0f - w[g];
+                float remOrig = 1.0f - baseW[g];
+                if (remOrig > 1e-5f)
+                {
+                    for (int k = 0; k < 6; k++)
+                    {
+                        if (k == g) continue;
+                        w[k] = baseW[k] * (remTarget / remOrig);
+                    }
+                }
+                var winner = PickWinner(w, out float winSc);
+                total++;
+                string sign = deltas[d] > 0f ? "+10%" : "-10%";
+                bool changed = (winner.methodName != baseWinner.methodName);
+                if (!changed) sameCount++;
+                else flipNotes.Add($"Khi {groupNames[g]} {sign} -> {winner.methodName} thắng ({winSc:F1})");
+
+                report.scenarioLines.Add(
+                    $"{groupNames[g]} ({sign}) -> Hạng 1: {winner.methodName} ({winSc:F1}/100)" +
+                    (changed ? " [ĐỔI HẠNG]" : " [Ổn định]"));
+            }
+        }
+
+        report.totalScenarios = total;
+        report.stableWinCount = sameCount;
+        report.isStable = (sameCount == total);
+        if (report.isStable)
+        {
+            report.summaryText = $"Ổn định cao: [{baseWinner.methodName}] giữ Hạng 1 trong cả {sameCount}/{total} kịch bản đổi trọng số ±10%.";
+        }
+        else
+        {
+            report.summaryText = $"Nhạy trọng số: [{baseWinner.methodName}] giữ Hạng 1 ở {sameCount}/{total} kịch bản. " + string.Join(" | ", flipNotes);
+        }
+        return report;
     }
 
     private static float ScoreSmallerBetter(float x, float xTarget, float xWorst)
@@ -2155,20 +6545,44 @@ public static class TrajectoryEvaluationEngine
         if (!Directory.Exists(exportDir)) Directory.CreateDirectory(exportDir);
         string path = Path.Combine(exportDir, "evaluation_comparison_report.csv");
         var sb = new StringBuilder();
-        sb.AppendLine("method,sample,waypoints,E_geo_mean_mm,E_geo_p95_mm,E_geo_hausdorff_mm,E_d_mean_mm,E_theta_mean_deg,E_T_pct,C_coverage_pct,O_overspray_pct,F_feasible_pct,collisions,V_cv_pct,t_gen_s,t_cycle_s,R_drop_mm,reg_residual_mm,passed_gate,weighted_score_100");
+        sb.AppendLine("method,sample,ground_truth,waypoints,E_geo_mean_mm,E_geo_p95_mm,E_geo_hausdorff_mm,E_d_mean_mm,E_d_max_mm,E_theta_mean_deg,E_theta_max_deg,E_T_pct,C_coverage_pct,O_overspray_pct,objective_J,F_feasible_pct,collisions,singularities,V_cv_pct,t_gen_s,t_cycle_s,R_drop_mm,t_setup_min,reg_residual_mm,eng_score_1_5,gate_F,gate_coll,gate_geo,gate_tgen,passed_gate,S1_spray30,S2_geo20,S3_robust15,S4_feas15,S5_speed10,S6_eng10,weighted_score_100,gate_reason,eng_reason");
         foreach (var r in results)
         {
+            string eGeoM = r.hasGroundTruth ? r.eGeoMeanMm.ToString("F3", CultureInfo.InvariantCulture) : "N/A";
+            string eGeo95 = r.hasGroundTruth ? r.eGeoP95Mm.ToString("F3", CultureInfo.InvariantCulture) : "N/A";
+            string eGeoH = r.hasGroundTruth ? r.eGeoHausdorffMm.ToString("F3", CultureInfo.InvariantCulture) : "N/A";
+            string safeGate = (r.gateFailReason ?? "").Replace(",", ";");
+            string safeEng = (r.engineeringReason ?? "").Replace(",", ";");
             sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                "{0},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F2},{8:F2},{9:F2},{10:F2},{11:F2},{12},{13:F2},{14:F3},{15:F2},{16:F3},{17:F3},{18},{19:F2}",
-                r.methodName, r.sampleName, r.waypointCount,
-                r.eGeoMeanMm, r.eGeoP95Mm, r.eGeoHausdorffMm,
-                r.eDMeanMm, r.eThetaMeanDeg, r.eTPercent,
-                r.coveragePercent, r.oversprayPercent,
-                r.feasibilityPct, r.collisionCount, r.vCvPercent,
-                r.tGenSec, r.tCycleSec, r.rDropMm, r.regResidualMm,
-                r.passedGate ? "PASS" : "FAIL", r.weightedScore));
+                "{0},{1},{2},{3},{4},{5},{6},{7:F3},{8:F3},{9:F2},{10:F2},{11:F2},{12:F2},{13:F2},{14:F4},{15:F2},{16},{17},{18:F2},{19:F3},{20:F2},{21:F3},{22:F2},{23:F3},{24:F1},{25},{26},{27},{28},{29},{30:F1},{31:F1},{32:F1},{33:F1},{34:F1},{35:F1},{36:F2},{37},{38}",
+                r.methodName, r.sampleName, r.groundTruthSource, r.waypointCount,
+                eGeoM, eGeo95, eGeoH,
+                r.eDMeanMm, r.eDMaxMm, r.eThetaMeanDeg, r.eThetaMaxDeg,
+                r.eTPercent, r.coveragePercent, r.oversprayPercent, r.objectiveJ,
+                r.feasibilityPct, r.collisionCount, r.singularityCount, r.vCvPercent,
+                r.tGenSec, r.tCycleSec, r.rDropMm, r.tSetupMin, r.regResidualMm, r.engineeringScore,
+                r.gateFeasibilityOk ? "PASS" : "FAIL",
+                r.gateCollisionOk ? "PASS" : "FAIL",
+                r.gateGeoOk ? "PASS" : "FAIL",
+                r.gateTimeOk ? "PASS" : "FAIL",
+                r.passedGate ? "PASS" : "FAIL",
+                r.scoreSprayQuality, r.scoreGeoAcc, r.scoreRobust, r.scoreFeasCycle, r.scoreSpeedSetup, r.scoreEng,
+                r.weightedScore, safeGate, safeEng));
         }
-        File.WriteAllText(path, sb.ToString());
+
+        // Phụ lục Kiểm tra độ nhạy trọng số (±10% điểm phần trăm — Trang 12)
+        var sens = RunWeightSensitivityAnalysis(results);
+        if (sens != null && sens.scenarioLines.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("# KIEM_TRA_DO_NHAY_TRONG_SO (+-10% diem phan tram)");
+            sb.AppendLine($"# Tom_tat,{sens.summaryText.Replace(",", ";")}");
+            for (int i = 0; i < sens.scenarioLines.Count; i++)
+            {
+                sb.AppendLine($"# Kich_ban_{i + 1},{sens.scenarioLines[i].Replace(",", ";")}");
+            }
+        }
+        File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
         return path;
     }
 

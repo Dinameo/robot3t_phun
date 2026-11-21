@@ -996,6 +996,86 @@ public class PLYDirectLoader : MonoBehaviour
         cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
     }
 
+    /// <summary>
+    /// Trích xuất đám mây điểm 3D bề mặt phôi (tách mặt bàn theo chiều cao Z > estimatedTableY + heightThresholdM)
+    /// và giảm mẫu lưới voxel (~5 mm theo đúng Mục P4 trang 8 file góp ý) để phục vụ đăng ký 3D ICP + TPS.
+    /// </summary>
+    public List<Vector3> ExtractGarmentSurfaceCloudVoxelized(
+        float voxelSizeM = 0.005f,
+        List<Vector3> contourClipWorld = null,
+        int maxPoints = 650,
+        float heightAboveTableM = 0.006f)
+    {
+        var pts = new List<Vector3>();
+        if (elevationGridY == null || elevationGridValid == null) return pts;
+
+        GetCellWorldSize(out float cellW, out float cellD);
+        float avgCell = Mathf.Max(0.001f, 0.5f * (cellW + cellD));
+        int stride = Mathf.Max(1, Mathf.RoundToInt(voxelSizeM / avgCell));
+
+        bool hasClip = (contourClipWorld != null && contourClipWorld.Count >= 3);
+        float cMinX = float.MaxValue, cMaxX = float.MinValue, cMinZ = float.MaxValue, cMaxZ = float.MinValue;
+        if (hasClip)
+        {
+            for (int i = 0; i < contourClipWorld.Count; i++)
+            {
+                Vector3 c = contourClipWorld[i];
+                if (c.x < cMinX) cMinX = c.x; if (c.x > cMaxX) cMaxX = c.x;
+                if (c.z < cMinZ) cMinZ = c.z; if (c.z > cMaxZ) cMaxZ = c.z;
+            }
+        }
+
+        float yMinCut = estimatedTableY + Mathf.Max(0.002f, heightAboveTableM);
+        var raw = new List<Vector3>(1500);
+        for (int gx = 0; gx < GRID_RES; gx += stride)
+        {
+            float wx = gridMin.x + ((float)gx / (GRID_RES - 1)) * (gridMax.x - gridMin.x);
+            if (hasClip && (wx < cMinX - 0.01f || wx > cMaxX + 0.01f)) continue;
+            for (int gz = 0; gz < GRID_RES; gz += stride)
+            {
+                if (!elevationGridValid[gx, gz]) continue;
+                float wy = elevationGridY[gx, gz];
+                if (!hasClip && wy < yMinCut) continue;
+
+                float wz = gridMin.z + ((float)gz / (GRID_RES - 1)) * (gridMax.z - gridMin.z);
+                if (hasClip)
+                {
+                    if (wz < cMinZ - 0.01f || wz > cMaxZ + 0.01f) continue;
+                    if (!IsPointInPolygonXZStatic(wx, wz, contourClipWorld)) continue;
+                }
+                raw.Add(new Vector3(wx, wy, wz));
+            }
+        }
+
+        if (raw.Count == 0) return pts;
+        if (maxPoints > 0 && raw.Count > maxPoints)
+        {
+            int dec = Mathf.Max(1, raw.Count / maxPoints);
+            for (int i = 0; i < raw.Count; i += dec) pts.Add(raw[i]);
+        }
+        else
+        {
+            pts.AddRange(raw);
+        }
+        return pts;
+    }
+
+    private static bool IsPointInPolygonXZStatic(float x, float z, List<Vector3> poly)
+    {
+        bool inside = false;
+        int n = poly.Count;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            float xi = poly[i].x, zi = poly[i].z;
+            float xj = poly[j].x, zj = poly[j].z;
+            if (((zi > z) != (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi + 1e-9f) + xi))
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
     public void RebuildSurfaceElevationGrid()
     {
         rawElevationGridY = new float[GRID_RES, GRID_RES];
