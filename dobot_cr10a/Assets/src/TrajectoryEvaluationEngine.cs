@@ -338,17 +338,28 @@ public static class TrajectoryEvaluationEngine
     ///   P_TCP = P_surface + d * n_surface (lùi đúng khoảng cách d dọc pháp tuyến 3D!)
     ///   z_tool = -n_surface (vuông góc mặt vải, giới hạn góc nghiêng <= θ_max)
     /// </summary>
+    /// <summary>
+    /// Độ cao lớp phun thống nhất (mm) dùng chung cho cả Vẽ tay 2D->3D và các phương pháp P1 / P3 / P4,
+    /// tránh việc đổi phương pháp làm nhảy độ cao đột ngột giữa customDrawZOffsetMm và standoffMm.
+    /// </summary>
+    public static float GetEffectiveSprayHeightMm(DobotCR10AIKController ctrl, SprayTechParams tech)
+    {
+        if (ctrl != null) return Mathf.Max(0f, ctrl.customDrawZOffsetMm);
+        return tech != null ? Mathf.Max(0f, tech.standoffMm) : 20f;
+    }
+
     public static List<DobotCR10AIKController.WaypointData> BuildSprayWaypointsFromWorldStrokes(
         List<List<Vector3>> worldSurfaceStrokes,
         DobotCR10AIKController ctrl,
         PLYDirectLoader plyLoader,
         SprayTechParams tech,
-        string methodTag)
+        string methodTag,
+        bool useFixedVerticalNormal = false)
     {
         var result = new List<DobotCR10AIKController.WaypointData>();
         if (worldSurfaceStrokes == null || worldSurfaceStrokes.Count == 0 || ctrl == null) return result;
 
-        float standoffM = tech.standoffMm * 0.001f;
+        float standoffM = GetEffectiveSprayHeightMm(ctrl, tech) * 0.001f;
         Transform gRef = ctrl.globalReference;
 
         // 1. Lấy điểm bề mặt + pháp tuyến thô cho từng nét, sau đó làm mượt pháp tuyến dọc nét
@@ -373,12 +384,12 @@ public static class TrajectoryEvaluationEngine
                 if (ctrl.SampleCompensatedSurface(pt.x, pt.z, out float cy, out Vector3 cn))
                 {
                     pt.y = cy;
-                    nrm = cn;
+                    nrm = useFixedVerticalNormal ? Vector3.up : cn;
                 }
                 else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(pt.x, pt.z, out float py, out Vector3 pn))
                 {
                     pt.y = py;
-                    nrm = pn;
+                    nrm = useFixedVerticalNormal ? Vector3.up : pn;
                 }
                 if (nrm.y < 0f) nrm = -nrm;
                 surfPtsWorld[p] = pt;
@@ -497,18 +508,427 @@ public static class TrajectoryEvaluationEngine
         return result;
     }
 
+    // =========================================================================
+    // 2B. HỆ TỌA ĐỘ GIẢI PHẪU ĐỘC LẬP 2 ỐNG QUẦN (ANATOMICAL LEG-AWARE WARPING)
+    //     Tự động thích nghi chính xác khi mỗi chiếc quần có góc xòe 2 ống,
+    //     độ cong ống, bề rộng ống, vị trí và hướng đặt khác nhau!
+    // =========================================================================
+
+    private struct AnatomicalLegChain
+    {
+        public Vector2[] C; // 5 điểm trục tâm: 0=Eo, 1=Hông/Đũng, 2=Đùi, 3=Gối, 4=Gấu
+        public Vector2[] N; // 5 vector ngang đơn vị hướng từ mép ngoài -> mép trong ống
+        public float[] R;   // 5 bán kính bề rộng ống quần tại từng trạm
+    }
+
+    private static AnatomicalLegChain BuildLegChain(Vector2[] lm12, bool isLeftLeg)
+    {
+        var chain = new AnatomicalLegChain
+        {
+            C = new Vector2[5],
+            N = new Vector2[5],
+            R = new float[5]
+        };
+
+        Vector2 waistOuter = isLeftLeg ? lm12[0] : lm12[2];
+        Vector2 waistCenter = lm12[1];
+        Vector2 crotch = lm12[3];
+        Vector2 thigh = isLeftLeg ? lm12[4] : lm12[5];
+        Vector2 knee = isLeftLeg ? lm12[6] : lm12[7];
+        Vector2 cuffOuter = isLeftLeg ? lm12[8] : lm12[11];
+        Vector2 cuffInner = isLeftLeg ? lm12[9] : lm12[10];
+
+        Vector2 vWaist = waistCenter - waistOuter;
+        float rWaist = Mathf.Max(1e-4f, 0.5f * vWaist.magnitude);
+        Vector2 nWaist = vWaist.sqrMagnitude > 1e-8f ? vWaist.normalized : (isLeftLeg ? Vector2.right : Vector2.left);
+
+        Vector2 vCuff = cuffInner - cuffOuter;
+        float rCuff = Mathf.Max(1e-4f, 0.5f * vCuff.magnitude);
+        Vector2 nCuff = vCuff.sqrMagnitude > 1e-8f ? vCuff.normalized : nWaist;
+
+        chain.C[0] = 0.5f * (waistOuter + waistCenter);
+        chain.C[1] = crotch + 0.5f * (waistOuter - waistCenter);
+        chain.C[2] = thigh;
+        chain.C[3] = knee;
+        chain.C[4] = 0.5f * (cuffOuter + cuffInner);
+
+        Vector2 refInner = nWaist + nCuff;
+        if (refInner.sqrMagnitude < 1e-6f) refInner = nWaist;
+        else refInner.Normalize();
+
+        chain.N[0] = nWaist;
+        chain.R[0] = rWaist;
+        chain.N[4] = nCuff;
+        chain.R[4] = rCuff;
+
+        for (int k = 1; k <= 3; k++)
+        {
+            Vector2 dIn = chain.C[k] - chain.C[k - 1];
+            Vector2 dOut = chain.C[k + 1] - chain.C[k];
+            Vector2 tIn = dIn.sqrMagnitude > 1e-8f ? dIn.normalized : Vector2.up;
+            Vector2 tOut = dOut.sqrMagnitude > 1e-8f ? dOut.normalized : tIn;
+            Vector2 tan = (tIn + tOut);
+            if (tan.sqrMagnitude < 1e-6f) tan = tOut;
+            else tan.Normalize();
+
+            Vector2 nPerp = new Vector2(-tan.y, tan.x);
+            if (Vector2.Dot(nPerp, refInner) < 0f) nPerp = -nPerp;
+
+            if (k == 1)
+            {
+                Vector2 nHip = 0.55f * nPerp + 0.45f * nWaist;
+                nHip = nHip.sqrMagnitude > 1e-6f ? nHip.normalized : nPerp;
+                if (Vector2.Dot(nHip, chain.N[0]) < 0f) nHip = -nHip;
+                chain.N[1] = nHip;
+                float projCrotch = Vector2.Dot(crotch - chain.C[1], nHip);
+                chain.R[1] = Mathf.Max(rWaist * 0.65f, Mathf.Abs(projCrotch));
+            }
+            else
+            {
+                if (Vector2.Dot(nPerp, chain.N[k - 1]) < 0f) nPerp = -nPerp;
+                chain.N[k] = nPerp;
+                chain.R[k] = (k == 2)
+                    ? Mathf.Lerp(chain.R[1], chain.R[4], 0.30f)
+                    : Mathf.Lerp(chain.R[1], chain.R[4], 0.65f);
+            }
+        }
+        if (Vector2.Dot(chain.N[4], chain.N[3]) < 0f) chain.N[4] = -chain.N[4];
+
+        return chain;
+    }
+
+    private static void ProjectOntoLegChain(
+        Vector2 pt,
+        in AnatomicalLegChain chain,
+        out int bestSeg,
+        out float bestU,
+        out float bestW,
+        out float bestDistSq)
+    {
+        bestSeg = 0;
+        bestU = 0f;
+        bestW = 0f;
+        bestDistSq = float.MaxValue;
+        float bestRawU = 0f;
+
+        for (int k = 0; k < 4; k++)
+        {
+            Vector2 a = chain.C[k];
+            Vector2 ab = chain.C[k + 1] - a;
+            float len2 = Mathf.Max(1e-8f, ab.sqrMagnitude);
+            float uRaw = Vector2.Dot(pt - a, ab) / len2;
+            float uClamp = Mathf.Clamp01(uRaw);
+            Vector2 cPt = a + ab * uClamp;
+            float d2 = (pt - cPt).sqrMagnitude;
+            if (d2 < bestDistSq)
+            {
+                bestDistSq = d2;
+                bestSeg = k;
+                bestU = uClamp;
+                bestRawU = uRaw;
+            }
+        }
+
+        // Cho phép ngoại suy mượt phía trên cạp (seg 0) hoặc phía dưới gấu (seg 3)
+        float uFinal = bestU;
+        if (bestSeg == 0 && bestRawU < 0f) uFinal = Mathf.Clamp(bestRawU, -0.5f, 1f);
+        else if (bestSeg == 3 && bestRawU > 1f) uFinal = Mathf.Clamp(bestRawU, 0f, 1.5f);
+
+        float uInterp = Mathf.Clamp01(uFinal);
+        Vector2 cFinal = chain.C[bestSeg] + (chain.C[bestSeg + 1] - chain.C[bestSeg]) * uFinal;
+        Vector2 nVec = Vector2.Lerp(chain.N[bestSeg], chain.N[bestSeg + 1], uInterp);
+        if (nVec.sqrMagnitude < 1e-6f) nVec = chain.N[bestSeg];
+        else nVec.Normalize();
+        float rVal = Mathf.Max(1e-4f, Mathf.Lerp(chain.R[bestSeg], chain.R[bestSeg + 1], uInterp));
+
+        bestU = uFinal;
+        bestW = Vector2.Dot(pt - cFinal, nVec) / rVal;
+    }
+
+    private static Vector2 ReconstructOnLegChain(in AnatomicalLegChain chain, int seg, float u, float w)
+    {
+        float uInterp = Mathf.Clamp01(u);
+        Vector2 cDst = chain.C[seg] + (chain.C[seg + 1] - chain.C[seg]) * u;
+        Vector2 nDst = Vector2.Lerp(chain.N[seg], chain.N[seg + 1], uInterp);
+        if (nDst.sqrMagnitude < 1e-6f) nDst = chain.N[seg];
+        else nDst.Normalize();
+        float rDst = Mathf.Max(1e-4f, Mathf.Lerp(chain.R[seg], chain.R[seg + 1], uInterp));
+        return cDst + nDst * (w * rDst);
+    }
+
     /// <summary>
-    /// P1 — Quét Zigzag / Boustrophedon trong vùng phun R (Baseline theo trang 7 file góp ý):
-    /// Cắt vùng R (đã co biên e và trừ vùng cấm phun) bằng họ đường song song trục chính ống quần cách nhau s = w*(1-r).
+    /// Ánh xạ 2D giải phẫu độc lập 2 ống quần giữa bất kỳ 2 bộ 12 điểm mốc nào (Canvas chuẩn <-> Ảnh Camera <-> Unity XZ):
+    /// Đảm bảo ống trái và ống phải tự xoay, co giãn, xòe rộng/hẹp độc lập theo đúng tư thế chiếc quần đích!
+    /// </summary>
+    public static Vector2 WarpPointAnatomical2D(Vector2 pt, Vector2[] src12, Vector2[] dst12)
+    {
+        if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return pt;
+
+        AnatomicalLegChain srcL = BuildLegChain(src12, true);
+        AnatomicalLegChain srcR = BuildLegChain(src12, false);
+
+        ProjectOntoLegChain(pt, srcL, out int segL, out float uL, out float wL, out float d2L);
+        ProjectOntoLegChain(pt, srcR, out int segR, out float uR, out float wR, out float d2R);
+
+        float absWL = Mathf.Abs(wL);
+        float absWR = Mathf.Abs(wR);
+        bool useLeft = (absWL <= 1.15f || absWR <= 1.15f) ? (absWL <= absWR) : (d2L <= d2R);
+
+        if (useLeft)
+        {
+            AnatomicalLegChain dstL = BuildLegChain(dst12, true);
+            return ReconstructOnLegChain(dstL, segL, uL, wL);
+        }
+        else
+        {
+            AnatomicalLegChain dstR = BuildLegChain(dst12, false);
+            return ReconstructOnLegChain(dstR, segR, uR, wR);
+        }
+    }
+
+    // =========================================================================
+    // 2C. LƯỚI TAM GIÁC 12 MỐC GIẢI PHẪU & TỌA ĐỘ TRỌNG TÂM (BARYCENTRIC - P3)
+    //     Đúng mô tả P3 trang 7 file góp ý:
+    //     "Chia quần thành lưới tam giác theo mốc; biểu diễn mỗi điểm quỹ đạo mẫu
+    //      bằng tọa độ trọng tâm (barycentric) trong tam giác chứa nó -> với quần mới:
+    //      phát hiện mốc -> dựng lại lưới -> biến đổi affine từng mảnh."
+    // =========================================================================
+
+    // 14 tam giác giải phẫu cố định không chồng lấp phủ kín toàn bộ thân quần & 2 ống
+    // (0:waist_L, 1:waist_C, 2:waist_R, 3:crotch, 4:thigh_L, 5:thigh_R,
+    //  6:knee_L, 7:knee_R, 8:cuff_L_out, 9:cuff_L_in, 10:cuff_R_in, 11:cuff_R_out)
+    private static readonly int[,] AnatomicalTriangles12 = new int[14, 3]
+    {
+        // Vùng cạp - hông - đáy đũng
+        { 0, 1, 3 },
+        { 1, 2, 3 },
+        // Ống quần trái (quanh tâm đùi 4 & tâm gối 6)
+        { 0, 3, 4 },
+        { 0, 4, 6 },
+        { 0, 6, 8 },
+        { 3, 9, 4 },
+        { 4, 9, 6 },
+        { 6, 9, 8 },
+        // Ống quần phải (quanh tâm đùi 5 & tâm gối 7)
+        { 2, 5, 3 },
+        { 2, 7, 5 },
+        { 2, 11, 7 },
+        { 3, 5, 10 },
+        { 5, 7, 10 },
+        { 7, 11, 10 }
+    };
+
+    private static bool ComputeBarycentric2D(Vector2 p, Vector2 a, Vector2 b, Vector2 c, out float u, out float v, out float w)
+    {
+        Vector2 v0 = b - a;
+        Vector2 v1 = c - a;
+        Vector2 v2 = p - a;
+        float den = v0.x * v1.y - v1.x * v0.y;
+        if (Mathf.Abs(den) < 1e-8f)
+        {
+            u = 1f; v = 0f; w = 0f;
+            return false;
+        }
+        float invDen = 1.0f / den;
+        v = (v2.x * v1.y - v1.x * v2.y) * invDen;
+        w = (v0.x * v2.y - v2.x * v0.y) * invDen;
+        u = 1.0f - v - w;
+        return true;
+    }
+
+    /// <summary>
+    /// Biến đổi Affine từng mảnh theo Tọa độ Trọng tâm (Barycentric Coordinates) trên lưới 14 tam giác của 12 mốc giải phẫu (Thuật toán P3 chuẩn).
+    /// </summary>
+    public static Vector2 WarpPointBarycentric12(Vector2 pt, Vector2[] src12, Vector2[] dst12)
+    {
+        if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return pt;
+
+        int bestTri = -1;
+        float bestMinCoord = float.MinValue;
+        float bestU = 1f, bestV = 0f, bestW = 0f;
+        float bestCenterDistSq = float.MaxValue;
+
+        int numTris = AnatomicalTriangles12.GetLength(0);
+        for (int t = 0; t < numTris; t++)
+        {
+            int i0 = AnatomicalTriangles12[t, 0];
+            int i1 = AnatomicalTriangles12[t, 1];
+            int i2 = AnatomicalTriangles12[t, 2];
+
+            if (!ComputeBarycentric2D(pt, src12[i0], src12[i1], src12[i2], out float u, out float v, out float w))
+                continue;
+
+            float minCoord = Mathf.Min(u, Mathf.Min(v, w));
+            if (minCoord >= -1e-4f)
+            {
+                // Điểm nằm trọn bên trong tam giác t
+                return u * dst12[i0] + v * dst12[i1] + w * dst12[i2];
+            }
+
+            // Nếu nằm ngoài biên nhẹ, ưu tiên tam giác gần nhất có độ âm nhỏ nhất
+            Vector2 triCenter = (src12[i0] + src12[i1] + src12[i2]) / 3f;
+            float d2 = (pt - triCenter).sqrMagnitude;
+            if (minCoord > bestMinCoord - 0.08f && d2 < bestCenterDistSq)
+            {
+                bestMinCoord = Mathf.Max(bestMinCoord, minCoord);
+                bestCenterDistSq = d2;
+                bestTri = t;
+                bestU = Mathf.Clamp(u, -0.35f, 1.35f);
+                bestV = Mathf.Clamp(v, -0.35f, 1.35f);
+                bestW = 1f - bestU - bestV;
+            }
+        }
+
+        if (bestTri >= 0)
+        {
+            int j0 = AnatomicalTriangles12[bestTri, 0];
+            int j1 = AnatomicalTriangles12[bestTri, 1];
+            int j2 = AnatomicalTriangles12[bestTri, 2];
+            return bestU * dst12[j0] + bestV * dst12[j1] + bestW * dst12[j2];
+        }
+
+        return WarpPointAnatomical2D(pt, src12, dst12);
+    }
+
+    // =========================================================================
+    // 2D. ĐƠN GIẢN HÓA BIÊN DOUGLAS-PEUCKER, PCA TRỤC ỐNG & VÙNG MẪU R (P1 & P2)
+    // =========================================================================
+
+    public static List<Vector2> SimplifyPolygonDouglasPeucker(List<Vector2> pts, float epsilon)
+    {
+        if (pts == null || pts.Count < 3) return pts != null ? new List<Vector2>(pts) : new List<Vector2>();
+        int n = pts.Count;
+        bool[] keep = new bool[n];
+        keep[0] = true;
+        keep[n - 1] = true;
+
+        var stack = new Stack<Vector2Int>();
+        stack.Push(new Vector2Int(0, n - 1));
+        while (stack.Count > 0)
+        {
+            Vector2Int seg = stack.Pop();
+            int first = seg.x, last = seg.y;
+            if (last <= first + 1) continue;
+
+            float maxDist = -1f;
+            int index = -1;
+            Vector2 a = pts[first], b = pts[last];
+            for (int i = first + 1; i < last; i++)
+            {
+                float d = DistToSegment2D(pts[i], a, b);
+                if (d > maxDist) { maxDist = d; index = i; }
+            }
+            if (maxDist > epsilon && index >= 0)
+            {
+                keep[index] = true;
+                stack.Push(new Vector2Int(first, index));
+                stack.Push(new Vector2Int(index, last));
+            }
+        }
+
+        var result = new List<Vector2>(n);
+        for (int i = 0; i < n; i++) if (keep[i]) result.Add(pts[i]);
+        return result;
+    }
+
+    /// <summary>
+    /// Tính trục chính PCA (Principal Component Analysis) của tập điểm 2D để chọn hướng quét giảm số lượt (Mục P1.2 trang 7 file góp ý).
+    /// </summary>
+    private static void ComputePcaAxes2D(List<Vector2> pts, Vector2 fallbackMajor, out Vector2 centroid, out Vector2 majorAxis, out Vector2 minorAxis)
+    {
+        centroid = Vector2.zero;
+        if (pts == null || pts.Count < 2)
+        {
+            majorAxis = fallbackMajor.sqrMagnitude > 1e-6f ? fallbackMajor.normalized : Vector2.up;
+            minorAxis = new Vector2(-majorAxis.y, majorAxis.x);
+            return;
+        }
+        for (int i = 0; i < pts.Count; i++) centroid += pts[i];
+        centroid /= pts.Count;
+
+        double cxx = 0.0, cxy = 0.0, cyy = 0.0;
+        for (int i = 0; i < pts.Count; i++)
+        {
+            double dx = pts[i].x - centroid.x;
+            double dy = pts[i].y - centroid.y;
+            cxx += dx * dx;
+            cxy += dx * dy;
+            cyy += dy * dy;
+        }
+        double trace = cxx + cyy;
+        double det = cxx * cyy - cxy * cxy;
+        double disc = Math.Max(0.0, trace * trace * 0.25 - det);
+        double lambda1 = trace * 0.5 + Math.Sqrt(disc);
+
+        Vector2 v;
+        if (Math.Abs(cxy) > 1e-8)
+            v = new Vector2((float)(lambda1 - cyy), (float)cxy);
+        else
+            v = (cxx >= cyy) ? Vector2.right : Vector2.up;
+
+        if (v.sqrMagnitude < 1e-8f) v = fallbackMajor;
+        v.Normalize();
+        if (fallbackMajor.sqrMagnitude > 1e-6f && Vector2.Dot(v, fallbackMajor) < 0f) v = -v;
+        majorAxis = v;
+        minorAxis = new Vector2(-majorAxis.y, majorAxis.x);
+    }
+
+    /// <summary>
+    /// Kiểm tra điểm 2D `ptXZ` trên ống `leg` (0=trái, 1=phải) có nằm trong vùng phun mục tiêu `R`
+    /// (giao giữa vùng mẫu hiệu ứng đã ánh xạ và biên quần Douglas-Peucker co khoảng `e`) hay không.
+    /// </summary>
+    private static bool IsPointInTemplateRegionR(
+        Vector2 ptXZ,
+        int leg,
+        List<Vector2> legTemplatePts,
+        float corridorRadiusM,
+        List<Vector3> contourWorld,
+        List<Vector3> landmarksWorldPos,
+        float borderMarginMm)
+    {
+        if (!IsInsideValidSprayZone(ptXZ.x, ptXZ.y, contourWorld, landmarksWorldPos, borderMarginMm, out _))
+            return false;
+
+        // Phân tách ô lồi Boustrophedon tại đáy đũng: điểm của ống nào phải gần trục ống đó hơn
+        Vector2 thighL = new Vector2(landmarksWorldPos[4].x, landmarksWorldPos[4].z);
+        Vector2 kneeL = new Vector2(landmarksWorldPos[6].x, landmarksWorldPos[6].z);
+        Vector2 thighR = new Vector2(landmarksWorldPos[5].x, landmarksWorldPos[5].z);
+        Vector2 kneeR = new Vector2(landmarksWorldPos[7].x, landmarksWorldPos[7].z);
+        float dL = DistToSegment2D(ptXZ, thighL, kneeL);
+        float dR = DistToSegment2D(ptXZ, thighR, kneeR);
+        if (leg == 0 && dL > dR + 0.008f) return false;
+        if (leg == 1 && dR > dL + 0.008f) return false;
+
+        if (legTemplatePts == null || legTemplatePts.Count == 0)
+            return true;
+
+        // Kiểm tra điểm nằm trong bao vùng mẫu hiệu ứng R trên ống chân hiện tại
+        float r2 = corridorRadiusM * corridorRadiusM;
+        for (int i = 0; i < legTemplatePts.Count; i++)
+        {
+            if ((ptXZ - legTemplatePts[i]).sqrMagnitude <= r2)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// P1 — Quét Zigzag / Boustrophedon trong vùng phun R (Chuẩn trang 7 file góp ý):
+    /// 1. Lấy vùng R từ mask/mẫu hiệu ứng, đơn giản hóa biên bằng Douglas-Peucker và co biên một khoảng e.
+    /// 2. Tách vùng lõm đáy quần thành 2 ô lồi từng ống (Boustrophedon decomposition), tìm trục dài từng ống bằng PCA để giảm số lượt.
+    /// 3. Cắt vùng R bằng họ đường song song cách nhau bước lượt s = w*(1-r), nối zigzag và tắt súng ở đoạn quay đầu ngoài R.
+    /// 4. Gán Z bề mặt (2.5D) với độ cao lớp phun thống nhất và hướng súng thẳng đứng (Baseline).
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP1Zigzag(
         DobotCR10AIKController ctrl,
         PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
         SprayTechParams tech,
         out float genTimeSec)
     {
         float t0 = Time.realtimeSinceStartup;
-        var strokes = new List<List<Vector3>>();
+        var strokesWorld = new List<List<Vector3>>();
 
         if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12)
         {
@@ -516,59 +936,111 @@ public static class TrajectoryEvaluationEngine
             return new List<DobotCR10AIKController.WaypointData>();
         }
 
-        float stepSM = Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 12f, 120f) * 0.001f;
-        float sampleStepM = 0.020f; // Lấy mẫu 20mm dọc mỗi đường quét
+        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
+        Vector2[] dst12XZ = new Vector2[12];
+        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
 
-        // Quét từng ống quần (trái & phải) theo trục chính PCA (đùi -> gối -> gấu)
-        int[,] legIdx = { { 4, 6, 8, 9 }, { 5, 7, 10, 11 } };
+        // Bước 1: Đơn giản hóa biên quần bằng Douglas-Peucker (epsilon = 4 mm)
+        List<Vector3> simplifiedContourWorld = ctrl.garmentContourWorld;
+        if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 8)
+        {
+            var raw2D = new List<Vector2>(ctrl.garmentContourWorld.Count);
+            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++)
+                raw2D.Add(new Vector2(ctrl.garmentContourWorld[i].x, ctrl.garmentContourWorld[i].z));
+            var dp2D = SimplifyPolygonDouglasPeucker(raw2D, 0.004f);
+            simplifiedContourWorld = new List<Vector3>(dp2D.Count);
+            for (int i = 0; i < dp2D.Count; i++)
+                simplifiedContourWorld.Add(new Vector3(dp2D[i].x, 0.02f, dp2D[i].y));
+        }
+
+        // Ánh xạ mẫu vẽ sang từng ống để xác định vùng cần phun R_leg (theo mẫu hiệu ứng của mã hàng)
+        var legTemplatePts = new List<Vector2>[2] { new List<Vector2>(), new List<Vector2>() };
+        if (templateStrokesUV != null)
+        {
+            Vector2 thighL = dst12XZ[4], kneeL = dst12XZ[6];
+            Vector2 thighR = dst12XZ[5], kneeR = dst12XZ[7];
+            for (int s = 0; s < templateStrokesUV.Count; s++)
+            {
+                var raw = templateStrokesUV[s];
+                if (raw == null || raw.Count < 2) continue;
+                var resampled = ResampleUV(raw, 0.015f);
+                for (int p = 0; p < resampled.Count; p++)
+                {
+                    Vector2 wpt = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
+                    float dL = DistToSegment2D(wpt, thighL, kneeL);
+                    float dR = DistToSegment2D(wpt, thighR, kneeR);
+                    legTemplatePts[dL <= dR ? 0 : 1].Add(wpt);
+                }
+            }
+        }
+
+        float stepSM = Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 90f) * 0.001f;
+        float sampleStepM = 0.016f;
+        float corridorRadiusM = Mathf.Max(stepSM * 0.85f, 0.026f);
+
+        // Bước 2 & 3: Boustrophedon decomposition cho 2 ô lồi (ống trái & ống phải), quét dọc trục dài PCA
         float[] marginAttempts = { tech.borderMarginMm, tech.borderMarginMm * 0.35f, 0f };
-        for (int attempt = 0; attempt < marginAttempts.Length && strokes.Count == 0; attempt++)
+        for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0; attempt++)
         {
             float activeMargin = marginAttempts[attempt];
+            List<Vector3> activeContour = (attempt < 2) ? simplifiedContourWorld : null;
+
             for (int leg = 0; leg < 2; leg++)
             {
-                Vector3 thigh = ctrl.landmarksWorldPos[legIdx[leg, 0]];
-                Vector3 knee = ctrl.landmarksWorldPos[legIdx[leg, 1]];
-                Vector3 cuffA = ctrl.landmarksWorldPos[legIdx[leg, 2]];
-                Vector3 cuffB = ctrl.landmarksWorldPos[legIdx[leg, 3]];
-                Vector3 cuffMid = 0.5f * (cuffA + cuffB);
+                Vector2 crotch = dst12XZ[3];
+                Vector2 thigh = dst12XZ[leg == 0 ? 4 : 5];
+                Vector2 knee = dst12XZ[leg == 0 ? 6 : 7];
+                Vector2 cuffMid = 0.5f * (dst12XZ[leg == 0 ? 8 : 10] + dst12XZ[leg == 0 ? 9 : 11]);
+                Vector2 fallbackLong = (cuffMid - crotch).sqrMagnitude > 1e-6f ? (cuffMid - crotch).normalized : Vector2.up;
 
-                Vector2 origin = new Vector2(thigh.x, thigh.z);
-                Vector2 axisLong = new Vector2(cuffMid.x - thigh.x, cuffMid.z - thigh.z);
-                float len = axisLong.magnitude;
-                if (len < 0.08f) continue;
-                axisLong /= len;
-                Vector2 axisCross = new Vector2(-axisLong.y, axisLong.x);
+                List<Vector2> pcaInput = legTemplatePts[leg].Count >= 3
+                    ? legTemplatePts[leg]
+                    : new List<Vector2> { crotch, thigh, knee, cuffMid };
+                ComputePcaAxes2D(pcaInput, fallbackLong, out Vector2 centroid, out Vector2 majorAxis, out Vector2 minorAxis);
 
-                float halfWidth = Mathf.Max(0.08f, Vector2.Distance(new Vector2(cuffA.x, cuffA.z), new Vector2(cuffB.x, cuffB.z)) * 0.85f);
-                int numPasses = Mathf.Clamp(Mathf.CeilToInt((2f * halfWidth) / stepSM), 2, 16);
-                float startLong = -0.10f;
-                float endLong = len * 0.78f;
+                // Xác định hộp bao của vùng R_leg trên hệ trục PCA (majorAxis = hướng quét dọc, minorAxis = bước dịch ngang s)
+                float minMajor = float.MaxValue, maxMajor = float.MinValue;
+                float minMinor = float.MaxValue, maxMinor = float.MinValue;
+                for (int i = 0; i < pcaInput.Count; i++)
+                {
+                    Vector2 rel = pcaInput[i] - centroid;
+                    float u = Vector2.Dot(rel, majorAxis);
+                    float v = Vector2.Dot(rel, minorAxis);
+                    if (u < minMajor) minMajor = u;
+                    if (u > maxMajor) maxMajor = u;
+                    if (v < minMinor) minMinor = v;
+                    if (v > maxMinor) maxMinor = v;
+                }
+                minMajor -= corridorRadiusM * 0.7f;
+                maxMajor += corridorRadiusM * 0.7f;
+                minMinor -= corridorRadiusM * 0.7f;
+                maxMinor += corridorRadiusM * 0.7f;
+
+                float spanMinor = Mathf.Max(stepSM, maxMinor - minMinor);
+                int numPasses = Mathf.Clamp(Mathf.CeilToInt(spanMinor / stepSM) + 1, 2, 18);
+                int numSteps = Mathf.Clamp(Mathf.CeilToInt((maxMajor - minMajor) / sampleStepM), 8, 90);
 
                 for (int pass = 0; pass < numPasses; pass++)
                 {
-                    float crossOff = -halfWidth + (pass + 0.5f) * (2f * halfWidth / numPasses);
+                    float vOff = (numPasses == 1)
+                        ? 0.5f * (minMinor + maxMinor)
+                        : Mathf.Lerp(minMinor, maxMinor, (float)pass / (numPasses - 1));
                     bool reverse = (pass % 2 == 1);
-                    List<Vector3> currentSeg = new List<Vector3>();
+                    var currentSeg = new List<Vector3>();
 
-                    int steps = Mathf.Max(4, Mathf.CeilToInt((endLong - startLong) / sampleStepM));
-                    for (int k = 0; k <= steps; k++)
+                    for (int k = 0; k <= numSteps; k++)
                     {
-                        float frac = reverse ? (1f - (float)k / steps) : ((float)k / steps);
-                        float along = Mathf.Lerp(startLong, endLong, frac);
-                        Vector2 ptXZ = origin + axisLong * along + axisCross * crossOff;
+                        float t = reverse ? (1f - (float)k / numSteps) : ((float)k / numSteps);
+                        float uOff = Mathf.Lerp(minMajor, maxMajor, t);
+                        Vector2 ptXZ = centroid + uOff * majorAxis + vOff * minorAxis;
 
-                        bool valid = (attempt < 2)
-                            ? IsInsideValidSprayZone(ptXZ.x, ptXZ.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, activeMargin, out _)
-                            : IsInsideValidSprayZone(ptXZ.x, ptXZ.y, null, ctrl.landmarksWorldPos, 0f, out _);
-
-                        if (valid)
+                        if (IsPointInTemplateRegionR(ptXZ, leg, legTemplatePts[leg], corridorRadiusM, activeContour, ctrl.landmarksWorldPos, activeMargin))
                         {
                             currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
                         }
                         else if (currentSeg.Count >= 2)
                         {
-                            strokes.Add(currentSeg);
+                            strokesWorld.Add(currentSeg);
                             currentSeg = new List<Vector3>();
                         }
                         else
@@ -576,19 +1048,154 @@ public static class TrajectoryEvaluationEngine
                             currentSeg.Clear();
                         }
                     }
-                    if (currentSeg.Count >= 2) strokes.Add(currentSeg);
+                    if (currentSeg.Count >= 2) strokesWorld.Add(currentSeg);
                 }
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokes, ctrl, plyLoader, tech, "P1_ZIGZAG");
+        // Bước 4: Gán Z (2.5D) và hướng súng thẳng đứng (Baseline P1)
+        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P1_ZIGZAG", useFixedVerticalNormal: true);
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
     }
 
     /// <summary>
-    /// P3 — Quỹ đạo mẫu tham số hóa theo 12 mốc giải phẫu (Trang 7 file góp ý):
-    /// Biến đổi các nét mẫu chuẩn (từ bảng vẽ 2D) sang quần mới theo 12 mốc -> cắt vùng cấm -> chiếu bề mặt 3D + pháp tuyến.
+    /// P2 — Đường theo hình dạng (Song song biên / theo trục giữa — Skeleton, Chuẩn trang 7 file góp ý):
+    /// 1. Tính trục giữa (medial axis / skeleton) của từng ống quần từ mask/12 mốc kèm bề rộng thực của ống từ đùi xuống gấu.
+    /// 2. Sinh các đường cong song song với trục giữa cách nhau bước s = w*(1-r) dọc theo ống.
+    /// 3. Bề rộng ống thu hẹp từ đùi xuống gấu -> tự động cắt bớt các lượt ngoài khi vượt quá biên vùng R hoặc bề rộng ống tại trạm đó.
+    /// 4. Gán Z bề mặt và hướng súng theo pháp tuyến đã làm mượt.
+    /// </summary>
+    public static List<DobotCR10AIKController.WaypointData> GenerateP2ShapeSkeleton(
+        DobotCR10AIKController ctrl,
+        PLYDirectLoader plyLoader,
+        List<List<Vector2>> templateStrokesUV,
+        string templateSize,
+        SprayTechParams tech,
+        out float genTimeSec)
+    {
+        float t0 = Time.realtimeSinceStartup;
+        var strokesWorld = new List<List<Vector3>>();
+
+        if (ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12)
+        {
+            genTimeSec = Time.realtimeSinceStartup - t0;
+            return new List<DobotCR10AIKController.WaypointData>();
+        }
+
+        Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
+        Vector2[] dst12XZ = new Vector2[12];
+        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
+
+        var legTemplatePts = new List<Vector2>[2] { new List<Vector2>(), new List<Vector2>() };
+        if (templateStrokesUV != null)
+        {
+            Vector2 thighL = dst12XZ[4], kneeL = dst12XZ[6];
+            Vector2 thighR = dst12XZ[5], kneeR = dst12XZ[7];
+            for (int s = 0; s < templateStrokesUV.Count; s++)
+            {
+                var raw = templateStrokesUV[s];
+                if (raw == null || raw.Count < 2) continue;
+                var resampled = ResampleUV(raw, 0.015f);
+                for (int p = 0; p < resampled.Count; p++)
+                {
+                    Vector2 wpt = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
+                    float dL = DistToSegment2D(wpt, thighL, kneeL);
+                    float dR = DistToSegment2D(wpt, thighR, kneeR);
+                    legTemplatePts[dL <= dR ? 0 : 1].Add(wpt);
+                }
+            }
+        }
+
+        float stepSM = Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 90f) * 0.001f;
+        float sampleStepM = 0.016f;
+        float corridorRadiusM = Mathf.Max(stepSM * 0.85f, 0.026f);
+
+        float[] marginAttempts = { tech.borderMarginMm, tech.borderMarginMm * 0.35f, 0f };
+        for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0; attempt++)
+        {
+            float activeMargin = marginAttempts[attempt];
+            List<Vector3> activeContour = (attempt < 2) ? ctrl.garmentContourWorld : null;
+            float marginM = activeMargin * 0.001f;
+
+            for (int leg = 0; leg < 2; leg++)
+            {
+                // Bước 1: Tính trục giữa (Skeleton) cong mượt dọc ống (Hông/Đũng -> Đùi -> Gối -> Gấu) và bán kính bề rộng ống R(s)
+                AnatomicalLegChain chain = BuildLegChain(dst12XZ, leg == 0);
+                float maxHalfWidthM = Mathf.Max(chain.R[1], Mathf.Max(chain.R[2], Mathf.Max(chain.R[3], chain.R[4])));
+                int maxSidePasses = Mathf.Clamp(Mathf.CeilToInt(maxHalfWidthM / stepSM), 1, 8);
+
+                float legLenM = Vector2.Distance(chain.C[1], chain.C[2])
+                              + Vector2.Distance(chain.C[2], chain.C[3])
+                              + Vector2.Distance(chain.C[3], chain.C[4]);
+                int steps = Mathf.Clamp(Mathf.CeilToInt(legLenM / sampleStepM), 14, 90);
+
+                // Bước 2: Sinh các đường song song với trục giữa cách đều bước s (từ ngoài vào tâm rồi sang mép đối diện)
+                for (int kPass = -maxSidePasses; kPass <= maxSidePasses; kPass++)
+                {
+                    float offsetMeters = kPass * stepSM;
+                    bool reverse = ((kPass + maxSidePasses) % 2 == 1);
+                    var currentSeg = new List<Vector3>();
+
+                    for (int k = 0; k <= steps; k++)
+                    {
+                        float frac = reverse ? (1f - (float)k / steps) : ((float)k / steps);
+                        float sVal = Mathf.Lerp(1.05f, 3.85f, frac);
+                        int seg = Mathf.Clamp(Mathf.FloorToInt(sVal), 1, 3);
+                        float uLocal = Mathf.Clamp01(sVal - seg);
+
+                        Vector2 centerPt = chain.C[seg] + (chain.C[seg + 1] - chain.C[seg]) * uLocal;
+                        Vector2 normalVec = Vector2.Lerp(chain.N[seg], chain.N[seg + 1], uLocal);
+                        if (normalVec.sqrMagnitude < 1e-6f) normalVec = chain.N[seg];
+                        else normalVec.Normalize();
+                        float localHalfWidthM = Mathf.Lerp(chain.R[seg], chain.R[seg + 1], uLocal);
+
+                        // Bước 3: Cắt lượt ngoài khi ống quần thu hẹp từ đùi xuống gấu (|offset| > bề rộng ống tại trạm - biên e)
+                        float usableHalfWidth = Mathf.Max(0.015f, localHalfWidthM - marginM * 0.6f);
+                        if (Mathf.Abs(offsetMeters) > usableHalfWidth)
+                        {
+                            if (currentSeg.Count >= 2)
+                            {
+                                strokesWorld.Add(currentSeg);
+                                currentSeg = new List<Vector3>();
+                            }
+                            else
+                            {
+                                currentSeg.Clear();
+                            }
+                            continue;
+                        }
+
+                        Vector2 ptXZ = centerPt + normalVec * offsetMeters;
+                        if (IsPointInTemplateRegionR(ptXZ, leg, legTemplatePts[leg], corridorRadiusM, activeContour, ctrl.landmarksWorldPos, activeMargin))
+                        {
+                            currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
+                        }
+                        else if (currentSeg.Count >= 2)
+                        {
+                            strokesWorld.Add(currentSeg);
+                            currentSeg = new List<Vector3>();
+                        }
+                        else
+                        {
+                            currentSeg.Clear();
+                        }
+                    }
+                    if (currentSeg.Count >= 2) strokesWorld.Add(currentSeg);
+                }
+            }
+        }
+
+        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P2_SKELETON", useFixedVerticalNormal: false);
+        genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
+        return wps;
+    }
+
+    /// <summary>
+    /// P3 — Quỹ đạo mẫu theo mốc (Tham số hóa Tọa độ Trọng tâm Barycentric trên Lưới Tam Giác 12 Mốc, Chuẩn trang 7 file góp ý):
+    /// 1. Chia quần chuẩn thành lưới 14 tam giác theo 12 mốc giải phẫu (YOLO11-pose).
+    /// 2. Biểu diễn mỗi điểm quỹ đạo mẫu bằng tọa độ trọng tâm (u, v, w) trong tam giác chứa nó.
+    /// 3. Với quần mới: dựng lại lưới từ 12 mốc thực -> biến đổi affine từng mảnh (u*A' + v*B' + w*C') -> cắt vùng cấm -> gán Z + pháp tuyến 3D.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP3LandmarkTemplate(
         DobotCR10AIKController ctrl,
@@ -608,7 +1215,8 @@ public static class TrajectoryEvaluationEngine
         }
 
         Vector2[] src12 = DobotCR10AIKController.GetCanonicalLandmarks12UV(templateSize);
-        Vector3[] dst12World = ctrl.landmarksWorldPos.ToArray();
+        Vector2[] dst12XZ = new Vector2[12];
+        for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
 
         for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
         {
@@ -616,12 +1224,14 @@ public static class TrajectoryEvaluationEngine
             {
                 var raw = templateStrokesUV[s];
                 if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.022f);
+                var resampled = ResampleUV(raw, 0.018f);
                 List<Vector3> worldStroke = new List<Vector3>();
 
                 for (int p = 0; p < resampled.Count; p++)
                 {
-                    Vector3 w = WarpUVToWorldAffinePlusResidual(resampled[p], src12, dst12World);
+                    // Biến đổi Affine từng mảnh bằng tọa độ trọng tâm (Barycentric) trên lưới tam giác 12 mốc
+                    Vector2 wXZ = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
+                    Vector3 w = new Vector3(wXZ.x, 0.02f, wXZ.y);
                     bool keep = (attempt == 0)
                         ? IsInsideValidSprayZone(w.x, w.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
                         : true;
@@ -643,18 +1253,139 @@ public static class TrajectoryEvaluationEngine
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P3_LANDMARK");
+        var wps = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P3_BARYCENTRIC12");
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
     }
 
     /// <summary>
-    /// P4 — Quỹ đạo mẫu + Đăng ký đám mây điểm (Trang 8 file góp ý):
-    /// 1. Khởi tạo thô bằng 12 mốc giải phẫu
-    /// 2. ICP cứng (Rigid Kabsch 2D) tinh chỉnh tịnh tiến + góc xoay so với contour/đám mây điểm mục tiêu
-    /// 3. Đăng ký phi cứng Thin Plate Spline (TPS RBF thực r² ln r) từ các cặp điểm tương ứng mốc + biên vải
-    /// 4. Chiếu lại lên bề mặt 3D thật, tính lại pháp tuyến, lùi khoảng d
-    /// 5. Tính sai số dư đăng ký (registration residual RMS mm) để đánh giá độ tin cậy!
+    /// Thuật toán ICP cứng 2D (Iterative Closest Point + Kabsch 2D SVD):
+    /// Khử sai lệch tịnh tiến & góc xoay cứng giữa đám mây biên mẫu đã khởi tạo P3 và đám mây biên thực của quần mới (voxel downsample ~5 mm).
+    /// </summary>
+    private static void RunRigidKabschIcp2D(
+        List<Vector2> sourceCloud,
+        List<Vector2> targetCloud,
+        int maxIterations,
+        float maxMatchRadiusM,
+        out float cosTheta,
+        out float sinTheta,
+        out Vector2 centroidSrc,
+        out Vector2 translation)
+    {
+        cosTheta = 1f;
+        sinTheta = 0f;
+        centroidSrc = Vector2.zero;
+        translation = Vector2.zero;
+        if (sourceCloud == null || targetCloud == null || sourceCloud.Count < 3 || targetCloud.Count < 3) return;
+
+        int n = sourceCloud.Count;
+        var curPts = new Vector2[n];
+        for (int i = 0; i < n; i++)
+        {
+            curPts[i] = sourceCloud[i];
+            centroidSrc += sourceCloud[i];
+        }
+        centroidSrc /= n;
+
+        float maxD2 = maxMatchRadiusM * maxMatchRadiusM;
+        var matchedSrc = new List<Vector2>(n);
+        var matchedDst = new List<Vector2>(n);
+
+        for (int iter = 0; iter < maxIterations; iter++)
+        {
+            matchedSrc.Clear();
+            matchedDst.Clear();
+
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 p = curPts[i];
+                float bestD2 = float.MaxValue;
+                Vector2 bestQ = p;
+                for (int j = 0; j < targetCloud.Count; j++)
+                {
+                    float d2 = (targetCloud[j] - p).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; bestQ = targetCloud[j]; }
+                }
+                if (bestD2 <= maxD2)
+                {
+                    matchedSrc.Add(p);
+                    matchedDst.Add(bestQ);
+                }
+            }
+
+            if (matchedSrc.Count < 3) break;
+
+            Vector2 meanP = Vector2.zero, meanQ = Vector2.zero;
+            for (int i = 0; i < matchedSrc.Count; i++)
+            {
+                meanP += matchedSrc[i];
+                meanQ += matchedDst[i];
+            }
+            meanP /= matchedSrc.Count;
+            meanQ /= matchedSrc.Count;
+
+            // Kabsch 2D: cực đại hóa trace(R^T * H) -> tan(dTheta) = (sum(px*qy - py*qx)) / (sum(px*qx + py*qy))
+            double sDot = 0.0, sCross = 0.0;
+            for (int i = 0; i < matchedSrc.Count; i++)
+            {
+                double px = matchedSrc[i].x - meanP.x;
+                double py = matchedSrc[i].y - meanP.y;
+                double qx = matchedDst[i].x - meanQ.x;
+                double qy = matchedDst[i].y - meanQ.y;
+                sDot += px * qx + py * qy;
+                sCross += px * qy - py * qx;
+            }
+
+            double dAngle = Math.Atan2(sCross, sDot);
+            // Giới hạn bước xoay ICP cứng trong vùng hợp lý để tránh trượt biên
+            dAngle = Math.Max(-0.18, Math.Min(0.18, dAngle));
+            float c = (float)Math.Cos(dAngle);
+            float s = (float)Math.Sin(dAngle);
+
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 rel = curPts[i] - meanP;
+                Vector2 rot = new Vector2(c * rel.x - s * rel.y, s * rel.x + c * rel.y);
+                curPts[i] = rot + meanQ;
+            }
+
+            if (Math.Abs(dAngle) < 1e-4 && (meanQ - meanP).sqrMagnitude < 1e-7f)
+                break;
+        }
+
+        // Tổng hợp phép biến đổi cứng tổng cộng: p_icp = R_total * (p - centroidSrc) + centroidSrc + translation
+        Vector2 meanAfter = Vector2.zero;
+        for (int i = 0; i < n; i++) meanAfter += curPts[i];
+        meanAfter /= n;
+
+        double totDot = 0.0, totCross = 0.0;
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 a = sourceCloud[i] - centroidSrc;
+            Vector2 b = curPts[i] - meanAfter;
+            totDot += a.x * b.x + a.y * b.y;
+            totCross += a.x * b.y - a.y * b.x;
+        }
+        double totAngle = Math.Atan2(totCross, totDot);
+        cosTheta = (float)Math.Cos(totAngle);
+        sinTheta = (float)Math.Sin(totAngle);
+        translation = meanAfter - centroidSrc;
+    }
+
+    private static Vector2 ApplyRigid2D(Vector2 pt, float cosT, float sinT, Vector2 center, Vector2 trans)
+    {
+        Vector2 rel = pt - center;
+        Vector2 rot = new Vector2(cosT * rel.x - sinT * rel.y, sinT * rel.x + cosT * rel.y);
+        return center + rot + trans;
+    }
+
+    /// <summary>
+    /// P4 — Quỹ đạo mẫu + Đăng ký đám mây điểm (Chuẩn 5 bước trang 8 file góp ý):
+    /// 1. Khởi tạo thô bằng lưới mốc Barycentric (P3).
+    /// 2. ICP cứng (Iterative Closest Point + Kabsch 2D) trên đám mây biên giảm mẫu (~5 mm) để khử tịnh tiến/quay.
+    /// 3. Đăng ký phi cứng Thin Plate Spline (TPS RBF thực r² ln r) từ các cặp điểm tương ứng sau ICP.
+    /// 4. Áp trường biến dạng lên quỹ đạo mẫu, chiếu lại lên bề mặt 3D thật, tính lại pháp tuyến, lùi khoảng d.
+    /// 5. Tính sai số dư sau đăng ký (registrationResidualMm); nếu vượt ngưỡng thì chặn & báo kỹ sư.
     /// </summary>
     public static List<DobotCR10AIKController.WaypointData> GenerateP4RegistrationTpsIcp(
         DobotCR10AIKController ctrl,
@@ -679,122 +1410,93 @@ public static class TrajectoryEvaluationEngine
         Vector2[] dst12XZ = new Vector2[12];
         for (int i = 0; i < 12; i++) dst12XZ[i] = new Vector2(ctrl.landmarksWorldPos[i].x, ctrl.landmarksWorldPos[i].z);
 
-        // Bước 1: Fit phép biến đổi đồng dạng 2D (tự nhận diện phản chiếu trục V giữa Canvas 2D và Unity XZ!)
-        Vector2 muS = Vector2.zero, muD = Vector2.zero;
-        for (int i = 0; i < 12; i++) { muS += src12[i]; muD += dst12XZ[i]; }
-        muS /= 12f; muD /= 12f;
+        // Bước 1: Khởi tạo thô bằng mốc (P3 Barycentric) và giảm mẫu biên ~5 mm (0.005 m)
+        Vector2[] polyTemplate = DobotCR10AIKController.GetJeansPolygonForSize(templateSize);
+        var templateLoopUV = new List<Vector2>(polyTemplate);
+        if (templateLoopUV.Count > 0) templateLoopUV.Add(templateLoopUV[0]);
+        List<Vector2> denseTemplateEdgeUV = ResampleUV(templateLoopUV, 0.015f);
 
-        float bestFlipY = 1f;
-        float bestScore = -1f;
-        float theta = 0f;
-        float scale = 1f;
-        for (int f = 0; f < 2; f++)
+        var initBoundaryCloud = new List<Vector2>(denseTemplateEdgeUV.Count);
+        for (int i = 0; i < denseTemplateEdgeUV.Count; i++)
         {
-            float flipY = (f == 0) ? 1f : -1f;
-            float numCos = 0f, numSin = 0f, denS = 0f;
-            for (int i = 0; i < 12; i++)
-            {
-                Vector2 s0 = new Vector2(src12[i].x - muS.x, (src12[i].y - muS.y) * flipY);
-                Vector2 d0 = dst12XZ[i] - muD;
-                numCos += s0.x * d0.x + s0.y * d0.y;
-                numSin += s0.x * d0.y - s0.y * d0.x;
-                denS += s0.sqrMagnitude;
-            }
-            float mag = Mathf.Sqrt(numCos * numCos + numSin * numSin);
-            if (mag > bestScore)
-            {
-                bestScore = mag;
-                bestFlipY = flipY;
-                theta = Mathf.Atan2(numSin, numCos);
-                scale = mag / Mathf.Max(1e-6f, denS);
-            }
+            initBoundaryCloud.Add(WarpPointBarycentric12(denseTemplateEdgeUV[i], src12, dst12XZ));
         }
 
-        // Lưu toàn bộ ma trận biến đổi 2x2 + vector tịnh tiến (cập nhật xuyên suốt Bước 1 + ICP Bước 2)
-        float cT = Mathf.Cos(theta), sT = Mathf.Sin(theta);
-        float m00 = cT * scale, m01 = -sT * scale * bestFlipY;
-        float m10 = sT * scale, m11 = cT * scale * bestFlipY;
-        Vector2 tTotal = muD - new Vector2(m00 * muS.x + m01 * muS.y, m10 * muS.x + m11 * muS.y);
-
-        Func<Vector2, Vector2> applyRigidInit = (pt) => new Vector2(
-            m00 * pt.x + m01 * pt.y + tTotal.x,
-            m10 * pt.x + m11 * pt.y + tTotal.y
-        );
-
-        Vector2[] alignedSrc = new Vector2[12];
-        for (int i = 0; i < 12; i++)
-        {
-            alignedSrc[i] = applyRigidInit(src12[i]);
-        }
-
-        // Bước 2: Tinh chỉnh ICP cứng (5 vòng lặp ghép điểm biên tương ứng với garmentContourWorld nếu có)
+        // Giảm mẫu đám mây biên thực của quần mới với voxel ~5 mm (0.005 m) theo đúng Mục P4.3 trang 8
+        var targetContourCloud = new List<Vector2>();
         if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 12)
         {
-            Vector2[] polyTemplate = DobotCR10AIKController.GetJeansPolygonForSize(templateSize);
-            int mPoly = polyTemplate.Length;
-            Vector2[] srcContour = new Vector2[mPoly];
-            for (int i = 0; i < mPoly; i++)
+            for (int k = 0; k < ctrl.garmentContourWorld.Count; k++)
             {
-                srcContour[i] = applyRigidInit(polyTemplate[i]);
-            }
-
-            for (int icpIter = 0; icpIter < 5; icpIter++)
-            {
-                Vector2 meanA = Vector2.zero, meanB = Vector2.zero;
-                Vector2[] matched = new Vector2[mPoly];
-                for (int i = 0; i < mPoly; i++)
+                Vector2 cand = new Vector2(ctrl.garmentContourWorld[k].x, ctrl.garmentContourWorld[k].z);
+                if (targetContourCloud.Count == 0 || (cand - targetContourCloud[targetContourCloud.Count - 1]).sqrMagnitude >= 0.005f * 0.005f)
                 {
-                    Vector2 best = srcContour[i];
-                    float bestD2 = float.MaxValue;
-                    for (int k = 0; k < ctrl.garmentContourWorld.Count; k++)
-                    {
-                        Vector2 cand = new Vector2(ctrl.garmentContourWorld[k].x, ctrl.garmentContourWorld[k].z);
-                        float d2 = (cand - srcContour[i]).sqrMagnitude;
-                        if (d2 < bestD2) { bestD2 = d2; best = cand; }
-                    }
-                    matched[i] = best;
-                    meanA += srcContour[i];
-                    meanB += best;
-                }
-                meanA /= mPoly; meanB /= mPoly;
-                float nc = 0f, ns = 0f;
-                for (int i = 0; i < mPoly; i++)
-                {
-                    Vector2 a0 = srcContour[i] - meanA;
-                    Vector2 b0 = matched[i] - meanB;
-                    nc += a0.x * b0.x + a0.y * b0.y;
-                    ns += a0.x * b0.y - a0.y * b0.x;
-                }
-                float dAng = Mathf.Atan2(ns, nc);
-                float ca = Mathf.Cos(dAng), sa = Mathf.Sin(dAng);
-
-                // Tích lũy phép biến đổi ICP vào (m00..m11, tTotal) để Bước 4 áp đúng cùng hệ quy chiếu!
-                float nm00 = ca * m00 - sa * m10;
-                float nm01 = ca * m01 - sa * m11;
-                float nm10 = sa * m00 + ca * m10;
-                float nm11 = sa * m01 + ca * m11;
-                Vector2 dT = tTotal - meanA;
-                tTotal = new Vector2(ca * dT.x - sa * dT.y, sa * dT.x + ca * dT.y) + meanB;
-                m00 = nm00; m01 = nm01; m10 = nm10; m11 = nm11;
-
-                for (int i = 0; i < mPoly; i++)
-                {
-                    srcContour[i] = applyRigidInit(polyTemplate[i]);
-                }
-                for (int i = 0; i < 12; i++)
-                {
-                    alignedSrc[i] = applyRigidInit(src12[i]);
+                    targetContourCloud.Add(cand);
                 }
             }
         }
 
-        // Bước 3: Giải trường biến dạng phi cứng TPS RBF thực (2D -> 2D: ΔX, ΔZ) trên 12 cặp mốc đã qua ICP
-        int n = 12;
+        // Bước 2: Chạy ICP cứng (Kabsch 2D, 10 vòng lặp) để khử tịnh tiến/quay giữa mẫu khởi tạo và đám mây biên thực
+        float icpCos = 1f, icpSin = 0f;
+        Vector2 icpCenter = Vector2.zero, icpTrans = Vector2.zero;
+        if (targetContourCloud.Count >= 6)
+        {
+            RunRigidKabschIcp2D(initBoundaryCloud, targetContourCloud, 10, 0.065f, out icpCos, out icpSin, out icpCenter, out icpTrans);
+        }
+
+        // Bước 3: Lập tập cặp điểm tương ứng (12 mốc + các điểm biên sau ICP cứng) để giải trường biến dạng phi cứng TPS RBF
+        var tpsSrcList = new List<Vector2>(28);
+        var tpsDstList = new List<Vector2>(28);
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 p3Pt = WarpPointBarycentric12(src12[i], src12, dst12XZ);
+            Vector2 icpPt = ApplyRigid2D(p3Pt, icpCos, icpSin, icpCenter, icpTrans);
+            tpsSrcList.Add(icpPt);
+            tpsDstList.Add(dst12XZ[i]);
+        }
+
+        double boundaryErrSumSq = 0.0;
+        int boundaryMatchCount = 0;
+        if (targetContourCloud.Count >= 12)
+        {
+            for (int i = 0; i < polyTemplate.Length; i++)
+            {
+                Vector2 p3Edge = WarpPointBarycentric12(polyTemplate[i], src12, dst12XZ);
+                Vector2 icpEdge = ApplyRigid2D(p3Edge, icpCos, icpSin, icpCenter, icpTrans);
+
+                bool tooCloseToExisting = false;
+                for (int j = 0; j < tpsSrcList.Count; j++)
+                {
+                    if (Vector2.Distance(icpEdge, tpsSrcList[j]) < 0.035f) { tooCloseToExisting = true; break; }
+                }
+                if (tooCloseToExisting) continue;
+
+                Vector2 bestCand = icpEdge;
+                float bestD2 = float.MaxValue;
+                for (int k = 0; k < targetContourCloud.Count; k++)
+                {
+                    float d2 = (targetContourCloud[k] - icpEdge).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; bestCand = targetContourCloud[k]; }
+                }
+                float distM = Mathf.Sqrt(bestD2);
+                if (distM <= 0.055f)
+                {
+                    tpsSrcList.Add(icpEdge);
+                    tpsDstList.Add(bestCand);
+                    boundaryErrSumSq += distM * distM;
+                    boundaryMatchCount++;
+                }
+            }
+        }
+
+        // Giải hệ phương trình Thin Plate Spline (TPS RBF r² ln r)
+        Vector2[] tpsCtrl = tpsSrcList.ToArray();
+        int n = tpsCtrl.Length;
         int dim = n + 3;
         double[,] K = new double[dim, dim];
         double[] rhsX = new double[dim];
         double[] rhsZ = new double[dim];
-        const double lambda = 1e-4;
+        const double lambda = 2e-4;
 
         for (int i = 0; i < n; i++)
         {
@@ -803,48 +1505,52 @@ public static class TrajectoryEvaluationEngine
                 if (i == j) K[i, j] = lambda;
                 else
                 {
-                    double dx = alignedSrc[i].x - alignedSrc[j].x;
-                    double dz = alignedSrc[i].y - alignedSrc[j].y;
+                    double dx = tpsCtrl[i].x - tpsCtrl[j].x;
+                    double dz = tpsCtrl[i].y - tpsCtrl[j].y;
                     K[i, j] = TpsKernel(dx * dx + dz * dz);
                 }
             }
-            K[i, n] = 1.0; K[i, n + 1] = alignedSrc[i].x; K[i, n + 2] = alignedSrc[i].y;
-            K[n, i] = 1.0; K[n + 1, i] = alignedSrc[i].x; K[n + 2, i] = alignedSrc[i].y;
-            rhsX[i] = dst12XZ[i].x;
-            rhsZ[i] = dst12XZ[i].y;
+            K[i, n] = 1.0; K[i, n + 1] = tpsCtrl[i].x; K[i, n + 2] = tpsCtrl[i].y;
+            K[n, i] = 1.0; K[n + 1, i] = tpsCtrl[i].x; K[n + 2, i] = tpsCtrl[i].y;
+            rhsX[i] = tpsDstList[i].x;
+            rhsZ[i] = tpsDstList[i].y;
         }
 
         bool okX = SolveLinearSystem(K, rhsX, out double[] wX);
         bool okZ = SolveLinearSystem(K, rhsZ, out double[] wZ);
 
-        // Tính sai số dư sau đăng ký (RMS mm) trên 12 mốc
+        // Bước 5: Tính sai số dư sau đăng ký (RMS mm) trên 12 mốc + các cặp biên ICP
         double sumSqErr = 0.0;
         for (int i = 0; i < n; i++)
         {
-            Vector2 pred = okX && okZ
-                ? EvalTps2D(alignedSrc[i], alignedSrc, wX, wZ)
-                : dst12XZ[i];
-            double errM = Vector2.Distance(pred, dst12XZ[i]);
-            // Cộng thêm sai lệch biến dạng thực so với khởi tạo cứng để phản ánh độ cong/nhăn
-            double rigidDiffM = Vector2.Distance(alignedSrc[i], dst12XZ[i]);
-            sumSqErr += errM * errM + 0.04 * rigidDiffM * rigidDiffM;
+            Vector2 pred = (okX && okZ)
+                ? EvalTps2D(tpsCtrl[i], tpsCtrl, wX, wZ)
+                : tpsDstList[i];
+            double errM = Vector2.Distance(pred, tpsDstList[i]);
+            sumSqErr += errM * errM;
         }
-        registrationResidualMm = (float)(Math.Sqrt(sumSqErr / n) * 1000.0);
+        double rmsM = Math.Sqrt((sumSqErr + 0.05 * boundaryErrSumSq) / Math.Max(1, n));
+        registrationResidualMm = (float)(rmsM * 1000.0);
 
-        // Bước 4: Áp trường biến dạng lên toàn bộ nét vẽ mẫu & chiếu lên bề mặt 3D thật
+        // Bước 4: Áp chuỗi biến đổi (P3 Barycentric -> ICP cứng Kabsch -> TPS phi cứng) lên quỹ đạo mẫu & chiếu lên bề mặt 3D thật
         for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
         {
             for (int s = 0; s < templateStrokesUV.Count; s++)
             {
                 var raw = templateStrokesUV[s];
                 if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.022f);
+                var resampled = ResampleUV(raw, 0.018f);
                 List<Vector3> worldStroke = new List<Vector3>();
 
                 for (int p = 0; p < resampled.Count; p++)
                 {
-                    Vector2 qInit = applyRigidInit(resampled[p]);
-                    Vector2 qWarped = (okX && okZ) ? EvalTps2D(qInit, alignedSrc, wX, wZ) : qInit;
+                    Vector2 qP3 = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
+                    Vector2 qIcp = ApplyRigid2D(qP3, icpCos, icpSin, icpCenter, icpTrans);
+                    Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
+                    if (Vector2.Distance(qWarped, qP3) > 0.035f)
+                    {
+                        qWarped = qP3 + (qWarped - qP3).normalized * 0.035f;
+                    }
 
                     bool keep = (attempt == 0)
                         ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
@@ -1019,7 +1725,7 @@ public static class TrajectoryEvaluationEngine
         // Cộng dồn mật độ phun Gauss dọc từng đoạn quỹ đạo đang bật phun (sprayOn == true)
         float sigmaM = Mathf.Max(0.006f, tech.gaussSigmaMm * 0.001f);
         float invTwoSigma2 = 1f / (2f * sigmaM * sigmaM);
-        float d0M = Mathf.Max(0.02f, tech.standoffMm * 0.001f);
+        float d0M = Mathf.Max(0.01f, GetEffectiveSprayHeightMm(ctrl, tech) * 0.001f);
         float speedM = Mathf.Max(0.02f, tech.targetSpeedMmPerSec * 0.001f);
         float gaussNorm = tech.flowRateQ / (Mathf.Sqrt(2f * Mathf.PI) * sigmaM * speedM * 1000f);
 
@@ -1261,16 +1967,22 @@ public static class TrajectoryEvaluationEngine
                 geoErrs.Add(wp.posError_mm);
             }
 
-            // 2. E_d: Khoảng cách thực từ TCP -> bề mặt dọc trục súng so với standoff d
+            // 2. E_d: Khoảng cách thực từ TCP -> bề mặt dọc trục súng so với độ cao lớp phun đặt
             float surfY = 0.020f;
             Vector3 surfNormW = Vector3.up;
-            if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(wp.targetPosWorld_m.x, wp.targetPosWorld_m.z, out float py, out Vector3 pn))
+            if (ctrl.SampleCompensatedSurface(wp.targetPosWorld_m.x, wp.targetPosWorld_m.z, out float cy, out Vector3 cn))
+            {
+                surfY = cy;
+                surfNormW = cn;
+            }
+            else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(wp.targetPosWorld_m.x, wp.targetPosWorld_m.z, out float py, out Vector3 pn))
             {
                 surfY = py;
                 surfNormW = pn;
             }
+            float targetStandoffMm = GetEffectiveSprayHeightMm(ctrl, tech);
             float actualDistMm = Mathf.Abs((wp.targetPosWorld_m.y - surfY) * 1000f);
-            float eD = Mathf.Abs(actualDistMm - tech.standoffMm);
+            float eD = Mathf.Abs(actualDistMm - targetStandoffMm);
             distErrs.Add(eD);
 
             // 3. E_theta: Góc giữa trục súng (-z_tool) và pháp tuyến bề mặt

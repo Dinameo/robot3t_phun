@@ -728,12 +728,13 @@ public class AiServerClient : MonoBehaviour
                 {
                     ikController.RefreshRealCameraImageForCurrentSample();
                 }
-                ikController.LoadLandmarksAndSegmentationForSample(result.sample, false, result.landmarks_json);
-                if (!string.IsNullOrEmpty(result.trajectory_csv))
+                ikController.LoadLandmarksAndSegmentationForSample(result.sample, true, result.landmarks_json);
+                if (!string.IsNullOrEmpty(result.trajectory_csv) &&
+                    (result.garment_size == "CUSTOM_3D" || ikController.waypoints == null || ikController.waypoints.Count == 0))
                 {
                     ikController.LoadNamedTrajectory(result.trajectory_csv);
-                    ikController.RunDiagnostics();
                 }
+                ikController.RunDiagnostics();
             }
 
             if (string.IsNullOrEmpty(detSize)) detSize = "S";

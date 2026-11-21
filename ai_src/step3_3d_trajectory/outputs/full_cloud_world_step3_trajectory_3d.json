@@ -1,0 +1,5863 @@
+{
+  "sample": "full_cloud_world",
+  "ai_inference_ms": 10926.15,
+  "total_pipeline_time_s": 15.891,
+  "standoff_distance_mm": 150.0,
+  "landmarks_3d": {
+    "waist_left": {
+      "id": 0,
+      "pixel_u": 1370,
+      "pixel_v": 169,
+      "confidence": 0.9082,
+      "xyz_mm": [
+        385.38,
+        -369.53,
+        1680.08
+      ],
+      "normal_xyz": [
+        0.0475,
+        -0.0091,
+        -0.9988
+      ]
+    },
+    "waist_center": {
+      "id": 1,
+      "pixel_u": 1353,
+      "pixel_v": 371,
+      "confidence": 0.8846,
+      "xyz_mm": [
+        352.11,
+        -167.27,
+        1601.76
+      ],
+      "normal_xyz": [
+        0.9011,
+        -0.2094,
+        -0.3798
+      ]
+    },
+    "waist_right": {
+      "id": 2,
+      "pixel_u": 1381,
+      "pixel_v": 564,
+      "confidence": 0.8684,
+      "xyz_mm": [
+        395.27,
+        10.19,
+        1677.19
+      ],
+      "normal_xyz": [
+        0.45,
+        0.2803,
+        -0.8479
+      ]
+    },
+    "crotch": {
+      "id": 3,
+      "pixel_u": 995,
+      "pixel_v": 404,
+      "confidence": 0.9739,
+      "xyz_mm": [
+        25.45,
+        -137.73,
+        1620.92
+      ],
+      "normal_xyz": [
+        -0.6959,
+        -0.643,
+        -0.3199
+      ]
+    },
+    "thigh_left": {
+      "id": 4,
+      "pixel_u": 821,
+      "pixel_v": 239,
+      "confidence": 0.984,
+      "xyz_mm": [
+        -131.89,
+        -284.64,
+        1582.05
+      ],
+      "normal_xyz": [
+        -0.186,
+        0.5952,
+        -0.7818
+      ]
+    },
+    "thigh_right": {
+      "id": 5,
+      "pixel_u": 837,
+      "pixel_v": 584,
+      "confidence": 0.9842,
+      "xyz_mm": [
+        -116.0,
+        27.03,
+        1561.0
+      ],
+      "normal_xyz": [
+        0.045,
+        0.2216,
+        -0.9741
+      ]
+    },
+    "knee_left": {
+      "id": 6,
+      "pixel_u": 623,
+      "pixel_v": 218,
+      "confidence": 0.9863,
+      "xyz_mm": [
+        -306.41,
+        -299.78,
+        1562.42
+      ],
+      "normal_xyz": [
+        0.062,
+        0.6274,
+        -0.7762
+      ]
+    },
+    "knee_right": {
+      "id": 7,
+      "pixel_u": 634,
+      "pixel_v": 631,
+      "confidence": 0.9884,
+      "xyz_mm": [
+        -298.21,
+        68.93,
+        1572.8
+      ],
+      "normal_xyz": [
+        0.032,
+        0.6396,
+        -0.768
+      ]
+    },
+    "cuff_left_outer": {
+      "id": 8,
+      "pixel_u": 285,
+      "pixel_v": 101,
+      "confidence": 0.9466,
+      "xyz_mm": [
+        -641.48,
+        -427.0,
+        1649.91
+      ],
+      "normal_xyz": [
+        0.0181,
+        -0.0042,
+        -0.9998
+      ]
+    },
+    "cuff_left_inner": {
+      "id": 9,
+      "pixel_u": 271,
+      "pixel_v": 267,
+      "confidence": 0.9545,
+      "xyz_mm": [
+        -653.15,
+        -270.09,
+        1647.45
+      ],
+      "normal_xyz": [
+        -0.7837,
+        0.4473,
+        -0.431
+      ]
+    },
+    "cuff_right_inner": {
+      "id": 10,
+      "pixel_u": 286,
+      "pixel_v": 581,
+      "confidence": 0.9545,
+      "xyz_mm": [
+        -638.46,
+        25.64,
+        1645.12
+      ],
+      "normal_xyz": [
+        -0.2517,
+        -0.919,
+        -0.3033
+      ]
+    },
+    "cuff_right_outer": {
+      "id": 11,
+      "pixel_u": 306,
+      "pixel_v": 745,
+      "confidence": 0.9531,
+      "xyz_mm": [
+        -619.84,
+        179.47,
+        1645.44
+      ],
+      "normal_xyz": [
+        -0.0436,
+        0.0348,
+        -0.9984
+      ]
+    }
+  },
+  "comparison_metrics": {
+    "P1_Zigzag_Raster": {
+      "num_waypoints": 140,
+      "path_length_mm": 10356.6,
+      "cycle_time_s": 31.91,
+      "mean_standoff_error_Ed_mm": 0.0032,
+      "mean_normal_angle_error_deg": 0.0,
+      "target_coverage_pct": 100.0,
+      "table_overspray_R_drop_pct": 1.282
+    },
+    "P3_Anatomical_Centerline_Feathering": {
+      "num_waypoints": 176,
+      "path_length_mm": 5870.8,
+      "cycle_time_s": 18.46,
+      "mean_standoff_error_Ed_mm": 0.0034,
+      "mean_normal_angle_error_deg": 0.0,
+      "target_coverage_pct": 100.0,
+      "table_overspray_R_drop_pct": 1.946
+    },
+    "P4_TPS_NonRigid_Template": {
+      "num_waypoints": 134,
+      "path_length_mm": 5999.9,
+      "cycle_time_s": 19.32,
+      "mean_standoff_error_Ed_mm": 0.0033,
+      "mean_normal_angle_error_deg": 0.0,
+      "target_coverage_pct": 81.69,
+      "table_overspray_R_drop_pct": 2.238
+    }
+  },
+  "recommended_trajectory_P3_waypoints": [
+    {
+      "id": 0,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        926,
+        286
+      ],
+      "surface_xyz_mm": [
+        -37.78,
+        -244.84,
+        1599.58
+      ],
+      "normal_xyz": [
+        -0.157,
+        0.6138,
+        -0.7737
+      ],
+      "tcp_xyz_mm": [
+        -61.33,
+        -152.76,
+        1483.53
+      ],
+      "tcp_rpy_deg": [
+        -38.38,
+        9.25,
+        -154.18
+      ]
+    },
+    {
+      "id": 1,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        908,
+        284
+      ],
+      "surface_xyz_mm": [
+        -54.09,
+        -247.2,
+        1602.94
+      ],
+      "normal_xyz": [
+        -0.1836,
+        0.6378,
+        -0.748
+      ],
+      "tcp_xyz_mm": [
+        -81.63,
+        -151.53,
+        1490.73
+      ],
+      "tcp_rpy_deg": [
+        -40.8,
+        8.85,
+        -153.84
+      ]
+    },
+    {
+      "id": 2,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        890,
+        282
+      ],
+      "surface_xyz_mm": [
+        -70.43,
+        -249.44,
+        1605.47
+      ],
+      "normal_xyz": [
+        -0.1954,
+        0.6082,
+        -0.7694
+      ],
+      "tcp_xyz_mm": [
+        -99.74,
+        -158.21,
+        1490.06
+      ],
+      "tcp_rpy_deg": [
+        -39.08,
+        7.66,
+        -152.87
+      ]
+    },
+    {
+      "id": 3,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        871,
+        281
+      ],
+      "surface_xyz_mm": [
+        -87.81,
+        -250.95,
+        1608.06
+      ],
+      "normal_xyz": [
+        -0.1807,
+        0.529,
+        -0.8292
+      ],
+      "tcp_xyz_mm": [
+        -114.93,
+        -171.6,
+        1483.68
+      ],
+      "tcp_rpy_deg": [
+        -33.5,
+        6.09,
+        -152.02
+      ]
+    },
+    {
+      "id": 4,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        853,
+        279
+      ],
+      "surface_xyz_mm": [
+        -104.19,
+        -252.99,
+        1609.16
+      ],
+      "normal_xyz": [
+        -0.1741,
+        0.5052,
+        -0.8452
+      ],
+      "tcp_xyz_mm": [
+        -130.3,
+        -177.2,
+        1482.37
+      ],
+      "tcp_rpy_deg": [
+        -31.85,
+        5.7,
+        -151.9
+      ]
+    },
+    {
+      "id": 5,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        835,
+        277
+      ],
+      "surface_xyz_mm": [
+        -121.6,
+        -255.3,
+        1611.75
+      ],
+      "normal_xyz": [
+        -0.1651,
+        0.5538,
+        -0.8161
+      ],
+      "tcp_xyz_mm": [
+        -146.36,
+        -172.22,
+        1489.34
+      ],
+      "tcp_rpy_deg": [
+        -34.62,
+        7.39,
+        -152.85
+      ]
+    },
+    {
+      "id": 6,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        816,
+        275
+      ],
+      "surface_xyz_mm": [
+        -138.93,
+        -257.22,
+        1612.21
+      ],
+      "normal_xyz": [
+        -0.0348,
+        0.6031,
+        -0.7969
+      ],
+      "tcp_xyz_mm": [
+        -144.15,
+        -166.76,
+        1492.67
+      ],
+      "tcp_rpy_deg": [
+        -34.78,
+        14.01,
+        -157.48
+      ]
+    },
+    {
+      "id": 7,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        787,
+        272
+      ],
+      "surface_xyz_mm": [
+        -164.84,
+        -259.34,
+        1608.76
+      ],
+      "normal_xyz": [
+        0.0204,
+        0.6329,
+        -0.7739
+      ],
+      "tcp_xyz_mm": [
+        -161.78,
+        -164.4,
+        1492.67
+      ],
+      "tcp_rpy_deg": [
+        -35.95,
+        17.06,
+        -159.82
+      ]
+    },
+    {
+      "id": 8,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        758,
+        268
+      ],
+      "surface_xyz_mm": [
+        -191.06,
+        -262.95,
+        1606.68
+      ],
+      "normal_xyz": [
+        0.0777,
+        0.7286,
+        -0.6805
+      ],
+      "tcp_xyz_mm": [
+        -179.4,
+        -153.66,
+        1504.6
+      ],
+      "tcp_rpy_deg": [
+        -43.16,
+        21.1,
+        -165.09
+      ]
+    },
+    {
+      "id": 9,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        728,
+        265
+      ],
+      "surface_xyz_mm": [
+        -218.15,
+        -263.57,
+        1599.83
+      ],
+      "normal_xyz": [
+        0.2048,
+        0.6416,
+        -0.7392
+      ],
+      "tcp_xyz_mm": [
+        -187.44,
+        -167.32,
+        1488.95
+      ],
+      "tcp_rpy_deg": [
+        -34.71,
+        25.95,
+        -165.42
+      ]
+    },
+    {
+      "id": 10,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        699,
+        262
+      ],
+      "surface_xyz_mm": [
+        -242.99,
+        -264.86,
+        1589.36
+      ],
+      "normal_xyz": [
+        0.1351,
+        0.6438,
+        -0.7531
+      ],
+      "tcp_xyz_mm": [
+        -222.73,
+        -168.28,
+        1476.39
+      ],
+      "tcp_rpy_deg": [
+        -35.36,
+        22.56,
+        -163.45
+      ]
+    },
+    {
+      "id": 11,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        670,
+        259
+      ],
+      "surface_xyz_mm": [
+        -268.84,
+        -267.44,
+        1588.79
+      ],
+      "normal_xyz": [
+        -0.1108,
+        0.5176,
+        -0.8484
+      ],
+      "tcp_xyz_mm": [
+        -285.45,
+        -189.79,
+        1461.52
+      ],
+      "tcp_rpy_deg": [
+        -30.88,
+        8.67,
+        -153.77
+      ]
+    },
+    {
+      "id": 12,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        641,
+        256
+      ],
+      "surface_xyz_mm": [
+        -295.73,
+        -270.96,
+        1591.61
+      ],
+      "normal_xyz": [
+        -0.0931,
+        0.4299,
+        -0.8981
+      ],
+      "tcp_xyz_mm": [
+        -309.7,
+        -206.48,
+        1456.9
+      ],
+      "tcp_rpy_deg": [
+        -25.18,
+        7.09,
+        -153.07
+      ]
+    },
+    {
+      "id": 13,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        613,
+        253
+      ],
+      "surface_xyz_mm": [
+        -321.23,
+        -274.0,
+        1592.44
+      ],
+      "normal_xyz": [
+        -0.0436,
+        0.6463,
+        -0.7618
+      ],
+      "tcp_xyz_mm": [
+        -327.77,
+        -177.05,
+        1478.17
+      ],
+      "tcp_rpy_deg": [
+        -38.08,
+        14.56,
+        -158.35
+      ]
+    },
+    {
+      "id": 14,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        589,
+        251
+      ],
+      "surface_xyz_mm": [
+        -342.83,
+        -275.82,
+        1591.65
+      ],
+      "normal_xyz": [
+        0.0258,
+        0.8161,
+        -0.5774
+      ],
+      "tcp_xyz_mm": [
+        -338.97,
+        -153.41,
+        1505.04
+      ],
+      "tcp_rpy_deg": [
+        -52.19,
+        19.62,
+        -167.21
+      ]
+    },
+    {
+      "id": 15,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        564,
+        248
+      ],
+      "surface_xyz_mm": [
+        -363.51,
+        -277.16,
+        1582.88
+      ],
+      "normal_xyz": [
+        0.0655,
+        0.8852,
+        -0.4605
+      ],
+      "tcp_xyz_mm": [
+        -353.68,
+        -144.37,
+        1513.8
+      ],
+      "tcp_rpy_deg": [
+        -60.53,
+        20.59,
+        -173.0
+      ]
+    },
+    {
+      "id": 16,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        540,
+        246
+      ],
+      "surface_xyz_mm": [
+        -384.12,
+        -277.41,
+        1579.44
+      ],
+      "normal_xyz": [
+        0.0783,
+        0.8851,
+        -0.4588
+      ],
+      "tcp_xyz_mm": [
+        -372.38,
+        -144.64,
+        1510.63
+      ],
+      "tcp_rpy_deg": [
+        -60.57,
+        21.0,
+        -173.62
+      ]
+    },
+    {
+      "id": 17,
+      "leg": "left",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        516,
+        244
+      ],
+      "surface_xyz_mm": [
+        -404.03,
+        -278.16,
+        1572.6
+      ],
+      "normal_xyz": [
+        0.0948,
+        0.8353,
+        -0.5416
+      ],
+      "tcp_xyz_mm": [
+        -389.81,
+        -152.87,
+        1491.36
+      ],
+      "tcp_rpy_deg": [
+        -54.2,
+        22.19,
+        -171.24
+      ]
+    },
+    {
+      "id": 18,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        518,
+        226
+      ],
+      "surface_xyz_mm": [
+        -399.21,
+        -291.97,
+        1560.55
+      ],
+      "normal_xyz": [
+        0.039,
+        0.549,
+        -0.8349
+      ],
+      "tcp_xyz_mm": [
+        -393.37,
+        -209.62,
+        1435.31
+      ],
+      "tcp_rpy_deg": [
+        -29.64,
+        16.12,
+        -158.05
+      ]
+    },
+    {
+      "id": 19,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        542,
+        228
+      ],
+      "surface_xyz_mm": [
+        -378.37,
+        -291.37,
+        1561.82
+      ],
+      "normal_xyz": [
+        0.0365,
+        0.6357,
+        -0.771
+      ],
+      "tcp_xyz_mm": [
+        -372.9,
+        -196.0,
+        1446.17
+      ],
+      "tcp_rpy_deg": [
+        -35.91,
+        17.83,
+        -160.36
+      ]
+    },
+    {
+      "id": 20,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        566,
+        231
+      ],
+      "surface_xyz_mm": [
+        -357.72,
+        -289.12,
+        1566.18
+      ],
+      "normal_xyz": [
+        0.0794,
+        0.737,
+        -0.6712
+      ],
+      "tcp_xyz_mm": [
+        -345.8,
+        -178.58,
+        1465.49
+      ],
+      "tcp_rpy_deg": [
+        -43.92,
+        21.27,
+        -165.52
+      ]
+    },
+    {
+      "id": 21,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        591,
+        233
+      ],
+      "surface_xyz_mm": [
+        -336.48,
+        -288.13,
+        1570.19
+      ],
+      "normal_xyz": [
+        0.0946,
+        0.7926,
+        -0.6024
+      ],
+      "tcp_xyz_mm": [
+        -322.29,
+        -169.25,
+        1479.83
+      ],
+      "tcp_rpy_deg": [
+        -49.39,
+        22.26,
+        -168.81
+      ]
+    },
+    {
+      "id": 22,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        615,
+        235
+      ],
+      "surface_xyz_mm": [
+        -315.81,
+        -286.92,
+        1574.17
+      ],
+      "normal_xyz": [
+        0.0672,
+        0.8157,
+        -0.5746
+      ],
+      "tcp_xyz_mm": [
+        -305.73,
+        -164.57,
+        1487.97
+      ],
+      "tcp_rpy_deg": [
+        -51.95,
+        21.2,
+        -168.91
+      ]
+    },
+    {
+      "id": 23,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        643,
+        238
+      ],
+      "surface_xyz_mm": [
+        -292.1,
+        -285.36,
+        1581.48
+      ],
+      "normal_xyz": [
+        -0.0026,
+        0.7485,
+        -0.6631
+      ],
+      "tcp_xyz_mm": [
+        -292.5,
+        -173.08,
+        1482.01
+      ],
+      "tcp_rpy_deg": [
+        -45.8,
+        17.98,
+        -163.09
+      ]
+    },
+    {
+      "id": 24,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        672,
+        241
+      ],
+      "surface_xyz_mm": [
+        -265.52,
+        -281.96,
+        1579.45
+      ],
+      "normal_xyz": [
+        -0.1388,
+        0.5152,
+        -0.8458
+      ],
+      "tcp_xyz_mm": [
+        -286.33,
+        -204.69,
+        1452.58
+      ],
+      "tcp_rpy_deg": [
+        -31.47,
+        7.43,
+        -153.0
+      ]
+    },
+    {
+      "id": 25,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        701,
+        244
+      ],
+      "surface_xyz_mm": [
+        -239.65,
+        -280.14,
+        1579.02
+      ],
+      "normal_xyz": [
+        0.1265,
+        0.6047,
+        -0.7863
+      ],
+      "tcp_xyz_mm": [
+        -220.68,
+        -189.43,
+        1461.08
+      ],
+      "tcp_rpy_deg": [
+        -32.34,
+        21.46,
+        -161.8
+      ]
+    },
+    {
+      "id": 26,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        730,
+        247
+      ],
+      "surface_xyz_mm": [
+        -213.81,
+        -278.55,
+        1586.25
+      ],
+      "normal_xyz": [
+        0.1664,
+        0.634,
+        -0.7552
+      ],
+      "tcp_xyz_mm": [
+        -188.84,
+        -183.45,
+        1472.96
+      ],
+      "tcp_rpy_deg": [
+        -34.29,
+        23.92,
+        -163.97
+      ]
+    },
+    {
+      "id": 27,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        759,
+        251
+      ],
+      "surface_xyz_mm": [
+        -188.66,
+        -276.18,
+        1593.82
+      ],
+      "normal_xyz": [
+        0.1399,
+        0.5663,
+        -0.8123
+      ],
+      "tcp_xyz_mm": [
+        -167.67,
+        -191.24,
+        1471.98
+      ],
+      "tcp_rpy_deg": [
+        -29.29,
+        21.36,
+        -160.87
+      ]
+    },
+    {
+      "id": 28,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        789,
+        254
+      ],
+      "surface_xyz_mm": [
+        -162.05,
+        -274.0,
+        1598.88
+      ],
+      "normal_xyz": [
+        0.0498,
+        0.5858,
+        -0.8089
+      ],
+      "tcp_xyz_mm": [
+        -154.58,
+        -186.13,
+        1477.54
+      ],
+      "tcp_rpy_deg": [
+        -32.02,
+        17.44,
+        -159.26
+      ]
+    },
+    {
+      "id": 29,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        818,
+        257
+      ],
+      "surface_xyz_mm": [
+        -136.08,
+        -271.53,
+        1599.84
+      ],
+      "normal_xyz": [
+        -0.1493,
+        0.7682,
+        -0.6226
+      ],
+      "tcp_xyz_mm": [
+        -158.47,
+        -156.3,
+        1506.46
+      ],
+      "tcp_rpy_deg": [
+        -50.32,
+        12.81,
+        -158.58
+      ]
+    },
+    {
+      "id": 30,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        837,
+        259
+      ],
+      "surface_xyz_mm": [
+        -118.78,
+        -269.38,
+        1598.01
+      ],
+      "normal_xyz": [
+        -0.1536,
+        0.7914,
+        -0.5916
+      ],
+      "tcp_xyz_mm": [
+        -141.82,
+        -150.66,
+        1509.27
+      ],
+      "tcp_rpy_deg": [
+        -52.61,
+        13.03,
+        -159.24
+      ]
+    },
+    {
+      "id": 31,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        855,
+        261
+      ],
+      "surface_xyz_mm": [
+        -101.51,
+        -267.02,
+        1595.23
+      ],
+      "normal_xyz": [
+        -0.155,
+        0.7733,
+        -0.6148
+      ],
+      "tcp_xyz_mm": [
+        -124.76,
+        -151.02,
+        1503.01
+      ],
+      "tcp_rpy_deg": [
+        -50.94,
+        12.7,
+        -158.54
+      ]
+    },
+    {
+      "id": 32,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        873,
+        263
+      ],
+      "surface_xyz_mm": [
+        -85.16,
+        -264.64,
+        1592.08
+      ],
+      "normal_xyz": [
+        -0.1984,
+        0.7549,
+        -0.6251
+      ],
+      "tcp_xyz_mm": [
+        -114.92,
+        -151.41,
+        1498.31
+      ],
+      "tcp_rpy_deg": [
+        -50.46,
+        10.95,
+        -156.36
+      ]
+    },
+    {
+      "id": 33,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        891,
+        265
+      ],
+      "surface_xyz_mm": [
+        -68.91,
+        -262.41,
+        1589.69
+      ],
+      "normal_xyz": [
+        -0.1425,
+        0.7128,
+        -0.6868
+      ],
+      "tcp_xyz_mm": [
+        -90.29,
+        -155.5,
+        1486.68
+      ],
+      "tcp_rpy_deg": [
+        -45.39,
+        12.04,
+        -157.07
+      ]
+    },
+    {
+      "id": 34,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        910,
+        267
+      ],
+      "surface_xyz_mm": [
+        -51.87,
+        -260.53,
+        1589.23
+      ],
+      "normal_xyz": [
+        -0.1362,
+        0.6229,
+        -0.7704
+      ],
+      "tcp_xyz_mm": [
+        -72.31,
+        -167.1,
+        1473.68
+      ],
+      "tcp_rpy_deg": [
+        -38.47,
+        10.28,
+        -155.0
+      ]
+    },
+    {
+      "id": 35,
+      "leg": "left",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        928,
+        268
+      ],
+      "surface_xyz_mm": [
+        -34.85,
+        -259.4,
+        1587.97
+      ],
+      "normal_xyz": [
+        -0.1727,
+        0.6319,
+        -0.7556
+      ],
+      "tcp_xyz_mm": [
+        -60.75,
+        -164.61,
+        1474.63
+      ],
+      "tcp_rpy_deg": [
+        -40.07,
+        9.1,
+        -154.06
+      ]
+    },
+    {
+      "id": 36,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        930,
+        251
+      ],
+      "surface_xyz_mm": [
+        -32.8,
+        -272.29,
+        1574.53
+      ],
+      "normal_xyz": [
+        -0.2208,
+        0.6588,
+        -0.7192
+      ],
+      "tcp_xyz_mm": [
+        -65.92,
+        -173.47,
+        1466.65
+      ],
+      "tcp_rpy_deg": [
+        -43.42,
+        8.04,
+        -153.06
+      ]
+    },
+    {
+      "id": 37,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.332,
+      "feedrate_mms": 373.5,
+      "pixel_uv": [
+        912,
+        249
+      ],
+      "surface_xyz_mm": [
+        -49.69,
+        -275.34,
+        1577.58
+      ],
+      "normal_xyz": [
+        -0.1929,
+        0.6435,
+        -0.7407
+      ],
+      "tcp_xyz_mm": [
+        -78.63,
+        -178.82,
+        1466.47
+      ],
+      "tcp_rpy_deg": [
+        -41.48,
+        8.65,
+        -153.66
+      ]
+    },
+    {
+      "id": 38,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.516,
+      "feedrate_mms": 331.3,
+      "pixel_uv": [
+        893,
+        247
+      ],
+      "surface_xyz_mm": [
+        -66.74,
+        -276.98,
+        1580.52
+      ],
+      "normal_xyz": [
+        -0.0951,
+        0.5432,
+        -0.8342
+      ],
+      "tcp_xyz_mm": [
+        -81.01,
+        -195.49,
+        1455.39
+      ],
+      "tcp_rpy_deg": [
+        -32.11,
+        10.0,
+        -154.61
+      ]
+    },
+    {
+      "id": 39,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.659,
+      "feedrate_mms": 298.4,
+      "pixel_uv": [
+        875,
+        245
+      ],
+      "surface_xyz_mm": [
+        -82.66,
+        -278.42,
+        1578.34
+      ],
+      "normal_xyz": [
+        -0.0482,
+        0.5534,
+        -0.8315
+      ],
+      "tcp_xyz_mm": [
+        -89.89,
+        -195.41,
+        1453.62
+      ],
+      "tcp_rpy_deg": [
+        -31.68,
+        12.27,
+        -156.01
+      ]
+    },
+    {
+      "id": 40,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.774,
+      "feedrate_mms": 272.1,
+      "pixel_uv": [
+        857,
+        243
+      ],
+      "surface_xyz_mm": [
+        -98.72,
+        -280.41,
+        1579.24
+      ],
+      "normal_xyz": [
+        -0.1244,
+        0.6377,
+        -0.7602
+      ],
+      "tcp_xyz_mm": [
+        -117.38,
+        -184.75,
+        1465.22
+      ],
+      "tcp_rpy_deg": [
+        -39.23,
+        11.09,
+        -155.7
+      ]
+    },
+    {
+      "id": 41,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.864,
+      "feedrate_mms": 251.4,
+      "pixel_uv": [
+        838,
+        241
+      ],
+      "surface_xyz_mm": [
+        -116.69,
+        -281.82,
+        1581.6
+      ],
+      "normal_xyz": [
+        -0.1921,
+        0.5889,
+        -0.785
+      ],
+      "tcp_xyz_mm": [
+        -145.5,
+        -193.49,
+        1463.85
+      ],
+      "tcp_rpy_deg": [
+        -37.68,
+        7.27,
+        -152.62
+      ]
+    },
+    {
+      "id": 42,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.931,
+      "feedrate_mms": 236.0,
+      "pixel_uv": [
+        820,
+        239
+      ],
+      "surface_xyz_mm": [
+        -132.82,
+        -284.64,
+        1582.22
+      ],
+      "normal_xyz": [
+        -0.1897,
+        0.5881,
+        -0.7862
+      ],
+      "tcp_xyz_mm": [
+        -161.27,
+        -196.42,
+        1464.29
+      ],
+      "tcp_rpy_deg": [
+        -37.56,
+        7.35,
+        -152.69
+      ]
+    },
+    {
+      "id": 43,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.975,
+      "feedrate_mms": 225.7,
+      "pixel_uv": [
+        790,
+        236
+      ],
+      "surface_xyz_mm": [
+        -159.77,
+        -287.77,
+        1583.86
+      ],
+      "normal_xyz": [
+        -0.0775,
+        0.7415,
+        -0.6665
+      ],
+      "tcp_xyz_mm": [
+        -171.39,
+        -176.54,
+        1483.89
+      ],
+      "tcp_rpy_deg": [
+        -46.38,
+        14.96,
+        -160.22
+      ]
+    },
+    {
+      "id": 44,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.997,
+      "feedrate_mms": 220.6,
+      "pixel_uv": [
+        761,
+        233
+      ],
+      "surface_xyz_mm": [
+        -185.89,
+        -290.84,
+        1585.27
+      ],
+      "normal_xyz": [
+        0.1049,
+        0.643,
+        -0.7586
+      ],
+      "tcp_xyz_mm": [
+        -170.15,
+        -194.39,
+        1471.47
+      ],
+      "tcp_rpy_deg": [
+        -35.59,
+        21.11,
+        -162.55
+      ]
+    },
+    {
+      "id": 45,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.997,
+      "feedrate_mms": 220.6,
+      "pixel_uv": [
+        732,
+        230
+      ],
+      "surface_xyz_mm": [
+        -211.58,
+        -291.96,
+        1577.2
+      ],
+      "normal_xyz": [
+        0.2374,
+        0.5922,
+        -0.77
+      ],
+      "tcp_xyz_mm": [
+        -175.97,
+        -203.13,
+        1461.7
+      ],
+      "tcp_rpy_deg": [
+        -30.34,
+        26.85,
+        -164.19
+      ]
+    },
+    {
+      "id": 46,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.975,
+      "feedrate_mms": 225.7,
+      "pixel_uv": [
+        703,
+        226
+      ],
+      "surface_xyz_mm": [
+        -236.16,
+        -294.07,
+        1567.42
+      ],
+      "normal_xyz": [
+        0.0806,
+        0.629,
+        -0.7732
+      ],
+      "tcp_xyz_mm": [
+        -224.06,
+        -199.72,
+        1451.44
+      ],
+      "tcp_rpy_deg": [
+        -34.77,
+        19.73,
+        -161.38
+      ]
+    },
+    {
+      "id": 47,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.931,
+      "feedrate_mms": 236.0,
+      "pixel_uv": [
+        674,
+        223
+      ],
+      "surface_xyz_mm": [
+        -262.14,
+        -297.12,
+        1568.59
+      ],
+      "normal_xyz": [
+        -0.0388,
+        0.6779,
+        -0.7342
+      ],
+      "tcp_xyz_mm": [
+        -267.95,
+        -195.44,
+        1458.47
+      ],
+      "tcp_rpy_deg": [
+        -40.41,
+        15.39,
+        -159.42
+      ]
+    },
+    {
+      "id": 48,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.864,
+      "feedrate_mms": 251.4,
+      "pixel_uv": [
+        645,
+        220
+      ],
+      "surface_xyz_mm": [
+        -287.4,
+        -298.42,
+        1565.34
+      ],
+      "normal_xyz": [
+        0.0746,
+        0.6831,
+        -0.7265
+      ],
+      "tcp_xyz_mm": [
+        -276.21,
+        -195.96,
+        1456.36
+      ],
+      "tcp_rpy_deg": [
+        -39.2,
+        20.36,
+        -163.13
+      ]
+    },
+    {
+      "id": 49,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.774,
+      "feedrate_mms": 272.1,
+      "pixel_uv": [
+        617,
+        217
+      ],
+      "surface_xyz_mm": [
+        -311.59,
+        -300.6,
+        1561.72
+      ],
+      "normal_xyz": [
+        0.0814,
+        0.6174,
+        -0.7824
+      ],
+      "tcp_xyz_mm": [
+        -299.38,
+        -207.99,
+        1444.36
+      ],
+      "tcp_rpy_deg": [
+        -33.87,
+        19.55,
+        -161.02
+      ]
+    },
+    {
+      "id": 50,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.659,
+      "feedrate_mms": 298.4,
+      "pixel_uv": [
+        593,
+        215
+      ],
+      "surface_xyz_mm": [
+        -331.94,
+        -301.63,
+        1557.02
+      ],
+      "normal_xyz": [
+        0.0571,
+        0.537,
+        -0.8416
+      ],
+      "tcp_xyz_mm": [
+        -323.38,
+        -221.07,
+        1430.77
+      ],
+      "tcp_rpy_deg": [
+        -28.51,
+        16.71,
+        -158.18
+      ]
+    },
+    {
+      "id": 51,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.516,
+      "feedrate_mms": 331.3,
+      "pixel_uv": [
+        568,
+        213
+      ],
+      "surface_xyz_mm": [
+        -353.72,
+        -303.17,
+        1556.15
+      ],
+      "normal_xyz": [
+        0.015,
+        0.3507,
+        -0.9364
+      ],
+      "tcp_xyz_mm": [
+        -351.47,
+        -250.55,
+        1415.7
+      ],
+      "tcp_rpy_deg": [
+        -18.03,
+        10.02,
+        -154.31
+      ]
+    },
+    {
+      "id": 52,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.332,
+      "feedrate_mms": 373.5,
+      "pixel_uv": [
+        544,
+        210
+      ],
+      "surface_xyz_mm": [
+        -374.87,
+        -305.9,
+        1554.46
+      ],
+      "normal_xyz": [
+        0.0174,
+        0.2923,
+        -0.9562
+      ],
+      "tcp_xyz_mm": [
+        -372.26,
+        -262.06,
+        1411.03
+      ],
+      "tcp_rpy_deg": [
+        -14.76,
+        8.59,
+        -153.86
+      ]
+    },
+    {
+      "id": 53,
+      "leg": "left",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        520,
+        208
+      ],
+      "surface_xyz_mm": [
+        -395.82,
+        -306.63,
+        1553.92
+      ],
+      "normal_xyz": [
+        0.0262,
+        0.2587,
+        -0.9656
+      ],
+      "tcp_xyz_mm": [
+        -391.88,
+        -267.82,
+        1409.08
+      ],
+      "tcp_rpy_deg": [
+        -12.74,
+        8.12,
+        -153.77
+      ]
+    },
+    {
+      "id": 54,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        521,
+        190
+      ],
+      "surface_xyz_mm": [
+        -394.83,
+        -323.26,
+        1552.12
+      ],
+      "normal_xyz": [
+        0.0197,
+        0.0487,
+        -0.9986
+      ],
+      "tcp_xyz_mm": [
+        -391.87,
+        -315.95,
+        1402.32
+      ],
+      "tcp_rpy_deg": [
+        -2.0,
+        2.25,
+        -153.74
+      ]
+    },
+    {
+      "id": 55,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        546,
+        192
+      ],
+      "surface_xyz_mm": [
+        -372.61,
+        -321.32,
+        1552.12
+      ],
+      "normal_xyz": [
+        0.0122,
+        0.0567,
+        -0.9983
+      ],
+      "tcp_xyz_mm": [
+        -370.78,
+        -312.81,
+        1402.37
+      ],
+      "tcp_rpy_deg": [
+        -2.6,
+        2.07,
+        -153.66
+      ]
+    },
+    {
+      "id": 56,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        570,
+        195
+      ],
+      "surface_xyz_mm": [
+        -351.35,
+        -318.48,
+        1553.23
+      ],
+      "normal_xyz": [
+        0.0173,
+        0.1165,
+        -0.993
+      ],
+      "tcp_xyz_mm": [
+        -348.76,
+        -300.99,
+        1404.27
+      ],
+      "tcp_rpy_deg": [
+        -5.54,
+        3.89,
+        -153.47
+      ]
+    },
+    {
+      "id": 57,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        594,
+        197
+      ],
+      "surface_xyz_mm": [
+        -330.14,
+        -316.58,
+        1553.44
+      ],
+      "normal_xyz": [
+        -0.0246,
+        0.0917,
+        -0.9955
+      ],
+      "tcp_xyz_mm": [
+        -333.83,
+        -302.81,
+        1404.12
+      ],
+      "tcp_rpy_deg": [
+        -5.34,
+        1.11,
+        -153.23
+      ]
+    },
+    {
+      "id": 58,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        619,
+        199
+      ],
+      "surface_xyz_mm": [
+        -308.01,
+        -314.65,
+        1552.33
+      ],
+      "normal_xyz": [
+        0.0136,
+        0.3083,
+        -0.9512
+      ],
+      "tcp_xyz_mm": [
+        -305.98,
+        -268.41,
+        1409.65
+      ],
+      "tcp_rpy_deg": [
+        -15.72,
+        8.83,
+        -153.92
+      ]
+    },
+    {
+      "id": 59,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        647,
+        202
+      ],
+      "surface_xyz_mm": [
+        -284.08,
+        -312.65,
+        1556.57
+      ],
+      "normal_xyz": [
+        0.0415,
+        0.4577,
+        -0.8882
+      ],
+      "tcp_xyz_mm": [
+        -277.85,
+        -244.0,
+        1423.35
+      ],
+      "tcp_rpy_deg": [
+        -23.71,
+        14.07,
+        -156.22
+      ]
+    },
+    {
+      "id": 60,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        676,
+        206
+      ],
+      "surface_xyz_mm": [
+        -258.22,
+        -309.58,
+        1556.4
+      ],
+      "normal_xyz": [
+        -0.0341,
+        0.5407,
+        -0.8405
+      ],
+      "tcp_xyz_mm": [
+        -263.34,
+        -228.48,
+        1430.32
+      ],
+      "tcp_rpy_deg": [
+        -30.54,
+        12.59,
+        -156.11
+      ]
+    },
+    {
+      "id": 61,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        705,
+        209
+      ],
+      "surface_xyz_mm": [
+        -233.02,
+        -307.27,
+        1557.89
+      ],
+      "normal_xyz": [
+        0.1054,
+        0.5338,
+        -0.839
+      ],
+      "tcp_xyz_mm": [
+        -217.2,
+        -227.2,
+        1432.04
+      ],
+      "tcp_rpy_deg": [
+        -27.48,
+        18.97,
+        -159.17
+      ]
+    },
+    {
+      "id": 62,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        734,
+        212
+      ],
+      "surface_xyz_mm": [
+        -208.32,
+        -305.81,
+        1565.84
+      ],
+      "normal_xyz": [
+        0.1334,
+        0.6868,
+        -0.7145
+      ],
+      "tcp_xyz_mm": [
+        -188.32,
+        -202.79,
+        1458.66
+      ],
+      "tcp_rpy_deg": [
+        -39.03,
+        23.1,
+        -165.16
+      ]
+    },
+    {
+      "id": 63,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        763,
+        215
+      ],
+      "surface_xyz_mm": [
+        -182.53,
+        -304.33,
+        1571.45
+      ],
+      "normal_xyz": [
+        0.0159,
+        0.7453,
+        -0.6666
+      ],
+      "tcp_xyz_mm": [
+        -180.15,
+        -192.54,
+        1471.47
+      ],
+      "tcp_rpy_deg": [
+        -45.28,
+        18.69,
+        -163.61
+      ]
+    },
+    {
+      "id": 64,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        792,
+        218
+      ],
+      "surface_xyz_mm": [
+        -156.58,
+        -301.18,
+        1569.61
+      ],
+      "normal_xyz": [
+        0.0174,
+        0.6667,
+        -0.7451
+      ],
+      "tcp_xyz_mm": [
+        -153.97,
+        -201.17,
+        1457.84
+      ],
+      "tcp_rpy_deg": [
+        -38.6,
+        17.56,
+        -160.79
+      ]
+    },
+    {
+      "id": 65,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        821,
+        221
+      ],
+      "surface_xyz_mm": [
+        -131.09,
+        -299.74,
+        1573.17
+      ],
+      "normal_xyz": [
+        0.0,
+        0.5404,
+        -0.8414
+      ],
+      "tcp_xyz_mm": [
+        -131.09,
+        -218.69,
+        1446.95
+      ],
+      "tcp_rpy_deg": [
+        -29.81,
+        14.12,
+        -156.93
+      ]
+    },
+    {
+      "id": 66,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        840,
+        223
+      ],
+      "surface_xyz_mm": [
+        -113.38,
+        -297.12,
+        1572.57
+      ],
+      "normal_xyz": [
+        -0.2575,
+        0.4329,
+        -0.8639
+      ],
+      "tcp_xyz_mm": [
+        -152.01,
+        -232.19,
+        1442.98
+      ],
+      "tcp_rpy_deg": [
+        -30.24,
+        0.25,
+        -148.82
+      ]
+    },
+    {
+      "id": 67,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        859,
+        225
+      ],
+      "surface_xyz_mm": [
+        -96.43,
+        -294.87,
+        1570.55
+      ],
+      "normal_xyz": [
+        -0.015,
+        0.4166,
+        -0.909
+      ],
+      "tcp_xyz_mm": [
+        -98.67,
+        -232.37,
+        1434.21
+      ],
+      "tcp_rpy_deg": [
+        -22.49,
+        10.33,
+        -154.53
+      ]
+    },
+    {
+      "id": 68,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        877,
+        227
+      ],
+      "surface_xyz_mm": [
+        -80.56,
+        -293.27,
+        1571.8
+      ],
+      "normal_xyz": [
+        -0.1052,
+        0.4965,
+        -0.8616
+      ],
+      "tcp_xyz_mm": [
+        -96.34,
+        -218.78,
+        1442.56
+      ],
+      "tcp_rpy_deg": [
+        -29.44,
+        8.35,
+        -153.6
+      ]
+    },
+    {
+      "id": 69,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        895,
+        229
+      ],
+      "surface_xyz_mm": [
+        -64.51,
+        -290.99,
+        1569.32
+      ],
+      "normal_xyz": [
+        -0.1932,
+        0.5576,
+        -0.8073
+      ],
+      "tcp_xyz_mm": [
+        -93.5,
+        -207.35,
+        1448.22
+      ],
+      "tcp_rpy_deg": [
+        -35.67,
+        6.39,
+        -152.07
+      ]
+    },
+    {
+      "id": 70,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        913,
+        231
+      ],
+      "surface_xyz_mm": [
+        -48.44,
+        -289.28,
+        1564.89
+      ],
+      "normal_xyz": [
+        -0.1623,
+        0.4832,
+        -0.8603
+      ],
+      "tcp_xyz_mm": [
+        -72.79,
+        -216.79,
+        1435.84
+      ],
+      "tcp_rpy_deg": [
+        -30.18,
+        5.57,
+        -151.96
+      ]
+    },
+    {
+      "id": 71,
+      "leg": "left",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        932,
+        233
+      ],
+      "surface_xyz_mm": [
+        -30.81,
+        -287.34,
+        1564.2
+      ],
+      "normal_xyz": [
+        -0.097,
+        0.3229,
+        -0.9414
+      ],
+      "tcp_xyz_mm": [
+        -45.36,
+        -238.9,
+        1422.98
+      ],
+      "tcp_rpy_deg": [
+        -19.32,
+        3.94,
+        -152.18
+      ]
+    },
+    {
+      "id": 72,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        934,
+        215
+      ],
+      "surface_xyz_mm": [
+        -29.03,
+        -303.1,
+        1563.3
+      ],
+      "normal_xyz": [
+        0.0295,
+        -0.0351,
+        -0.999
+      ],
+      "tcp_xyz_mm": [
+        -24.6,
+        -308.36,
+        1413.46
+      ],
+      "tcp_rpy_deg": [
+        2.54,
+        0.65,
+        -154.35
+      ]
+    },
+    {
+      "id": 73,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        915,
+        213
+      ],
+      "surface_xyz_mm": [
+        -46.62,
+        -304.81,
+        1562.8
+      ],
+      "normal_xyz": [
+        0.0204,
+        -0.0035,
+        -0.9998
+      ],
+      "tcp_xyz_mm": [
+        -43.56,
+        -305.34,
+        1412.83
+      ],
+      "tcp_rpy_deg": [
+        0.69,
+        0.96,
+        -154.07
+      ]
+    },
+    {
+      "id": 74,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        897,
+        211
+      ],
+      "surface_xyz_mm": [
+        -62.43,
+        -306.43,
+        1561.83
+      ],
+      "normal_xyz": [
+        -0.0071,
+        0.0948,
+        -0.9955
+      ],
+      "tcp_xyz_mm": [
+        -63.5,
+        -292.21,
+        1412.51
+      ],
+      "tcp_rpy_deg": [
+        -5.04,
+        2.08,
+        -153.36
+      ]
+    },
+    {
+      "id": 75,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        879,
+        209
+      ],
+      "surface_xyz_mm": [
+        -78.31,
+        -308.35,
+        1562.41
+      ],
+      "normal_xyz": [
+        -0.1428,
+        0.2705,
+        -0.9521
+      ],
+      "tcp_xyz_mm": [
+        -99.73,
+        -267.78,
+        1419.6
+      ],
+      "tcp_rpy_deg": [
+        -17.81,
+        0.32,
+        -151.16
+      ]
+    },
+    {
+      "id": 76,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        860,
+        207
+      ],
+      "surface_xyz_mm": [
+        -95.11,
+        -310.35,
+        1564.45
+      ],
+      "normal_xyz": [
+        -0.0082,
+        0.3251,
+        -0.9456
+      ],
+      "tcp_xyz_mm": [
+        -96.34,
+        -261.58,
+        1422.6
+      ],
+      "tcp_rpy_deg": [
+        -17.17,
+        8.22,
+        -153.73
+      ]
+    },
+    {
+      "id": 77,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        842,
+        205
+      ],
+      "surface_xyz_mm": [
+        -111.09,
+        -311.64,
+        1565.06
+      ],
+      "normal_xyz": [
+        -0.1986,
+        0.3638,
+        -0.9101
+      ],
+      "tcp_xyz_mm": [
+        -140.88,
+        -257.07,
+        1428.55
+      ],
+      "tcp_rpy_deg": [
+        -24.48,
+        0.58,
+        -150.1
+      ]
+    },
+    {
+      "id": 78,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        823,
+        203
+      ],
+      "surface_xyz_mm": [
+        -128.87,
+        -314.61,
+        1567.41
+      ],
+      "normal_xyz": [
+        -0.0206,
+        0.3238,
+        -0.9459
+      ],
+      "tcp_xyz_mm": [
+        -131.96,
+        -266.04,
+        1425.53
+      ],
+      "tcp_rpy_deg": [
+        -17.4,
+        7.58,
+        -153.52
+      ]
+    },
+    {
+      "id": 79,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        794,
+        200
+      ],
+      "surface_xyz_mm": [
+        -154.29,
+        -316.06,
+        1564.05
+      ],
+      "normal_xyz": [
+        0.0735,
+        0.1353,
+        -0.9881
+      ],
+      "tcp_xyz_mm": [
+        -143.26,
+        -295.77,
+        1415.83
+      ],
+      "tcp_rpy_deg": [
+        -5.1,
+        7.25,
+        -153.82
+      ]
+    },
+    {
+      "id": 80,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        765,
+        197
+      ],
+      "surface_xyz_mm": [
+        -179.26,
+        -318.49,
+        1559.15
+      ],
+      "normal_xyz": [
+        0.1526,
+        0.2497,
+        -0.9562
+      ],
+      "tcp_xyz_mm": [
+        -156.37,
+        -281.04,
+        1415.72
+      ],
+      "tcp_rpy_deg": [
+        -9.28,
+        14.33,
+        -154.85
+      ]
+    },
+    {
+      "id": 81,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        736,
+        194
+      ],
+      "surface_xyz_mm": [
+        -204.48,
+        -319.89,
+        1555.46
+      ],
+      "normal_xyz": [
+        0.1223,
+        0.3119,
+        -0.9422
+      ],
+      "tcp_xyz_mm": [
+        -186.14,
+        -273.11,
+        1414.13
+      ],
+      "tcp_rpy_deg": [
+        -13.42,
+        14.38,
+        -155.27
+      ]
+    },
+    {
+      "id": 82,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        707,
+        191
+      ],
+      "surface_xyz_mm": [
+        -229.55,
+        -322.01,
+        1552.14
+      ],
+      "normal_xyz": [
+        0.0892,
+        0.2518,
+        -0.9636
+      ],
+      "tcp_xyz_mm": [
+        -216.16,
+        -284.23,
+        1407.59
+      ],
+      "tcp_rpy_deg": [
+        -10.87,
+        11.12,
+        -154.39
+      ]
+    },
+    {
+      "id": 83,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        678,
+        188
+      ],
+      "surface_xyz_mm": [
+        -255.6,
+        -324.31,
+        1550.89
+      ],
+      "normal_xyz": [
+        -0.0173,
+        0.1832,
+        -0.9829
+      ],
+      "tcp_xyz_mm": [
+        -258.19,
+        -296.84,
+        1403.45
+      ],
+      "tcp_rpy_deg": [
+        -9.86,
+        3.93,
+        -153.08
+      ]
+    },
+    {
+      "id": 84,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        649,
+        185
+      ],
+      "surface_xyz_mm": [
+        -281.2,
+        -327.2,
+        1550.12
+      ],
+      "normal_xyz": [
+        -0.0238,
+        0.1081,
+        -0.9939
+      ],
+      "tcp_xyz_mm": [
+        -284.77,
+        -310.99,
+        1401.04
+      ],
+      "tcp_rpy_deg": [
+        -6.15,
+        1.59,
+        -153.17
+      ]
+    },
+    {
+      "id": 85,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        621,
+        182
+      ],
+      "surface_xyz_mm": [
+        -306.37,
+        -329.67,
+        1552.54
+      ],
+      "normal_xyz": [
+        -0.0642,
+        -0.0729,
+        -0.9953
+      ],
+      "tcp_xyz_mm": [
+        -316.0,
+        -340.6,
+        1403.25
+      ],
+      "tcp_rpy_deg": [
+        2.19,
+        -5.13,
+        -154.52
+      ]
+    },
+    {
+      "id": 86,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        596,
+        179
+      ],
+      "surface_xyz_mm": [
+        -328.28,
+        -332.3,
+        1552.69
+      ],
+      "normal_xyz": [
+        -0.0103,
+        0.0037,
+        -0.9999
+      ],
+      "tcp_xyz_mm": [
+        -329.82,
+        -331.74,
+        1402.7
+      ],
+      "tcp_rpy_deg": [
+        -0.45,
+        -0.44,
+        -153.9
+      ]
+    },
+    {
+      "id": 87,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        572,
+        177
+      ],
+      "surface_xyz_mm": [
+        -349.62,
+        -334.33,
+        1553.1
+      ],
+      "normal_xyz": [
+        -0.0066,
+        -0.0909,
+        -0.9958
+      ],
+      "tcp_xyz_mm": [
+        -350.61,
+        -347.97,
+        1403.72
+      ],
+      "tcp_rpy_deg": [
+        4.56,
+        -2.56,
+        -154.9
+      ]
+    },
+    {
+      "id": 88,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        548,
+        174
+      ],
+      "surface_xyz_mm": [
+        -371.25,
+        -337.52,
+        1553.54
+      ],
+      "normal_xyz": [
+        -0.0485,
+        -0.2715,
+        -0.9612
+      ],
+      "tcp_xyz_mm": [
+        -378.53,
+        -378.24,
+        1409.36
+      ],
+      "tcp_rpy_deg": [
+        13.54,
+        -8.63,
+        -158.2
+      ]
+    },
+    {
+      "id": 89,
+      "leg": "left",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        523,
+        172
+      ],
+      "surface_xyz_mm": [
+        -393.52,
+        -338.65,
+        1553.76
+      ],
+      "normal_xyz": [
+        -0.0442,
+        -0.4323,
+        -0.9006
+      ],
+      "tcp_xyz_mm": [
+        -400.15,
+        -403.49,
+        1418.66
+      ],
+      "tcp_rpy_deg": [
+        23.52,
+        -10.82,
+        -162.51
+      ]
+    },
+    {
+      "id": 90,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        956,
+        593
+      ],
+      "surface_xyz_mm": [
+        -9.96,
+        35.68,
+        1593.78
+      ],
+      "normal_xyz": [
+        0.2049,
+        0.9504,
+        -0.2338
+      ],
+      "tcp_xyz_mm": [
+        20.78,
+        178.24,
+        1558.71
+      ],
+      "tcp_rpy_deg": [
+        -75.57,
+        20.2,
+        172.91
+      ]
+    },
+    {
+      "id": 91,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        937,
+        598
+      ],
+      "surface_xyz_mm": [
+        -26.94,
+        40.09,
+        1591.16
+      ],
+      "normal_xyz": [
+        0.1898,
+        0.9549,
+        -0.2283
+      ],
+      "tcp_xyz_mm": [
+        1.54,
+        183.32,
+        1556.91
+      ],
+      "tcp_rpy_deg": [
+        -75.97,
+        19.62,
+        173.55
+      ]
+    },
+    {
+      "id": 92,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        918,
+        602
+      ],
+      "surface_xyz_mm": [
+        -44.79,
+        43.63,
+        1589.62
+      ],
+      "normal_xyz": [
+        0.1884,
+        0.9549,
+        -0.2295
+      ],
+      "tcp_xyz_mm": [
+        -16.53,
+        186.87,
+        1555.2
+      ],
+      "tcp_rpy_deg": [
+        -75.9,
+        19.62,
+        173.66
+      ]
+    },
+    {
+      "id": 93,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        899,
+        606
+      ],
+      "surface_xyz_mm": [
+        -61.67,
+        47.13,
+        1586.64
+      ],
+      "normal_xyz": [
+        0.1988,
+        0.9514,
+        -0.2353
+      ],
+      "tcp_xyz_mm": [
+        -31.85,
+        189.84,
+        1551.34
+      ],
+      "tcp_rpy_deg": [
+        -75.49,
+        20.08,
+        173.27
+      ]
+    },
+    {
+      "id": 94,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        783,
+        633
+      ],
+      "surface_xyz_mm": [
+        -166.25,
+        71.27,
+        1587.45
+      ],
+      "normal_xyz": [
+        0.1053,
+        0.959,
+        -0.2633
+      ],
+      "tcp_xyz_mm": [
+        -150.46,
+        215.11,
+        1547.96
+      ],
+      "tcp_rpy_deg": [
+        -73.89,
+        18.44,
+        178.96
+      ]
+    },
+    {
+      "id": 95,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        753,
+        640
+      ],
+      "surface_xyz_mm": [
+        -193.98,
+        77.86,
+        1593.39
+      ],
+      "normal_xyz": [
+        0.0757,
+        0.957,
+        -0.2799
+      ],
+      "tcp_xyz_mm": [
+        -182.63,
+        221.42,
+        1551.4
+      ],
+      "tcp_rpy_deg": [
+        -72.87,
+        18.09,
+        -179.06
+      ]
+    },
+    {
+      "id": 96,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        723,
+        647
+      ],
+      "surface_xyz_mm": [
+        -229.46,
+        87.97,
+        1647.42
+      ],
+      "normal_xyz": [
+        0.0464,
+        0.9537,
+        -0.297
+      ],
+      "tcp_xyz_mm": [
+        -222.5,
+        231.03,
+        1602.87
+      ],
+      "tcp_rpy_deg": [
+        -71.83,
+        17.71,
+        -177.09
+      ]
+    },
+    {
+      "id": 97,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        693,
+        654
+      ],
+      "surface_xyz_mm": [
+        -257.44,
+        94.49,
+        1647.3
+      ],
+      "normal_xyz": [
+        0.0507,
+        0.9473,
+        -0.3163
+      ],
+      "tcp_xyz_mm": [
+        -249.83,
+        236.59,
+        1599.85
+      ],
+      "tcp_rpy_deg": [
+        -70.55,
+        18.16,
+        -176.79
+      ]
+    },
+    {
+      "id": 98,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        663,
+        661
+      ],
+      "surface_xyz_mm": [
+        -285.35,
+        101.01,
+        1646.49
+      ],
+      "normal_xyz": [
+        0.0691,
+        0.9279,
+        -0.3664
+      ],
+      "tcp_xyz_mm": [
+        -274.99,
+        240.2,
+        1591.52
+      ],
+      "tcp_rpy_deg": [
+        -67.12,
+        19.51,
+        -176.24
+      ]
+    },
+    {
+      "id": 99,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        635,
+        667
+      ],
+      "surface_xyz_mm": [
+        -311.4,
+        106.58,
+        1645.62
+      ],
+      "normal_xyz": [
+        0.1262,
+        0.6996,
+        -0.7033
+      ],
+      "tcp_xyz_mm": [
+        -292.46,
+        211.52,
+        1540.12
+      ],
+      "tcp_rpy_deg": [
+        -40.21,
+        22.93,
+        -165.48
+      ]
+    },
+    {
+      "id": 100,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        611,
+        669
+      ],
+      "surface_xyz_mm": [
+        -333.66,
+        108.41,
+        1644.58
+      ],
+      "normal_xyz": [
+        0.0902,
+        0.6466,
+        -0.7575
+      ],
+      "tcp_xyz_mm": [
+        -320.12,
+        205.4,
+        1530.96
+      ],
+      "tcp_rpy_deg": [
+        -36.04,
+        20.49,
+        -162.26
+      ]
+    },
+    {
+      "id": 101,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        587,
+        671
+      ],
+      "surface_xyz_mm": [
+        -355.49,
+        110.1,
+        1641.51
+      ],
+      "normal_xyz": [
+        0.1264,
+        0.3244,
+        -0.9375
+      ],
+      "tcp_xyz_mm": [
+        -336.53,
+        158.76,
+        1500.89
+      ],
+      "tcp_rpy_deg": [
+        -14.04,
+        14.91,
+        -155.47
+      ]
+    },
+    {
+      "id": 102,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        563,
+        674
+      ],
+      "surface_xyz_mm": [
+        -377.64,
+        112.83,
+        1640.11
+      ],
+      "normal_xyz": [
+        0.0926,
+        0.3531,
+        -0.931
+      ],
+      "tcp_xyz_mm": [
+        -363.75,
+        165.79,
+        1500.46
+      ],
+      "tcp_rpy_deg": [
+        -16.42,
+        13.93,
+        -155.44
+      ]
+    },
+    {
+      "id": 103,
+      "leg": "right",
+      "pass_id": 0,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        540,
+        676
+      ],
+      "surface_xyz_mm": [
+        -398.36,
+        114.51,
+        1637.74
+      ],
+      "normal_xyz": [
+        0.1227,
+        0.3424,
+        -0.9315
+      ],
+      "tcp_xyz_mm": [
+        -379.95,
+        165.87,
+        1498.02
+      ],
+      "tcp_rpy_deg": [
+        -15.15,
+        15.19,
+        -155.67
+      ]
+    },
+    {
+      "id": 104,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        536,
+        658
+      ],
+      "surface_xyz_mm": [
+        -399.67,
+        97.26,
+        1628.24
+      ],
+      "normal_xyz": [
+        0.0352,
+        0.9519,
+        -0.3043
+      ],
+      "tcp_xyz_mm": [
+        -394.39,
+        240.05,
+        1582.59
+      ],
+      "tcp_rpy_deg": [
+        -71.39,
+        17.56,
+        -176.32
+      ]
+    },
+    {
+      "id": 105,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        560,
+        656
+      ],
+      "surface_xyz_mm": [
+        -367.02,
+        91.2,
+        1586.42
+      ],
+      "normal_xyz": [
+        0.0447,
+        0.9512,
+        -0.3052
+      ],
+      "tcp_xyz_mm": [
+        -360.31,
+        233.88,
+        1540.63
+      ],
+      "tcp_rpy_deg": [
+        -71.3,
+        17.81,
+        -176.78
+      ]
+    },
+    {
+      "id": 106,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        584,
+        654
+      ],
+      "surface_xyz_mm": [
+        -346.7,
+        90.35,
+        1588.73
+      ],
+      "normal_xyz": [
+        0.0507,
+        0.9505,
+        -0.3067
+      ],
+      "tcp_xyz_mm": [
+        -339.1,
+        232.92,
+        1542.73
+      ],
+      "tcp_rpy_deg": [
+        -71.19,
+        17.99,
+        -177.05
+      ]
+    },
+    {
+      "id": 107,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        608,
+        651
+      ],
+      "surface_xyz_mm": [
+        -325.23,
+        88.55,
+        1589.99
+      ],
+      "normal_xyz": [
+        0.0524,
+        0.9504,
+        -0.3065
+      ],
+      "tcp_xyz_mm": [
+        -317.38,
+        231.12,
+        1544.01
+      ],
+      "tcp_rpy_deg": [
+        -71.19,
+        18.03,
+        -177.14
+      ]
+    },
+    {
+      "id": 108,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        632,
+        649
+      ],
+      "surface_xyz_mm": [
+        -303.62,
+        86.81,
+        1590.49
+      ],
+      "normal_xyz": [
+        0.0654,
+        0.9525,
+        -0.2975
+      ],
+      "tcp_xyz_mm": [
+        -293.81,
+        229.68,
+        1545.87
+      ],
+      "tcp_rpy_deg": [
+        -71.75,
+        18.19,
+        -178.05
+      ]
+    },
+    {
+      "id": 109,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        660,
+        643
+      ],
+      "surface_xyz_mm": [
+        -277.22,
+        80.2,
+        1585.31
+      ],
+      "normal_xyz": [
+        0.076,
+        0.9502,
+        -0.3022
+      ],
+      "tcp_xyz_mm": [
+        -265.81,
+        222.73,
+        1539.98
+      ],
+      "tcp_rpy_deg": [
+        -71.41,
+        18.56,
+        -178.46
+      ]
+    },
+    {
+      "id": 110,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        690,
+        637
+      ],
+      "surface_xyz_mm": [
+        -249.7,
+        74.65,
+        1581.84
+      ],
+      "normal_xyz": [
+        0.1096,
+        0.9333,
+        -0.3418
+      ],
+      "tcp_xyz_mm": [
+        -233.26,
+        214.65,
+        1530.56
+      ],
+      "tcp_rpy_deg": [
+        -68.63,
+        20.27,
+        -178.98
+      ]
+    },
+    {
+      "id": 111,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        720,
+        630
+      ],
+      "surface_xyz_mm": [
+        -222.15,
+        68.14,
+        1576.03
+      ],
+      "normal_xyz": [
+        0.0694,
+        0.8241,
+        -0.5622
+      ],
+      "tcp_xyz_mm": [
+        -211.74,
+        191.75,
+        1491.7
+      ],
+      "tcp_rpy_deg": [
+        -52.89,
+        21.28,
+        -169.47
+      ]
+    },
+    {
+      "id": 112,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        749,
+        623
+      ],
+      "surface_xyz_mm": [
+        -194.97,
+        62.66,
+        1572.5
+      ],
+      "normal_xyz": [
+        0.0605,
+        0.7475,
+        -0.6615
+      ],
+      "tcp_xyz_mm": [
+        -185.89,
+        174.79,
+        1473.28
+      ],
+      "tcp_rpy_deg": [
+        -45.05,
+        20.56,
+        -165.3
+      ]
+    },
+    {
+      "id": 113,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        779,
+        616
+      ],
+      "surface_xyz_mm": [
+        -167.95,
+        55.44,
+        1569.16
+      ],
+      "normal_xyz": [
+        0.0549,
+        0.6184,
+        -0.7839
+      ],
+      "tcp_xyz_mm": [
+        -159.72,
+        148.2,
+        1451.57
+      ],
+      "tcp_rpy_deg": [
+        -34.32,
+        18.33,
+        -160.34
+      ]
+    },
+    {
+      "id": 114,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        809,
+        609
+      ],
+      "surface_xyz_mm": [
+        -141.19,
+        49.2,
+        1567.93
+      ],
+      "normal_xyz": [
+        0.1175,
+        0.5656,
+        -0.8163
+      ],
+      "tcp_xyz_mm": [
+        -123.56,
+        134.04,
+        1445.49
+      ],
+      "tcp_rpy_deg": [
+        -29.54,
+        20.24,
+        -160.33
+      ]
+    },
+    {
+      "id": 115,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        839,
+        602
+      ],
+      "surface_xyz_mm": [
+        -114.72,
+        43.01,
+        1567.29
+      ],
+      "normal_xyz": [
+        0.1302,
+        0.5251,
+        -0.841
+      ],
+      "tcp_xyz_mm": [
+        -95.18,
+        121.78,
+        1441.14
+      ],
+      "tcp_rpy_deg": [
+        -26.49,
+        20.01,
+        -159.46
+      ]
+    },
+    {
+      "id": 116,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        858,
+        598
+      ],
+      "surface_xyz_mm": [
+        -97.14,
+        39.51,
+        1568.48
+      ],
+      "normal_xyz": [
+        0.1726,
+        0.5587,
+        -0.8112
+      ],
+      "tcp_xyz_mm": [
+        -71.25,
+        123.31,
+        1446.8
+      ],
+      "tcp_rpy_deg": [
+        -28.31,
+        22.86,
+        -161.38
+      ]
+    },
+    {
+      "id": 117,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        877,
+        593
+      ],
+      "surface_xyz_mm": [
+        -80.4,
+        35.12,
+        1569.31
+      ],
+      "normal_xyz": [
+        0.1789,
+        0.5792,
+        -0.7953
+      ],
+      "tcp_xyz_mm": [
+        -53.56,
+        122.0,
+        1450.01
+      ],
+      "tcp_rpy_deg": [
+        -29.8,
+        23.58,
+        -162.23
+      ]
+    },
+    {
+      "id": 118,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        896,
+        589
+      ],
+      "surface_xyz_mm": [
+        -63.63,
+        31.61,
+        1570.29
+      ],
+      "normal_xyz": [
+        0.1861,
+        0.5979,
+        -0.7797
+      ],
+      "tcp_xyz_mm": [
+        -35.71,
+        121.3,
+        1453.34
+      ],
+      "tcp_rpy_deg": [
+        -31.2,
+        24.29,
+        -163.1
+      ]
+    },
+    {
+      "id": 119,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        915,
+        584
+      ],
+      "surface_xyz_mm": [
+        -46.9,
+        27.22,
+        1570.24
+      ],
+      "normal_xyz": [
+        0.1823,
+        0.6057,
+        -0.7745
+      ],
+      "tcp_xyz_mm": [
+        -19.55,
+        118.07,
+        1454.06
+      ],
+      "tcp_rpy_deg": [
+        -31.85,
+        24.24,
+        -163.3
+      ]
+    },
+    {
+      "id": 120,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        933,
+        580
+      ],
+      "surface_xyz_mm": [
+        -30.12,
+        23.68,
+        1570.96
+      ],
+      "normal_xyz": [
+        0.1842,
+        0.6158,
+        -0.7661
+      ],
+      "tcp_xyz_mm": [
+        -2.5,
+        116.05,
+        1456.05
+      ],
+      "tcp_rpy_deg": [
+        -32.66,
+        24.51,
+        -163.74
+      ]
+    },
+    {
+      "id": 121,
+      "leg": "right",
+      "pass_id": 1,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        952,
+        576
+      ],
+      "surface_xyz_mm": [
+        -13.37,
+        20.18,
+        1571.92
+      ],
+      "normal_xyz": [
+        0.1881,
+        0.6375,
+        -0.7471
+      ],
+      "tcp_xyz_mm": [
+        14.85,
+        115.81,
+        1459.86
+      ],
+      "tcp_rpy_deg": [
+        -34.44,
+        25.05,
+        -164.75
+      ]
+    },
+    {
+      "id": 122,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        949,
+        558
+      ],
+      "surface_xyz_mm": [
+        -15.91,
+        3.37,
+        1564.05
+      ],
+      "normal_xyz": [
+        0.0948,
+        0.2474,
+        -0.9643
+      ],
+      "tcp_xyz_mm": [
+        -1.69,
+        40.48,
+        1419.41
+      ],
+      "tcp_rpy_deg": [
+        -10.49,
+        11.28,
+        -154.4
+      ]
+    },
+    {
+      "id": 123,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.332,
+      "feedrate_mms": 373.5,
+      "pixel_uv": [
+        930,
+        562
+      ],
+      "surface_xyz_mm": [
+        -32.59,
+        6.86,
+        1562.74
+      ],
+      "normal_xyz": [
+        0.1,
+        0.2336,
+        -0.9672
+      ],
+      "tcp_xyz_mm": [
+        -17.59,
+        41.89,
+        1417.67
+      ],
+      "tcp_rpy_deg": [
+        -9.63,
+        11.19,
+        -154.35
+      ]
+    },
+    {
+      "id": 124,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.516,
+      "feedrate_mms": 331.3,
+      "pixel_uv": [
+        911,
+        567
+      ],
+      "surface_xyz_mm": [
+        -50.14,
+        11.26,
+        1561.52
+      ],
+      "normal_xyz": [
+        0.1077,
+        0.2598,
+        -0.9596
+      ],
+      "tcp_xyz_mm": [
+        -33.99,
+        50.23,
+        1417.57
+      ],
+      "tcp_rpy_deg": [
+        -10.87,
+        12.27,
+        -154.61
+      ]
+    },
+    {
+      "id": 125,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.659,
+      "feedrate_mms": 298.4,
+      "pixel_uv": [
+        892,
+        571
+      ],
+      "surface_xyz_mm": [
+        -66.78,
+        14.74,
+        1560.69
+      ],
+      "normal_xyz": [
+        0.0699,
+        0.2386,
+        -0.9686
+      ],
+      "tcp_xyz_mm": [
+        -56.29,
+        50.53,
+        1415.4
+      ],
+      "tcp_rpy_deg": [
+        -10.61,
+        9.78,
+        -154.12
+      ]
+    },
+    {
+      "id": 126,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.774,
+      "feedrate_mms": 272.1,
+      "pixel_uv": [
+        874,
+        576
+      ],
+      "surface_xyz_mm": [
+        -82.61,
+        20.01,
+        1561.16
+      ],
+      "normal_xyz": [
+        0.0887,
+        0.2161,
+        -0.9723
+      ],
+      "tcp_xyz_mm": [
+        -69.31,
+        52.43,
+        1415.31
+      ],
+      "tcp_rpy_deg": [
+        -8.97,
+        10.15,
+        -154.16
+      ]
+    },
+    {
+      "id": 127,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.864,
+      "feedrate_mms": 251.4,
+      "pixel_uv": [
+        855,
+        580
+      ],
+      "surface_xyz_mm": [
+        -99.32,
+        23.54,
+        1561.22
+      ],
+      "normal_xyz": [
+        0.0666,
+        0.2139,
+        -0.9746
+      ],
+      "tcp_xyz_mm": [
+        -89.34,
+        55.64,
+        1415.03
+      ],
+      "tcp_rpy_deg": [
+        -9.38,
+        8.96,
+        -153.97
+      ]
+    },
+    {
+      "id": 128,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.931,
+      "feedrate_mms": 236.0,
+      "pixel_uv": [
+        836,
+        584
+      ],
+      "surface_xyz_mm": [
+        -116.89,
+        27.05,
+        1561.0
+      ],
+      "normal_xyz": [
+        0.0398,
+        0.2155,
+        -0.9757
+      ],
+      "tcp_xyz_mm": [
+        -110.93,
+        59.38,
+        1414.64
+      ],
+      "tcp_rpy_deg": [
+        -10.12,
+        7.65,
+        -153.73
+      ]
+    },
+    {
+      "id": 129,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.975,
+      "feedrate_mms": 225.7,
+      "pixel_uv": [
+        806,
+        591
+      ],
+      "surface_xyz_mm": [
+        -143.28,
+        33.18,
+        1561.09
+      ],
+      "normal_xyz": [
+        0.067,
+        0.2076,
+        -0.9759
+      ],
+      "tcp_xyz_mm": [
+        -133.24,
+        64.33,
+        1414.7
+      ],
+      "tcp_rpy_deg": [
+        -9.04,
+        8.82,
+        -153.94
+      ]
+    },
+    {
+      "id": 130,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.997,
+      "feedrate_mms": 220.6,
+      "pixel_uv": [
+        776,
+        598
+      ],
+      "surface_xyz_mm": [
+        -169.75,
+        39.36,
+        1561.35
+      ],
+      "normal_xyz": [
+        0.0026,
+        0.2577,
+        -0.9662
+      ],
+      "tcp_xyz_mm": [
+        -169.35,
+        78.01,
+        1416.41
+      ],
+      "tcp_rpy_deg": [
+        -13.26,
+        6.93,
+        -153.48
+      ]
+    },
+    {
+      "id": 131,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.997,
+      "feedrate_mms": 220.6,
+      "pixel_uv": [
+        746,
+        605
+      ],
+      "surface_xyz_mm": [
+        -196.49,
+        45.56,
+        1563.66
+      ],
+      "normal_xyz": [
+        0.0077,
+        0.2318,
+        -0.9727
+      ],
+      "tcp_xyz_mm": [
+        -195.33,
+        80.34,
+        1417.75
+      ],
+      "tcp_rpy_deg": [
+        -11.77,
+        6.49,
+        -153.44
+      ]
+    },
+    {
+      "id": 132,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.975,
+      "feedrate_mms": 225.7,
+      "pixel_uv": [
+        716,
+        612
+      ],
+      "surface_xyz_mm": [
+        -223.99,
+        51.76,
+        1564.18
+      ],
+      "normal_xyz": [
+        0.0349,
+        0.296,
+        -0.9546
+      ],
+      "tcp_xyz_mm": [
+        -218.76,
+        96.16,
+        1421.0
+      ],
+      "tcp_rpy_deg": [
+        -14.54,
+        9.55,
+        -154.12
+      ]
+    },
+    {
+      "id": 133,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.931,
+      "feedrate_mms": 236.0,
+      "pixel_uv": [
+        686,
+        619
+      ],
+      "surface_xyz_mm": [
+        -250.7,
+        58.0,
+        1565.97
+      ],
+      "normal_xyz": [
+        0.0253,
+        0.4976,
+        -0.867
+      ],
+      "tcp_xyz_mm": [
+        -246.91,
+        132.65,
+        1435.91
+      ],
+      "tcp_rpy_deg": [
+        -26.54,
+        14.28,
+        -156.63
+      ]
+    },
+    {
+      "id": 134,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.864,
+      "feedrate_mms": 251.4,
+      "pixel_uv": [
+        656,
+        626
+      ],
+      "surface_xyz_mm": [
+        -278.14,
+        64.36,
+        1569.44
+      ],
+      "normal_xyz": [
+        0.0356,
+        0.5834,
+        -0.8114
+      ],
+      "tcp_xyz_mm": [
+        -272.8,
+        151.87,
+        1447.72
+      ],
+      "tcp_rpy_deg": [
+        -32.08,
+        16.73,
+        -158.83
+      ]
+    },
+    {
+      "id": 135,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.774,
+      "feedrate_mms": 272.1,
+      "pixel_uv": [
+        628,
+        632
+      ],
+      "surface_xyz_mm": [
+        -303.75,
+        69.85,
+        1572.72
+      ],
+      "normal_xyz": [
+        0.0379,
+        0.6471,
+        -0.7615
+      ],
+      "tcp_xyz_mm": [
+        -298.07,
+        166.91,
+        1458.5
+      ],
+      "tcp_rpy_deg": [
+        -36.76,
+        18.11,
+        -160.76
+      ]
+    },
+    {
+      "id": 136,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.659,
+      "feedrate_mms": 298.4,
+      "pixel_uv": [
+        604,
+        634
+      ],
+      "surface_xyz_mm": [
+        -325.37,
+        71.68,
+        1573.4
+      ],
+      "normal_xyz": [
+        0.0474,
+        0.6426,
+        -0.7647
+      ],
+      "tcp_xyz_mm": [
+        -318.25,
+        168.08,
+        1458.69
+      ],
+      "tcp_rpy_deg": [
+        -36.28,
+        18.46,
+        -160.89
+      ]
+    },
+    {
+      "id": 137,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.516,
+      "feedrate_mms": 331.3,
+      "pixel_uv": [
+        580,
+        636
+      ],
+      "surface_xyz_mm": [
+        -346.64,
+        73.43,
+        1572.25
+      ],
+      "normal_xyz": [
+        0.0892,
+        0.624,
+        -0.7763
+      ],
+      "tcp_xyz_mm": [
+        -333.25,
+        167.03,
+        1455.8
+      ],
+      "tcp_rpy_deg": [
+        -34.28,
+        20.04,
+        -161.45
+      ]
+    },
+    {
+      "id": 138,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.332,
+      "feedrate_mms": 373.5,
+      "pixel_uv": [
+        556,
+        638
+      ],
+      "surface_xyz_mm": [
+        -368.15,
+        75.23,
+        1572.16
+      ],
+      "normal_xyz": [
+        0.0791,
+        0.5967,
+        -0.7986
+      ],
+      "tcp_xyz_mm": [
+        -356.29,
+        164.73,
+        1452.37
+      ],
+      "tcp_rpy_deg": [
+        -32.36,
+        19.03,
+        -160.32
+      ]
+    },
+    {
+      "id": 139,
+      "leg": "right",
+      "pass_id": 2,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        533,
+        641
+      ],
+      "surface_xyz_mm": [
+        -388.58,
+        77.88,
+        1571.19
+      ],
+      "normal_xyz": [
+        0.0876,
+        0.5689,
+        -0.8177
+      ],
+      "tcp_xyz_mm": [
+        -375.44,
+        163.22,
+        1448.54
+      ],
+      "tcp_rpy_deg": [
+        -30.22,
+        18.86,
+        -159.72
+      ]
+    },
+    {
+      "id": 140,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        529,
+        623
+      ],
+      "surface_xyz_mm": [
+        -389.92,
+        61.52,
+        1562.39
+      ],
+      "normal_xyz": [
+        0.0441,
+        0.3255,
+        -0.9445
+      ],
+      "tcp_xyz_mm": [
+        -383.31,
+        110.35,
+        1420.71
+      ],
+      "tcp_rpy_deg": [
+        -15.95,
+        10.79,
+        -154.49
+      ]
+    },
+    {
+      "id": 141,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        553,
+        621
+      ],
+      "surface_xyz_mm": [
+        -368.48,
+        59.73,
+        1562.36
+      ],
+      "normal_xyz": [
+        0.0323,
+        0.3405,
+        -0.9397
+      ],
+      "tcp_xyz_mm": [
+        -363.64,
+        110.81,
+        1421.41
+      ],
+      "tcp_rpy_deg": [
+        -17.06,
+        10.6,
+        -154.47
+      ]
+    },
+    {
+      "id": 142,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        577,
+        618
+      ],
+      "surface_xyz_mm": [
+        -347.18,
+        57.1,
+        1562.78
+      ],
+      "normal_xyz": [
+        0.0288,
+        0.3479,
+        -0.9371
+      ],
+      "tcp_xyz_mm": [
+        -342.86,
+        109.28,
+        1422.21
+      ],
+      "tcp_rpy_deg": [
+        -17.55,
+        10.62,
+        -154.49
+      ]
+    },
+    {
+      "id": 143,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        601,
+        616
+      ],
+      "surface_xyz_mm": [
+        -325.75,
+        55.31,
+        1562.52
+      ],
+      "normal_xyz": [
+        0.0253,
+        0.3769,
+        -0.9259
+      ],
+      "tcp_xyz_mm": [
+        -321.96,
+        111.84,
+        1423.64
+      ],
+      "tcp_rpy_deg": [
+        -19.28,
+        11.21,
+        -154.76
+      ]
+    },
+    {
+      "id": 144,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        625,
+        614
+      ],
+      "surface_xyz_mm": [
+        -304.45,
+        53.54,
+        1562.76
+      ],
+      "normal_xyz": [
+        -0.0026,
+        0.3768,
+        -0.9263
+      ],
+      "tcp_xyz_mm": [
+        -304.84,
+        110.06,
+        1423.81
+      ],
+      "tcp_rpy_deg": [
+        -19.92,
+        9.87,
+        -154.29
+      ]
+    },
+    {
+      "id": 145,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        653,
+        608
+      ],
+      "surface_xyz_mm": [
+        -279.25,
+        48.17,
+        1560.89
+      ],
+      "normal_xyz": [
+        0.035,
+        0.2438,
+        -0.9692
+      ],
+      "tcp_xyz_mm": [
+        -274.0,
+        84.75,
+        1415.51
+      ],
+      "tcp_rpy_deg": [
+        -11.73,
+        8.16,
+        -153.8
+      ]
+    },
+    {
+      "id": 146,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        683,
+        601
+      ],
+      "surface_xyz_mm": [
+        -252.66,
+        41.98,
+        1560.84
+      ],
+      "normal_xyz": [
+        0.0354,
+        0.0687,
+        -0.997
+      ],
+      "tcp_xyz_mm": [
+        -247.35,
+        52.28,
+        1411.29
+      ],
+      "tcp_rpy_deg": [
+        -2.63,
+        3.57,
+        -153.72
+      ]
+    },
+    {
+      "id": 147,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        713,
+        594
+      ],
+      "surface_xyz_mm": [
+        -226.28,
+        35.86,
+        1561.8
+      ],
+      "normal_xyz": [
+        0.0088,
+        0.0321,
+        -0.9994
+      ],
+      "tcp_xyz_mm": [
+        -224.95,
+        40.68,
+        1411.89
+      ],
+      "tcp_rpy_deg": [
+        -1.43,
+        1.27,
+        -153.78
+      ]
+    },
+    {
+      "id": 148,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        742,
+        587
+      ],
+      "surface_xyz_mm": [
+        -200.42,
+        29.67,
+        1561.06
+      ],
+      "normal_xyz": [
+        -0.0528,
+        0.0651,
+        -0.9965
+      ],
+      "tcp_xyz_mm": [
+        -208.34,
+        39.44,
+        1411.59
+      ],
+      "tcp_rpy_deg": [
+        -4.7,
+        -1.02,
+        -153.14
+      ]
+    },
+    {
+      "id": 149,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.891,
+      "feedrate_mms": 245.0,
+      "pixel_uv": [
+        772,
+        581
+      ],
+      "surface_xyz_mm": [
+        -173.09,
+        24.37,
+        1560.0
+      ],
+      "normal_xyz": [
+        -0.0212,
+        -0.0534,
+        -0.9983
+      ],
+      "tcp_xyz_mm": [
+        -176.28,
+        16.36,
+        1410.25
+      ],
+      "tcp_rpy_deg": [
+        2.23,
+        -2.42,
+        -154.42
+      ]
+    },
+    {
+      "id": 150,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.872,
+      "feedrate_mms": 249.5,
+      "pixel_uv": [
+        802,
+        574
+      ],
+      "surface_xyz_mm": [
+        -146.67,
+        18.24,
+        1559.76
+      ],
+      "normal_xyz": [
+        -0.012,
+        -0.0422,
+        -0.999
+      ],
+      "tcp_xyz_mm": [
+        -148.47,
+        11.91,
+        1409.9
+      ],
+      "tcp_rpy_deg": [
+        1.88,
+        -1.67,
+        -154.33
+      ]
+    },
+    {
+      "id": 151,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.832,
+      "feedrate_mms": 258.7,
+      "pixel_uv": [
+        832,
+        567
+      ],
+      "surface_xyz_mm": [
+        -120.28,
+        11.23,
+        1559.48
+      ],
+      "normal_xyz": [
+        -0.0315,
+        -0.0433,
+        -0.9986
+      ],
+      "tcp_xyz_mm": [
+        -125.0,
+        4.73,
+        1409.69
+      ],
+      "tcp_rpy_deg": [
+        1.45,
+        -2.7,
+        -154.27
+      ]
+    },
+    {
+      "id": 152,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.772,
+      "feedrate_mms": 272.5,
+      "pixel_uv": [
+        851,
+        562
+      ],
+      "surface_xyz_mm": [
+        -103.5,
+        6.84,
+        1559.31
+      ],
+      "normal_xyz": [
+        -0.0086,
+        -0.0049,
+        -1.0
+      ],
+      "tcp_xyz_mm": [
+        -104.79,
+        6.11,
+        1409.32
+      ],
+      "tcp_rpy_deg": [
+        0.04,
+        -0.57,
+        -153.98
+      ]
+    },
+    {
+      "id": 153,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.691,
+      "feedrate_mms": 291.0,
+      "pixel_uv": [
+        870,
+        558
+      ],
+      "surface_xyz_mm": [
+        -86.01,
+        3.35,
+        1560.27
+      ],
+      "normal_xyz": [
+        0.0181,
+        0.049,
+        -0.9986
+      ],
+      "tcp_xyz_mm": [
+        -83.29,
+        10.7,
+        1410.47
+      ],
+      "tcp_rpy_deg": [
+        -2.06,
+        2.18,
+        -153.73
+      ]
+    },
+    {
+      "id": 154,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.589,
+      "feedrate_mms": 314.5,
+      "pixel_uv": [
+        889,
+        554
+      ],
+      "surface_xyz_mm": [
+        -69.38,
+        -0.18,
+        1560.2
+      ],
+      "normal_xyz": [
+        0.0242,
+        0.0518,
+        -0.9984
+      ],
+      "tcp_xyz_mm": [
+        -65.75,
+        7.59,
+        1410.45
+      ],
+      "tcp_rpy_deg": [
+        -2.05,
+        2.56,
+        -153.74
+      ]
+    },
+    {
+      "id": 155,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.461,
+      "feedrate_mms": 343.9,
+      "pixel_uv": [
+        908,
+        549
+      ],
+      "surface_xyz_mm": [
+        -52.71,
+        -4.56,
+        1560.35
+      ],
+      "normal_xyz": [
+        0.0347,
+        0.0469,
+        -0.9983
+      ],
+      "tcp_xyz_mm": [
+        -47.5,
+        2.48,
+        1410.61
+      ],
+      "tcp_rpy_deg": [
+        -1.53,
+        2.97,
+        -153.81
+      ]
+    },
+    {
+      "id": 156,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.297,
+      "feedrate_mms": 381.6,
+      "pixel_uv": [
+        926,
+        545
+      ],
+      "surface_xyz_mm": [
+        -36.08,
+        -8.04,
+        1561.2
+      ],
+      "normal_xyz": [
+        0.0325,
+        0.1036,
+        -0.9941
+      ],
+      "tcp_xyz_mm": [
+        -31.21,
+        7.5,
+        1412.08
+      ],
+      "tcp_rpy_deg": [
+        -4.49,
+        4.32,
+        -153.6
+      ]
+    },
+    {
+      "id": 157,
+      "leg": "right",
+      "pass_id": 3,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        945,
+        540
+      ],
+      "surface_xyz_mm": [
+        -19.38,
+        -12.41,
+        1560.72
+      ],
+      "normal_xyz": [
+        0.0692,
+        0.1245,
+        -0.9898
+      ],
+      "tcp_xyz_mm": [
+        -9.0,
+        6.26,
+        1412.25
+      ],
+      "tcp_rpy_deg": [
+        -4.65,
+        6.74,
+        -153.79
+      ]
+    },
+    {
+      "id": 158,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        942,
+        523
+      ],
+      "surface_xyz_mm": [
+        -22.01,
+        -27.3,
+        1559.2
+      ],
+      "normal_xyz": [
+        0.0057,
+        -0.0539,
+        -0.9985
+      ],
+      "tcp_xyz_mm": [
+        -21.15,
+        -35.4,
+        1409.43
+      ],
+      "tcp_rpy_deg": [
+        2.93,
+        -1.04,
+        -154.49
+      ]
+    },
+    {
+      "id": 159,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        923,
+        527
+      ],
+      "surface_xyz_mm": [
+        -39.54,
+        -23.81,
+        1559.28
+      ],
+      "normal_xyz": [
+        -0.0405,
+        -0.0657,
+        -0.997
+      ],
+      "tcp_xyz_mm": [
+        -45.62,
+        -33.67,
+        1409.73
+      ],
+      "tcp_rpy_deg": [
+        2.4,
+        -3.72,
+        -154.51
+      ]
+    },
+    {
+      "id": 160,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        904,
+        532
+      ],
+      "surface_xyz_mm": [
+        -56.16,
+        -19.43,
+        1559.73
+      ],
+      "normal_xyz": [
+        -0.0215,
+        -0.064,
+        -0.9977
+      ],
+      "tcp_xyz_mm": [
+        -59.38,
+        -29.03,
+        1410.08
+      ],
+      "tcp_rpy_deg": [
+        2.79,
+        -2.69,
+        -154.55
+      ]
+    },
+    {
+      "id": 161,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        885,
+        536
+      ],
+      "surface_xyz_mm": [
+        -72.84,
+        -15.96,
+        1559.29
+      ],
+      "normal_xyz": [
+        -0.0236,
+        -0.1039,
+        -0.9943
+      ],
+      "tcp_xyz_mm": [
+        -76.38,
+        -31.55,
+        1410.15
+      ],
+      "tcp_rpy_deg": [
+        4.83,
+        -3.76,
+        -155.06
+      ]
+    },
+    {
+      "id": 162,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        867,
+        540
+      ],
+      "surface_xyz_mm": [
+        -88.7,
+        -12.47,
+        1560.47
+      ],
+      "normal_xyz": [
+        -0.048,
+        -0.115,
+        -0.9922
+      ],
+      "tcp_xyz_mm": [
+        -95.9,
+        -29.72,
+        1411.64
+      ],
+      "tcp_rpy_deg": [
+        4.83,
+        -5.29,
+        -155.18
+      ]
+    },
+    {
+      "id": 163,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        848,
+        545
+      ],
+      "surface_xyz_mm": [
+        -105.43,
+        -8.1,
+        1561.09
+      ],
+      "normal_xyz": [
+        -0.09,
+        -0.12,
+        -0.9887
+      ],
+      "tcp_xyz_mm": [
+        -118.93,
+        -26.1,
+        1412.79
+      ],
+      "tcp_rpy_deg": [
+        4.08,
+        -7.61,
+        -155.16
+      ]
+    },
+    {
+      "id": 164,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        829,
+        549
+      ],
+      "surface_xyz_mm": [
+        -123.1,
+        -4.59,
+        1562.22
+      ],
+      "normal_xyz": [
+        -0.087,
+        -0.1557,
+        -0.984
+      ],
+      "tcp_xyz_mm": [
+        -136.16,
+        -27.94,
+        1414.62
+      ],
+      "tcp_rpy_deg": [
+        6.11,
+        -8.28,
+        -155.82
+      ]
+    },
+    {
+      "id": 165,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        799,
+        556
+      ],
+      "surface_xyz_mm": [
+        -149.46,
+        1.57,
+        1562.56
+      ],
+      "normal_xyz": [
+        -0.0602,
+        -0.2628,
+        -0.963
+      ],
+      "tcp_xyz_mm": [
+        -158.48,
+        -37.85,
+        1418.11
+      ],
+      "tcp_rpy_deg": [
+        12.79,
+        -9.09,
+        -158.06
+      ]
+    },
+    {
+      "id": 166,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        769,
+        563
+      ],
+      "surface_xyz_mm": [
+        -176.06,
+        7.69,
+        1563.11
+      ],
+      "normal_xyz": [
+        -0.1382,
+        -0.3045,
+        -0.9424
+      ],
+      "tcp_xyz_mm": [
+        -196.79,
+        -37.99,
+        1421.75
+      ],
+      "tcp_rpy_deg": [
+        13.7,
+        -14.06,
+        -159.51
+      ]
+    },
+    {
+      "id": 167,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.637,
+      "feedrate_mms": 303.6,
+      "pixel_uv": [
+        739,
+        570
+      ],
+      "surface_xyz_mm": [
+        -203.33,
+        15.6,
+        1562.25
+      ],
+      "normal_xyz": [
+        -0.0241,
+        -0.3552,
+        -0.9345
+      ],
+      "tcp_xyz_mm": [
+        -206.95,
+        -37.68,
+        1422.08
+      ],
+      "tcp_rpy_deg": [
+        19.01,
+        -8.75,
+        -160.06
+      ]
+    },
+    {
+      "id": 168,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.622,
+      "feedrate_mms": 306.8,
+      "pixel_uv": [
+        709,
+        577
+      ],
+      "surface_xyz_mm": [
+        -229.94,
+        20.88,
+        1562.93
+      ],
+      "normal_xyz": [
+        -0.0673,
+        -0.2194,
+        -0.9733
+      ],
+      "tcp_xyz_mm": [
+        -240.03,
+        -12.02,
+        1416.93
+      ],
+      "tcp_rpy_deg": [
+        10.13,
+        -8.61,
+        -157.11
+      ]
+    },
+    {
+      "id": 169,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.594,
+      "feedrate_mms": 313.4,
+      "pixel_uv": [
+        679,
+        584
+      ],
+      "surface_xyz_mm": [
+        -256.59,
+        27.08,
+        1563.35
+      ],
+      "normal_xyz": [
+        -0.0336,
+        -0.2645,
+        -0.9638
+      ],
+      "tcp_xyz_mm": [
+        -261.62,
+        -12.59,
+        1418.78
+      ],
+      "tcp_rpy_deg": [
+        13.45,
+        -7.7,
+        -157.96
+      ]
+    },
+    {
+      "id": 170,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.551,
+      "feedrate_mms": 323.2,
+      "pixel_uv": [
+        649,
+        591
+      ],
+      "surface_xyz_mm": [
+        -282.82,
+        33.18,
+        1561.27
+      ],
+      "normal_xyz": [
+        0.0211,
+        -0.2132,
+        -0.9768
+      ],
+      "tcp_xyz_mm": [
+        -279.66,
+        1.2,
+        1414.76
+      ],
+      "tcp_rpy_deg": [
+        11.78,
+        -3.82,
+        -156.66
+      ]
+    },
+    {
+      "id": 171,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.494,
+      "feedrate_mms": 336.4,
+      "pixel_uv": [
+        621,
+        596
+      ],
+      "surface_xyz_mm": [
+        -307.41,
+        37.58,
+        1559.93
+      ],
+      "normal_xyz": [
+        -0.0084,
+        -0.1368,
+        -0.9906
+      ],
+      "tcp_xyz_mm": [
+        -308.67,
+        17.06,
+        1411.35
+      ],
+      "tcp_rpy_deg": [
+        6.96,
+        -3.71,
+        -155.53
+      ]
+    },
+    {
+      "id": 172,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.421,
+      "feedrate_mms": 353.2,
+      "pixel_uv": [
+        597,
+        599
+      ],
+      "surface_xyz_mm": [
+        -328.75,
+        40.22,
+        1560.1
+      ],
+      "normal_xyz": [
+        -0.0212,
+        -0.097,
+        -0.9951
+      ],
+      "tcp_xyz_mm": [
+        -331.93,
+        25.68,
+        1410.84
+      ],
+      "tcp_rpy_deg": [
+        4.52,
+        -3.47,
+        -154.97
+      ]
+    },
+    {
+      "id": 173,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.329,
+      "feedrate_mms": 374.2,
+      "pixel_uv": [
+        573,
+        601
+      ],
+      "surface_xyz_mm": [
+        -350.11,
+        41.99,
+        1560.21
+      ],
+      "normal_xyz": [
+        0.0015,
+        -0.0752,
+        -0.9972
+      ],
+      "tcp_xyz_mm": [
+        -349.89,
+        30.71,
+        1410.63
+      ],
+      "tcp_rpy_deg": [
+        3.94,
+        -1.77,
+        -154.72
+      ]
+    },
+    {
+      "id": 174,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.212,
+      "feedrate_mms": 401.2,
+      "pixel_uv": [
+        549,
+        603
+      ],
+      "surface_xyz_mm": [
+        -371.46,
+        43.76,
+        1560.11
+      ],
+      "normal_xyz": [
+        -0.0089,
+        -0.0287,
+        -0.9995
+      ],
+      "tcp_xyz_mm": [
+        -372.8,
+        39.45,
+        1410.18
+      ],
+      "tcp_rpy_deg": [
+        1.26,
+        -1.18,
+        -154.2
+      ]
+    },
+    {
+      "id": 175,
+      "leg": "right",
+      "pass_id": 4,
+      "spray_on": true,
+      "feather_intensity": 0.18,
+      "feedrate_mms": 408.6,
+      "pixel_uv": [
+        526,
+        605
+      ],
+      "surface_xyz_mm": [
+        -391.76,
+        45.54,
+        1560.25
+      ],
+      "normal_xyz": [
+        -0.0057,
+        -0.0462,
+        -0.9989
+      ],
+      "tcp_xyz_mm": [
+        -392.61,
+        38.61,
+        1410.41
+      ],
+      "tcp_rpy_deg": [
+        2.25,
+        -1.44,
+        -154.39
+      ]
+    }
+  ]
+}

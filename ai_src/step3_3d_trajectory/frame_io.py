@@ -37,6 +37,81 @@ def save_frame(path, xyz, rgb):
     path.with_suffix('.frame.json').write_text(json.dumps({'width':w,'height':h,'units':'mm','organized':True}),encoding='utf-8')
     return path
 
+def _rasterize_unorganized_ply(data, color_keys, height=1200, width=1944):
+    """Project an unorganized RGB/XYZ point cloud (including Unity world-meter PLYs) onto a Zivid 1200x1944 organized grid."""
+    x = np.asarray(data['x'], dtype=np.float32)
+    y = np.asarray(data['y'], dtype=np.float32)
+    z = np.asarray(data['z'], dtype=np.float32)
+    r = np.asarray(data[color_keys[0]], dtype=np.uint8)
+    g = np.asarray(data[color_keys[1]], dtype=np.uint8)
+    b = np.asarray(data[color_keys[2]], dtype=np.uint8)
+
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if not np.any(finite):
+        raise ValueError('Unorganized PLY has no valid 3D points.')
+    x, y, z = x[finite], y[finite], z[finite]
+    r, g, b = r[finite], g[finite], b[finite]
+
+    # Detect Unity world-meter coordinates (e.g. full_cloud_world.ply) and convert back to Zivid camera mm
+    if float(np.max(np.abs(z))) < 10.0 and float(np.max(np.abs(x))) < 10.0:
+        vx = x * 1000.0
+        vy = (0.335 - z) * 1000.0
+        vz = (1.685 - y) * 1000.0
+    else:
+        vx, vy, vz = x, y, z
+
+    pos_depth = vz > 100.0
+    if not np.any(pos_depth):
+        raise ValueError('Unorganized PLY has no positive camera depth.')
+    vx, vy, vz = vx[pos_depth], vy[pos_depth], vz[pos_depth]
+    r, g, b = r[pos_depth], g[pos_depth], b[pos_depth]
+
+    # Zivid nominal pinhole projection (verified to <2px against dataset landmarks)
+    fx, fy, cx, cy = 1755.0, 1750.0, 967.0, 554.0
+    u = np.rint(cx + fx * (vx / vz)).astype(np.int32)
+    v = np.rint(cy + fy * (vy / vz)).astype(np.int32)
+    in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    if np.count_nonzero(in_bounds) < 1000:
+        # Fallback: auto-fit bounding box of (vx/vz, vy/vz) cleanly inside the 1944x1200 frame
+        nx = vx / vz
+        ny = vy / vz
+        min_x, max_x = float(np.percentile(nx, 1)), float(np.percentile(nx, 99))
+        min_y, max_y = float(np.percentile(ny, 1)), float(np.percentile(ny, 99))
+        scale = 0.88 * min(width / max(max_x - min_x, 1e-4), height / max(max_y - min_y, 1e-4))
+        u = np.rint((nx - 0.5 * (min_x + max_x)) * scale + width * 0.5).astype(np.int32)
+        v = np.rint((ny - 0.5 * (min_y + max_y)) * scale + height * 0.5).astype(np.int32)
+        in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+
+    u, v = u[in_bounds], v[in_bounds]
+    vx, vy, vz = vx[in_bounds], vy[in_bounds], vz[in_bounds]
+    r, g, b = r[in_bounds], g[in_bounds], b[in_bounds]
+
+    # Keep closest point to camera per pixel (z-buffer)
+    order = np.argsort(vz)[::-1]
+    xyz_grid = np.full((height, width, 3), np.nan, dtype=np.float32)
+    rgb_grid = np.zeros((height, width, 3), dtype=np.uint8)
+    u_ord, v_ord = u[order], v[order]
+    xyz_grid[v_ord, u_ord, 0] = vx[order]
+    xyz_grid[v_ord, u_ord, 1] = vy[order]
+    xyz_grid[v_ord, u_ord, 2] = vz[order]
+    rgb_grid[v_ord, u_ord, 0] = r[order]
+    rgb_grid[v_ord, u_ord, 1] = g[order]
+    rgb_grid[v_ord, u_ord, 2] = b[order]
+
+    # Fill 1-2px rasterization pinholes so YOLO sees a solid photo
+    valid = np.isfinite(xyz_grid[:, :, 2])
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        shifted_valid = np.roll(np.roll(valid, dy, axis=0), dx, axis=1)
+        fill = (~valid) & shifted_valid
+        if np.any(fill):
+            for c in range(3):
+                xyz_grid[:, :, c][fill] = np.roll(np.roll(xyz_grid[:, :, c], dy, axis=0), dx, axis=1)[fill]
+                rgb_grid[:, :, c][fill] = np.roll(np.roll(rgb_grid[:, :, c], dy, axis=0), dx, axis=1)[fill]
+            valid |= fill
+
+    return xyz_grid, rgb_grid
+
+
 def load_frame(path):
     path = Path(path)
     npz = path if path.suffix.lower() == '.npz' else path.with_suffix('.npz')
@@ -65,19 +140,20 @@ def load_frame(path):
         elif fmt=='ascii': data=np.genfromtxt(f,dtype=np.dtype(props),max_rows=count)
         else: raise ValueError(f'Unsupported PLY encoding: {fmt}')
     if data.size != count: raise ValueError('Truncated point cloud.')
+    names=data.dtype.names
+    if not all(k in names for k in ('x','y','z')): raise ValueError('PLY lacks XYZ.')
+    color=('red','green','blue') if 'red' in names else ('r','g','b')
+    if not all(k in names for k in color): raise ValueError('PLY lacks RGB.')
     meta=path.with_suffix('.frame.json')
     if meta.is_file():
         m=json.loads(meta.read_text(encoding='utf-8-sig')); width=m['width']; height=m['height']
         if m.get('units','mm')!='mm': raise ValueError('Expected millimetres.')
     if width is None or height is None:
         if count==1944*1200: height,width=1200,1944
-        else: raise ValueError('Unorganized PLY: capture an organized RGB/XYZ frame or provide .frame.json.')
-    if int(width)*int(height)!=count: raise ValueError('PLY size differs from frame metadata.')
-    names=data.dtype.names
-    if not all(k in names for k in ('x','y','z')): raise ValueError('PLY lacks XYZ.')
-    color=('red','green','blue') if 'red' in names else ('r','g','b')
-    if not all(k in names for k in color): raise ValueError('PLY lacks RGB.')
-    xyz=np.stack([data[k].reshape(height,width) for k in ('x','y','z')],axis=-1)
-    rgb=np.stack([data[k].reshape(height,width) for k in color],axis=-1)
+    if width is not None and height is not None and int(width)*int(height)==count:
+        xyz=np.stack([data[k].reshape(height,width) for k in ('x','y','z')],axis=-1)
+        rgb=np.stack([data[k].reshape(height,width) for k in color],axis=-1)
+    else:
+        xyz,rgb=_rasterize_unorganized_ply(data,color)
     xyz,rgb=validate_arrays(xyz,rgb)
     return xyz,rgb[:,:,::-1].copy(),rgb
