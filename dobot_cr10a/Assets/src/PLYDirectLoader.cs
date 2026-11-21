@@ -54,11 +54,75 @@ public class PLYDirectLoader : MonoBehaviour
     private MeshCollider surfaceMeshCollider;
 
     private List<GameObject> chunkObjects = new List<GameObject>();
+    private bool hasLoadedSettings = false;
+
+    public void SaveSettings()
+    {
+        PlayerPrefs.SetString("CR10A_PLY_FilePath", plyFilePath ?? "");
+        PlayerPrefs.SetString("CR10A_PLY_SampleName", currentLoadedSampleName ?? "");
+        PlayerPrefs.SetString("CR10A_PLY_DatasetDir", datasetDirectory ?? "");
+        PlayerPrefs.SetInt("CR10A_PLY_RenderMode", (int)renderMode);
+        PlayerPrefs.SetInt("CR10A_PLY_Visible", isPointCloudVisible ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_PLY_AlignRig", alignWithCameraRig ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_PLY_Load100Pct", loadAll100PercentPoints ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_PLY_Downsample", downsampleStep);
+        PlayerPrefs.Save();
+    }
+
+    public void LoadSettings()
+    {
+        if (PlayerPrefs.HasKey("CR10A_PLY_RenderMode"))
+        {
+            string savedPath = PlayerPrefs.GetString("CR10A_PLY_FilePath", "");
+            if (!string.IsNullOrEmpty(savedPath) && File.Exists(ResolvePath(savedPath)))
+            {
+                plyFilePath = savedPath;
+            }
+            string savedSample = PlayerPrefs.GetString("CR10A_PLY_SampleName", "");
+            if (!string.IsNullOrEmpty(savedSample))
+            {
+                currentLoadedSampleName = savedSample;
+            }
+            string savedDatasetDir = PlayerPrefs.GetString("CR10A_PLY_DatasetDir", "");
+            if (!string.IsNullOrEmpty(savedDatasetDir))
+            {
+                datasetDirectory = savedDatasetDir;
+            }
+            renderMode = (WorkpieceRenderMode)PlayerPrefs.GetInt("CR10A_PLY_RenderMode", (int)renderMode);
+            isPointCloudVisible = PlayerPrefs.GetInt("CR10A_PLY_Visible", isPointCloudVisible ? 1 : 0) == 1;
+            alignWithCameraRig = PlayerPrefs.GetInt("CR10A_PLY_AlignRig", alignWithCameraRig ? 1 : 0) == 1;
+            loadAll100PercentPoints = PlayerPrefs.GetInt("CR10A_PLY_Load100Pct", loadAll100PercentPoints ? 1 : 0) == 1;
+            downsampleStep = Mathf.Clamp(PlayerPrefs.GetInt("CR10A_PLY_Downsample", downsampleStep), 1, 4);
+        }
+        hasLoadedSettings = true;
+    }
+
+    private void Awake()
+    {
+        LoadSettings();
+    }
+
+    private void OnDisable()
+    {
+        if (Application.isPlaying && hasLoadedSettings) SaveSettings();
+    }
+
+    private void OnDestroy()
+    {
+        if (Application.isPlaying && hasLoadedSettings) SaveSettings();
+        ReleaseCameraRgbTexture();
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (hasLoadedSettings) SaveSettings();
+    }
 
     public void SetVisible(bool visible)
     {
         isPointCloudVisible = visible;
         ApplyRenderMode();
+        if (hasLoadedSettings) SaveSettings();
     }
 
     public void SetPointCloudChunksVisible(bool visible)
@@ -85,6 +149,7 @@ public class PLYDirectLoader : MonoBehaviour
             }
         }
         ApplyRenderMode();
+        if (hasLoadedSettings) SaveSettings();
     }
 
     public void ApplyRenderMode()
@@ -136,6 +201,13 @@ public class PLYDirectLoader : MonoBehaviour
 
     private void Start()
     {
+        LoadSettings();
+        CalibrationManager calibMgr = FindAnyObjectByType<CalibrationManager>();
+        if (calibMgr != null)
+        {
+            calibMgr.EnsureLoadedFromStorage();
+            calibMgr.SyncToSceneCameraAndLoader(reloadPointCloud: false);
+        }
         EnsureMaterial();
         string resolvedPath = ResolvePath(plyFilePath);
         if (File.Exists(resolvedPath))
@@ -162,6 +234,40 @@ public class PLYDirectLoader : MonoBehaviour
 
     [Header("6. Mẫu phôi hiện hành (Active Sample)")]
     public string currentLoadedSampleName = "pcl_101";
+
+    [Header("7. Ảnh RGB thực tế từ Camera (2D -> 3D)")]
+    [NonSerialized] public Texture2D cameraRgbTexture;
+    public int cameraImageWidth = 0;
+    public int cameraImageHeight = 0;
+    public bool hasOrganizedCameraFrame = false;
+    public bool hasTopDownCameraTexture = false;
+    public string loadedCameraSampleName = "";
+
+    private int camGridW = 0;
+    private int camGridH = 0;
+    private Vector3[] camGridWorldPos;
+    private bool[] camGridWorldValid;
+    private float topDownCropMinX = -0.75f;
+    private float topDownCropMaxX = 0.75f;
+    private float topDownCropMinZ = -0.35f;
+    private float topDownCropMaxZ = 0.95f;
+
+    [Serializable]
+    private class FrameMetaJson
+    {
+        public int width;
+        public int height;
+    }
+
+    private void ReleaseCameraRgbTexture()
+    {
+        if (cameraRgbTexture != null)
+        {
+            if (Application.isPlaying) Destroy(cameraRgbTexture);
+            else DestroyImmediate(cameraRgbTexture);
+            cameraRgbTexture = null;
+        }
+    }
 
     public string ResolvePath(string path)
     {
@@ -268,6 +374,7 @@ public class PLYDirectLoader : MonoBehaviour
             plyFilePath = relativePath;
             currentLoadedSampleName = cleanName;
             LoadFullPointCloud(resolved);
+            SaveSettings();
             return true;
         }
         else
@@ -288,6 +395,7 @@ public class PLYDirectLoader : MonoBehaviour
         if (File.Exists(resolved))
         {
             LoadFullPointCloud(resolved);
+            if (hasLoadedSettings) SaveSettings();
         }
         else
         {
@@ -345,6 +453,8 @@ public class PLYDirectLoader : MonoBehaviour
             using (BinaryReader br = new BinaryReader(fs))
             {
                 int vertexCount = 0;
+                int headerWidth = 0;
+                int headerHeight = 0;
                 bool isBinary = false;
 
                 // Đọc Header PLY
@@ -355,6 +465,16 @@ public class PLYDirectLoader : MonoBehaviour
                     line = line.Trim();
 
                     if (line.StartsWith("format binary_little_endian")) isBinary = true;
+                    else if (line.StartsWith("comment width "))
+                    {
+                        string[] parts = line.Split(' ');
+                        if (parts.Length >= 3) int.TryParse(parts[2], out headerWidth);
+                    }
+                    else if (line.StartsWith("comment height "))
+                    {
+                        string[] parts = line.Split(' ');
+                        if (parts.Length >= 3) int.TryParse(parts[2], out headerHeight);
+                    }
                     else if (line.StartsWith("element vertex"))
                     {
                         string[] parts = line.Split(' ');
@@ -369,20 +489,72 @@ public class PLYDirectLoader : MonoBehaviour
                     return;
                 }
 
-                bool isZividOrganized = (vertexCount == 2332800);
+                if (headerWidth <= 0 || headerHeight <= 0)
+                {
+                    string frameMetaPath = Path.ChangeExtension(filePath, ".frame.json");
+                    if (File.Exists(frameMetaPath))
+                    {
+                        try
+                        {
+                            var meta = JsonUtility.FromJson<FrameMetaJson>(File.ReadAllText(frameMetaPath));
+                            if (meta != null && meta.width > 0 && meta.height > 0)
+                            {
+                                headerWidth = meta.width;
+                                headerHeight = meta.height;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                if ((headerWidth <= 0 || headerHeight <= 0) && vertexCount == 2332800)
+                {
+                    headerWidth = 1944;
+                    headerHeight = 1200;
+                }
+
                 bool isPreconverted = filePath.Contains("full_cloud_world");
+                bool isZividOrganized = !isPreconverted && headerWidth > 0 && headerHeight > 0 && (long)headerWidth * headerHeight == vertexCount;
+                CalibrationManager calibMgr = FindAnyObjectByType<CalibrationManager>();
+                bool useCalib = (calibMgr != null && calibMgr.useCalibratedTransform && calibMgr.isCalibrationValid);
+                Transform robotGlobalRef = null;
+                if (useCalib)
+                {
+                    var ctrl = FindAnyObjectByType<DobotCR10AIKController>();
+                    if (ctrl != null) robotGlobalRef = ctrl.globalReference;
+                    if (robotGlobalRef == null)
+                    {
+                        GameObject gObj = GameObject.Find("Global");
+                        if (gObj != null) robotGlobalRef = gObj.transform;
+                    }
+                }
+
+                hasOrganizedCameraFrame = false;
+                hasTopDownCameraTexture = false;
+                camGridW = 0;
+                camGridH = 0;
+                camGridWorldPos = null;
+                camGridWorldValid = null;
 
                 List<Vector3> curVerts = new List<Vector3>(maxPointsPerChunk);
                 List<Color32> curColors = new List<Color32>(maxPointsPerChunk);
                 int totalLoaded = 0;
                 int chunkIdx = 0;
 
-                if (isZividOrganized && !isPreconverted)
+                if (isZividOrganized)
                 {
-                    int h = 1200;
-                    int w = 1944;
+                    int h = headerHeight;
+                    int w = headerWidth;
+                    int texStep = Mathf.Max(1, Mathf.CeilToInt(Mathf.Max(w, h) / 648f));
+                    int texW = (w + texStep - 1) / texStep;
+                    int texH = (h + texStep - 1) / texStep;
+                    Color32[] camPixels = new Color32[texW * texH];
+                    Vector3[] gridPos = new Vector3[texW * texH];
+                    bool[] gridValid = new bool[texW * texH];
+
                     for (int y = 0; y < h; y++)
                     {
+                        bool sampleTexY = (y % texStep == 0);
+                        int ty = y / texStep;
                         for (int x = 0; x < w; x++)
                         {
                             float vx = br.ReadSingle();
@@ -392,28 +564,65 @@ public class PLYDirectLoader : MonoBehaviour
                             byte g = br.ReadByte();
                             byte b = br.ReadByte();
 
-                            if (y % step == 0 && x % step == 0)
+                            bool validDepth = !float.IsNaN(vz) && vz > 400f && vz < 2500f;
+                            bool sampleCloud = (y % step == 0 && x % step == 0);
+                            bool sampleTex = sampleTexY && (x % texStep == 0);
+
+                            Vector3 pos = Vector3.zero;
+                            if (validDepth && (sampleCloud || sampleTex))
                             {
-                                if (!float.IsNaN(vz) && vz > 400f && vz < 2500f)
+                                if (useCalib)
+                                    pos = calibMgr.CameraMmToUnityWorld(new Vector3(vx, vy, vz), robotGlobalRef);
+                                else if (alignWithCameraRig)
+                                    pos = new Vector3(cameraOrigin.x + vx * 0.001f, cameraOrigin.y - vz * 0.001f, cameraOrigin.z - vy * 0.001f);
+                                else
+                                    pos = new Vector3(vx * 0.001f, vy * 0.001f, vz * 0.001f);
+                            }
+
+                            if (sampleTex)
+                            {
+                                int tx = x / texStep;
+                                if (tx < texW && ty < texH)
                                 {
-                                    Vector3 pos = alignWithCameraRig
-                                        ? new Vector3(cameraOrigin.x + vx * 0.001f, cameraOrigin.y - vz * 0.001f, cameraOrigin.z - vy * 0.001f)
-                                        : new Vector3(vx * 0.001f, vy * 0.001f, vz * 0.001f);
-
-                                    curVerts.Add(pos);
-                                    curColors.Add(new Color32(r, g, b, 255));
-                                    totalLoaded++;
-
-                                    if (curVerts.Count >= maxPointsPerChunk)
+                                    camPixels[(texH - 1 - ty) * texW + tx] = new Color32(r, g, b, 255);
+                                    if (validDepth)
                                     {
-                                        CreateChunkObject(curVerts, curColors, chunkIdx++);
-                                        curVerts.Clear();
-                                        curColors.Clear();
+                                        gridPos[ty * texW + tx] = transform.TransformPoint(pos);
+                                        gridValid[ty * texW + tx] = true;
                                     }
+                                }
+                            }
+
+                            if (sampleCloud && validDepth)
+                            {
+                                curVerts.Add(pos);
+                                curColors.Add(new Color32(r, g, b, 255));
+                                totalLoaded++;
+
+                                if (curVerts.Count >= maxPointsPerChunk)
+                                {
+                                    CreateChunkObject(curVerts, curColors, chunkIdx++);
+                                    curVerts.Clear();
+                                    curColors.Clear();
                                 }
                             }
                         }
                     }
+
+                    ReleaseCameraRgbTexture();
+                    cameraRgbTexture = new Texture2D(texW, texH, TextureFormat.RGBA32, false);
+                    cameraRgbTexture.filterMode = FilterMode.Bilinear;
+                    cameraRgbTexture.wrapMode = TextureWrapMode.Clamp;
+                    cameraRgbTexture.SetPixels32(camPixels);
+                    cameraRgbTexture.Apply();
+
+                    camGridW = texW;
+                    camGridH = texH;
+                    camGridWorldPos = gridPos;
+                    camGridWorldValid = gridValid;
+                    cameraImageWidth = w;
+                    cameraImageHeight = h;
+                    hasOrganizedCameraFrame = true;
                 }
                 else
                 {
@@ -433,6 +642,10 @@ public class PLYDirectLoader : MonoBehaviour
                             if (isPreconverted)
                             {
                                 pos = new Vector3(vx, vy, vz);
+                            }
+                            else if (useCalib)
+                            {
+                                pos = calibMgr.CameraMmToUnityWorld(new Vector3(vx, vy, vz), robotGlobalRef);
                             }
                             else if (alignWithCameraRig)
                             {
@@ -467,6 +680,14 @@ public class PLYDirectLoader : MonoBehaviour
                 string stemName = Path.GetFileNameWithoutExtension(filePath);
                 currentLoadedSampleName = (stemName == "full_cloud_world") ? "pcl_25" : stemName;
                 RebuildSurfaceElevationGrid();
+                if (hasOrganizedCameraFrame)
+                {
+                    loadedCameraSampleName = currentLoadedSampleName;
+                }
+                else
+                {
+                    BuildTopDownCameraTextureFromElevationGrid();
+                }
                 ConvertPointCloudToSurfaceMesh();
                 ApplyRenderMode();
                 Debug.Log($"[PLY Loader] HOÀN TẤT: Đã tải {totalLoaded:N0} điểm ảnh 3D từ mẫu [{currentLoadedSampleName}] và tạo 3D Surface Mesh siêu nhẹ!");
@@ -478,23 +699,301 @@ public class PLYDirectLoader : MonoBehaviour
         }
     }
 
+    public void EnsureCameraTextureReady()
+    {
+        if (cameraRgbTexture != null) return;
+        if (rawElevationGridValid == null)
+        {
+            bool hasChunks = false;
+            for (int i = 0; i < transform.childCount; i++)
+            {
+                if (transform.GetChild(i).name.StartsWith("CloudChunk_")) { hasChunks = true; break; }
+            }
+            if (hasChunks)
+            {
+                RebuildSurfaceElevationGrid();
+            }
+        }
+        if (rawElevationGridValid != null)
+        {
+            BuildTopDownCameraTextureFromElevationGrid();
+        }
+    }
+
+    public void BuildTopDownCameraTextureFromElevationGrid()
+    {
+        if (rawElevationGridValid == null || rawElevationGridColor == null) return;
+
+        int minGx = GRID_RES, maxGx = -1, minGz = GRID_RES, maxGz = -1;
+        for (int gx = 0; gx < GRID_RES; gx++)
+        {
+            for (int gz = 0; gz < GRID_RES; gz++)
+            {
+                if (!rawElevationGridValid[gx, gz]) continue;
+                if (gx < minGx) minGx = gx;
+                if (gx > maxGx) maxGx = gx;
+                if (gz < minGz) minGz = gz;
+                if (gz > maxGz) maxGz = gz;
+            }
+        }
+        if (maxGx <= minGx || maxGz <= minGz) return;
+
+        int pad = 4;
+        minGx = Mathf.Max(0, minGx - pad);
+        maxGx = Mathf.Min(GRID_RES - 1, maxGx + pad);
+        minGz = Mathf.Max(0, minGz - pad);
+        maxGz = Mathf.Min(GRID_RES - 1, maxGz + pad);
+
+        int texW = maxGx - minGx + 1;
+        int texH = maxGz - minGz + 1;
+        Color32 bg = new Color32(18, 22, 30, 255);
+        Color32[] pixels = new Color32[texW * texH];
+
+        for (int py = 0; py < texH; py++)
+        {
+            int gz = minGz + py;
+            for (int px = 0; px < texW; px++)
+            {
+                int gx = minGx + px;
+                if (rawElevationGridValid[gx, gz])
+                {
+                    pixels[py * texW + px] = rawElevationGridColor[gx, gz];
+                }
+                else
+                {
+                    // Điền mượt các khe hở 1 ô nhỏ từ các ô lân cận để ảnh sắc nét như camera thật
+                    int rSum = 0, gSum = 0, bSum = 0, cnt = 0;
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        for (int dz = -1; dz <= 1; dz++)
+                        {
+                            int nx = gx + dx, nz = gz + dz;
+                            if (nx >= 0 && nx < GRID_RES && nz >= 0 && nz < GRID_RES && rawElevationGridValid[nx, nz])
+                            {
+                                Color32 nc = rawElevationGridColor[nx, nz];
+                                rSum += nc.r; gSum += nc.g; bSum += nc.b; cnt++;
+                            }
+                        }
+                    }
+                    pixels[py * texW + px] = (cnt >= 3)
+                        ? new Color32((byte)(rSum / cnt), (byte)(gSum / cnt), (byte)(bSum / cnt), 255)
+                        : bg;
+                }
+            }
+        }
+
+        ReleaseCameraRgbTexture();
+        cameraRgbTexture = new Texture2D(texW, texH, TextureFormat.RGBA32, false);
+        cameraRgbTexture.filterMode = FilterMode.Bilinear;
+        cameraRgbTexture.wrapMode = TextureWrapMode.Clamp;
+        cameraRgbTexture.SetPixels32(pixels);
+        cameraRgbTexture.Apply();
+
+        float cellW = (gridMax.x - gridMin.x) / (GRID_RES - 1);
+        float cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
+        topDownCropMinX = gridMin.x + minGx * cellW;
+        topDownCropMaxX = gridMin.x + maxGx * cellW;
+        topDownCropMinZ = gridMin.z + minGz * cellD;
+        topDownCropMaxZ = gridMin.z + maxGz * cellD;
+
+        cameraImageWidth = texW;
+        cameraImageHeight = texH;
+        hasOrganizedCameraFrame = false;
+        hasTopDownCameraTexture = true;
+        loadedCameraSampleName = currentLoadedSampleName;
+    }
+
+    public bool TrySampleCameraUVToWorld(Vector2 uv, out Vector3 worldPos, out Vector3 normalWorld)
+    {
+        worldPos = Vector3.zero;
+        normalWorld = Vector3.up;
+        float u = Mathf.Clamp01(uv.x);
+        float v = Mathf.Clamp01(uv.y);
+
+        if (hasOrganizedCameraFrame && camGridWorldPos != null && camGridWorldValid != null && camGridW > 0 && camGridH > 0)
+        {
+            int cx = Mathf.Clamp(Mathf.RoundToInt(u * (camGridW - 1)), 0, camGridW - 1);
+            int cy = Mathf.Clamp(Mathf.RoundToInt(v * (camGridH - 1)), 0, camGridH - 1);
+
+            bool found = false;
+            Vector3 p = Vector3.zero;
+            if (camGridWorldValid[cy * camGridW + cx])
+            {
+                p = camGridWorldPos[cy * camGridW + cx];
+                found = true;
+            }
+            else
+            {
+                for (int r = 1; r <= 12 && !found; r++)
+                {
+                    Vector3 sum = Vector3.zero;
+                    int cnt = 0;
+                    for (int dy = -r; dy <= r; dy++)
+                    {
+                        int ny = cy + dy;
+                        if (ny < 0 || ny >= camGridH) continue;
+                        for (int dx = -r; dx <= r; dx++)
+                        {
+                            if (Mathf.Abs(dx) != r && Mathf.Abs(dy) != r) continue;
+                            int nx = cx + dx;
+                            if (nx < 0 || nx >= camGridW) continue;
+                            int idx = ny * camGridW + nx;
+                            if (camGridWorldValid[idx])
+                            {
+                                sum += camGridWorldPos[idx];
+                                cnt++;
+                            }
+                        }
+                    }
+                    if (cnt > 0)
+                    {
+                        p = sum / cnt;
+                        found = true;
+                    }
+                }
+            }
+
+            if (found)
+            {
+                worldPos = p;
+                if (SampleSurfaceWorldHeightAndNormal(p.x, p.z, out float surfY, out Vector3 surfNorm))
+                {
+                    if (Mathf.Abs(surfY - p.y) < 0.08f)
+                    {
+                        worldPos.y = surfY;
+                    }
+                    normalWorld = surfNorm;
+                }
+                return true;
+            }
+        }
+
+        if (hasTopDownCameraTexture)
+        {
+            float wx = Mathf.Lerp(topDownCropMinX, topDownCropMaxX, u);
+            float wz = Mathf.Lerp(topDownCropMaxZ, topDownCropMinZ, v);
+            if (SampleSurfaceWorldHeightAndNormal(wx, wz, out float wy, out normalWorld))
+            {
+                worldPos = new Vector3(wx, wy, wz);
+                return true;
+            }
+            worldPos = new Vector3(wx, estimatedTableY + 0.02f, wz);
+            return true;
+        }
+
+        return false;
+    }
+
+    public bool TryWorldToCameraUV(Vector3 worldPos, out Vector2 uv)
+    {
+        uv = Vector2.zero;
+        if (hasTopDownCameraTexture)
+        {
+            float spanX = Mathf.Max(1e-4f, topDownCropMaxX - topDownCropMinX);
+            float spanZ = Mathf.Max(1e-4f, topDownCropMaxZ - topDownCropMinZ);
+            uv = new Vector2(
+                Mathf.Clamp01((worldPos.x - topDownCropMinX) / spanX),
+                Mathf.Clamp01((topDownCropMaxZ - worldPos.z) / spanZ)
+            );
+            return true;
+        }
+
+        if (hasOrganizedCameraFrame && camGridWorldPos != null && camGridWorldValid != null && camGridW > 0 && camGridH > 0)
+        {
+            float bestD2 = float.MaxValue;
+            int bestX = -1, bestY = -1;
+            int coarse = 4;
+            for (int y = 0; y < camGridH; y += coarse)
+            {
+                for (int x = 0; x < camGridW; x += coarse)
+                {
+                    int idx = y * camGridW + x;
+                    if (!camGridWorldValid[idx]) continue;
+                    Vector3 p = camGridWorldPos[idx];
+                    float dx = p.x - worldPos.x;
+                    float dz = p.z - worldPos.z;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 < bestD2)
+                    {
+                        bestD2 = d2;
+                        bestX = x;
+                        bestY = y;
+                    }
+                }
+            }
+            if (bestX >= 0)
+            {
+                int x0 = Mathf.Max(0, bestX - coarse);
+                int x1 = Mathf.Min(camGridW - 1, bestX + coarse);
+                int y0 = Mathf.Max(0, bestY - coarse);
+                int y1 = Mathf.Min(camGridH - 1, bestY + coarse);
+                for (int y = y0; y <= y1; y++)
+                {
+                    for (int x = x0; x <= x1; x++)
+                    {
+                        int idx = y * camGridW + x;
+                        if (!camGridWorldValid[idx]) continue;
+                        Vector3 p = camGridWorldPos[idx];
+                        float dx = p.x - worldPos.x;
+                        float dz = p.z - worldPos.z;
+                        float d2 = dx * dx + dz * dz;
+                        if (d2 < bestD2)
+                        {
+                            bestD2 = d2;
+                            bestX = x;
+                            bestY = y;
+                        }
+                    }
+                }
+                if (bestD2 <= 0.01f)
+                {
+                    uv = new Vector2((float)bestX / Mathf.Max(1, camGridW - 1), (float)bestY / Mathf.Max(1, camGridH - 1));
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     // Lưới tra cứu độ cao bề mặt 3D (X_world, Z_world) -> Y_world (m) & pháp tuyến vi mô 3D
-    private const int GRID_RES = 160;
+    // Tách biệt hoàn toàn Raw Grid (dữ liệu cảm biến gốc, bất biến) và Working Grid (sau khi vá lỗ)
+    // để thuật toán phát hiện lỗ khuyết luôn thấy 100% lỗ thật và nút "Làm Mới" khôi phục được bề mặt gốc!
+    public const int GRID_RES = 480;
+    private float[,] rawElevationGridY;
+    private bool[,] rawElevationGridValid;
+    private Color32[,] rawElevationGridColor;
+
     private float[,] elevationGridY;
     private bool[,] elevationGridValid;
     private Color32[,] elevationGridColor;
+    private bool[,] patchedCellMask;
     private Vector3 gridMin = new Vector3(-0.75f, 0f, -0.35f);
     private Vector3 gridMax = new Vector3(0.75f, 0f, 0.95f);
+    public float estimatedTableY = 0.0f;
+
+    public void GetCellWorldSize(out float cellW, out float cellD)
+    {
+        cellW = (gridMax.x - gridMin.x) / (GRID_RES - 1);
+        cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
+    }
 
     public void RebuildSurfaceElevationGrid()
     {
+        rawElevationGridY = new float[GRID_RES, GRID_RES];
+        rawElevationGridValid = new bool[GRID_RES, GRID_RES];
+        rawElevationGridColor = new Color32[GRID_RES, GRID_RES];
+
         elevationGridY = new float[GRID_RES, GRID_RES];
         elevationGridValid = new bool[GRID_RES, GRID_RES];
         elevationGridColor = new Color32[GRID_RES, GRID_RES];
+        patchedCellMask = new bool[GRID_RES, GRID_RES];
+
         int[,] counts = new int[GRID_RES, GRID_RES];
         long[,] colorR = new long[GRID_RES, GRID_RES];
         long[,] colorG = new long[GRID_RES, GRID_RES];
         long[,] colorB = new long[GRID_RES, GRID_RES];
+        List<float> allValidHeights = new List<float>(GRID_RES * GRID_RES);
 
         for (int c = 0; c < transform.childCount; c++)
         {
@@ -506,14 +1005,15 @@ public class PLYDirectLoader : MonoBehaviour
             Color32[] cols = mf.sharedMesh.colors32;
             bool hasCols = (cols != null && cols.Length == verts.Length);
 
-            int step = Mathf.Max(1, verts.Length / 45000);
+            // Quét mật độ dày & dùng RoundToInt đồng bộ 100% với WorldToGridCell / InjectSurfacePoint (không bị lệch nửa ô!)
+            int step = Mathf.Max(1, verts.Length / 220000);
             for (int i = 0; i < verts.Length; i += step)
             {
                 Vector3 v = child.TransformPoint(verts[i]);
-                if (v.y < -0.1f || v.y > 0.65f) continue;
-                int gx = Mathf.Clamp(Mathf.FloorToInt((v.x - gridMin.x) / (gridMax.x - gridMin.x) * GRID_RES), 0, GRID_RES - 1);
-                int gz = Mathf.Clamp(Mathf.FloorToInt((v.z - gridMin.z) / (gridMax.z - gridMin.z) * GRID_RES), 0, GRID_RES - 1);
-                elevationGridY[gx, gz] += v.y;
+                if (v.y < -0.15f || v.y > 0.70f) continue;
+                int gx = Mathf.Clamp(Mathf.RoundToInt((v.x - gridMin.x) / (gridMax.x - gridMin.x) * (GRID_RES - 1)), 0, GRID_RES - 1);
+                int gz = Mathf.Clamp(Mathf.RoundToInt((v.z - gridMin.z) / (gridMax.z - gridMin.z) * (GRID_RES - 1)), 0, GRID_RES - 1);
+                rawElevationGridY[gx, gz] += v.y;
                 counts[gx, gz]++;
 
                 if (hasCols)
@@ -532,29 +1032,69 @@ public class PLYDirectLoader : MonoBehaviour
             {
                 if (counts[x, z] > 0)
                 {
-                    elevationGridY[x, z] /= counts[x, z];
-                    elevationGridValid[x, z] = true;
+                    float avgY = rawElevationGridY[x, z] / counts[x, z];
+                    rawElevationGridY[x, z] = avgY;
+                    rawElevationGridValid[x, z] = true;
                     byte r = (byte)Mathf.Clamp((int)(colorR[x, z] / counts[x, z]), 0, 255);
                     byte g = (byte)Mathf.Clamp((int)(colorG[x, z] / counts[x, z]), 0, 255);
                     byte b = (byte)Mathf.Clamp((int)(colorB[x, z] / counts[x, z]), 0, 255);
-                    elevationGridColor[x, z] = new Color32(r, g, b, 255);
+                    rawElevationGridColor[x, z] = new Color32(r, g, b, 255);
+                    allValidHeights.Add(avgY);
                 }
                 else
                 {
-                    elevationGridColor[x, z] = new Color32(185, 175, 155, 255);
+                    rawElevationGridColor[x, z] = new Color32(185, 175, 155, 255);
                 }
+
+                elevationGridY[x, z] = rawElevationGridY[x, z];
+                elevationGridValid[x, z] = rawElevationGridValid[x, z];
+                elevationGridColor[x, z] = rawElevationGridColor[x, z];
             }
+        }
+
+        // Ước lượng cao độ mặt bàn từ phân vị thấp (15%) của toàn bộ lưới quét
+        if (allValidHeights.Count > 20)
+        {
+            allValidHeights.Sort();
+            estimatedTableY = allValidHeights[Mathf.Clamp((int)(allValidHeights.Count * 0.15f), 0, allValidHeights.Count - 1)];
+        }
+        else
+        {
+            estimatedTableY = 0.0f;
         }
     }
 
     /// <summary>
+    /// Khôi phục lưới độ cao bề mặt về đúng dữ liệu cảm biến gốc (xóa mọi điểm vá cũ)
+    /// </summary>
+    public void ResetInpaintedPointsToRaw()
+    {
+        if (rawElevationGridY == null || rawElevationGridValid == null) return;
+        if (patchedCellMask == null) patchedCellMask = new bool[GRID_RES, GRID_RES];
+        for (int x = 0; x < GRID_RES; x++)
+        {
+            for (int z = 0; z < GRID_RES; z++)
+            {
+                elevationGridY[x, z] = rawElevationGridY[x, z];
+                elevationGridValid[x, z] = rawElevationGridValid[x, z];
+                elevationGridColor[x, z] = rawElevationGridColor[x, z];
+                patchedCellMask[x, z] = false;
+            }
+        }
+        ConvertPointCloudToSurfaceMesh(applyPinHoleFill: false);
+    }
+
+    /// <summary>
     /// Chuyển đổi toàn bộ dữ liệu Point Cloud hoặc Elevation Grid thành 3D Surface Mesh siêu nhẹ.
-    /// - Chỉ tốn 1 Draw Call duy nhất trên GPU (tăng FPS gấp 10 lần, giảm nhiệt máy).
-    /// - Tự động bịt các khoảng hở vi mô, giữ đúng biên dạng đùi, gối, đũng và các nếp gấp 3D.
-    /// - Đi kèm MeshCollider để raycast quỹ đạo phun chính xác tuyệt đối không bị lơ lửng.
+    /// Lưu ý: Pin-hole fill chỉ chạy trên bản sao tạm cho mesh hiển thị, KHÔNG ghi đè `rawElevationGridValid`!
     /// </summary>
     [ContextMenu("Chuyển đổi sang 3D Surface Mesh")]
     public GameObject ConvertPointCloudToSurfaceMesh()
+    {
+        return ConvertPointCloudToSurfaceMesh(applyPinHoleFill: true);
+    }
+
+    public GameObject ConvertPointCloudToSurfaceMesh(bool applyPinHoleFill)
     {
         if (elevationGridY == null || elevationGridValid == null || elevationGridColor == null)
         {
@@ -570,6 +1110,11 @@ public class PLYDirectLoader : MonoBehaviour
             else DestroyImmediate(oldMeshChild.gameObject);
         }
 
+        // Tạo bản sao làm việc để pin-hole fill không phá hỏng cờ valid gốc
+        float[,] meshY = (float[,])elevationGridY.Clone();
+        bool[,] meshValid = (bool[,])elevationGridValid.Clone();
+        Color32[,] meshColor = (Color32[,])elevationGridColor.Clone();
+
         List<Vector3> verts = new List<Vector3>();
         List<Color32> colors = new List<Color32>();
         int[,] gridVertIdx = new int[GRID_RES, GRID_RES];
@@ -580,46 +1125,55 @@ public class PLYDirectLoader : MonoBehaviour
         float cellW = (gridMax.x - gridMin.x) / (GRID_RES - 1);
         float cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
 
-        // Tự động vá kín các lỗ khuyết vi mô nội bộ (Pin-hole morphological inpainting)
-        // Đảm bảo không còn bất kỳ lỗ thủng nào trên bề mặt 3D Mesh
-        for (int iter = 0; iter < 2; iter++)
+        // Vá 2 pass lỗ kim 1-ô (5/8 hàng xóm) khi dựng mesh hiển thị để bịt kín khe vi mô; không làm thay đổi rawElevationGridValid!
+        if (applyPinHoleFill)
         {
-            for (int x = 1; x < GRID_RES - 1; x++)
+            for (int phPass = 0; phPass < 2; phPass++)
             {
-                for (int z = 1; z < GRID_RES - 1; z++)
+                bool[,] nextValid = (bool[,])meshValid.Clone();
+                float[,] nextY = (float[,])meshY.Clone();
+                Color32[,] nextCol = (Color32[,])meshColor.Clone();
+
+                for (int x = 1; x < GRID_RES - 1; x++)
                 {
-                    if (elevationGridValid[x, z]) continue;
-
-                    float sumY = 0f;
-                    int validNeighbors = 0;
-                    long sumR = 0, sumG = 0, sumB = 0;
-
-                    for (int dx = -1; dx <= 1; dx++)
+                    for (int z = 1; z < GRID_RES - 1; z++)
                     {
-                        for (int dz = -1; dz <= 1; dz++)
+                        if (meshValid[x, z]) continue;
+
+                        float sumY = 0f;
+                        int validNeighbors = 0;
+                        long sumR = 0, sumG = 0, sumB = 0;
+
+                        for (int dx = -1; dx <= 1; dx++)
                         {
-                            if (dx == 0 && dz == 0) continue;
-                            int nx = x + dx;
-                            int nz = z + dz;
-                            if (elevationGridValid[nx, nz])
+                            for (int dz = -1; dz <= 1; dz++)
                             {
-                                sumY += elevationGridY[nx, nz];
-                                sumR += elevationGridColor[nx, nz].r;
-                                sumG += elevationGridColor[nx, nz].g;
-                                sumB += elevationGridColor[nx, nz].b;
-                                validNeighbors++;
+                                if (dx == 0 && dz == 0) continue;
+                                int nx = x + dx;
+                                int nz = z + dz;
+                                if (meshValid[nx, nz])
+                                {
+                                    sumY += meshY[nx, nz];
+                                    sumR += meshColor[nx, nz].r;
+                                    sumG += meshColor[nx, nz].g;
+                                    sumB += meshColor[nx, nz].b;
+                                    validNeighbors++;
+                                }
                             }
                         }
-                    }
 
-                    // Nếu có từ 4/8 hàng xóm xung quanh hợp lệ -> đây là lỗ thủng nội bộ, lấp kín ngay!
-                    if (validNeighbors >= 4)
-                    {
-                        elevationGridY[x, z] = sumY / validNeighbors;
-                        elevationGridColor[x, z] = new Color32((byte)(sumR / validNeighbors), (byte)(sumG / validNeighbors), (byte)(sumB / validNeighbors), 255);
-                        elevationGridValid[x, z] = true;
+                        if (validNeighbors >= 5)
+                        {
+                            nextY[x, z] = sumY / validNeighbors;
+                            nextCol[x, z] = new Color32((byte)(sumR / validNeighbors), (byte)(sumG / validNeighbors), (byte)(sumB / validNeighbors), 255);
+                            nextValid[x, z] = true;
+                        }
                     }
                 }
+
+                meshY = nextY;
+                meshValid = nextValid;
+                meshColor = nextCol;
             }
         }
 
@@ -629,16 +1183,16 @@ public class PLYDirectLoader : MonoBehaviour
             float wx = gridMin.x + x * cellW;
             for (int z = 0; z < GRID_RES; z++)
             {
-                if (!elevationGridValid[x, z]) continue;
+                if (!meshValid[x, z]) continue;
                 float wz = gridMin.z + z * cellD;
-                float wy = elevationGridY[x, z];
+                float wy = meshY[x, z];
 
                 Vector3 worldPos = new Vector3(wx, wy, wz);
                 Vector3 localPos = transform.InverseTransformPoint(worldPos);
 
                 gridVertIdx[x, z] = verts.Count;
                 verts.Add(localPos);
-                colors.Add(elevationGridColor[x, z]);
+                colors.Add(meshColor[x, z]);
             }
         }
 
@@ -669,10 +1223,12 @@ public class PLYDirectLoader : MonoBehaviour
                 // Tam giác 1: (v00, v01, v10)
                 if (has00 && has01 && has10)
                 {
-                    float y00 = elevationGridY[x, z];
-                    float y01 = elevationGridY[x, z + 1];
-                    float y10 = elevationGridY[x + 1, z];
-                    if (Mathf.Abs(y00 - y01) < maxEdgeDy && Mathf.Abs(y00 - y10) < maxEdgeDy && Mathf.Abs(y01 - y10) < maxEdgeDy)
+                    bool anyPatched = patchedCellMask != null && (patchedCellMask[x, z] || patchedCellMask[x, z + 1] || patchedCellMask[x + 1, z]);
+                    float edgeLimit = anyPatched ? 0.14f : maxEdgeDy;
+                    float y00 = meshY[x, z];
+                    float y01 = meshY[x, z + 1];
+                    float y10 = meshY[x + 1, z];
+                    if (Mathf.Abs(y00 - y01) < edgeLimit && Mathf.Abs(y00 - y10) < edgeLimit && Mathf.Abs(y01 - y10) < edgeLimit)
                     {
                         triangles.Add(v00);
                         triangles.Add(v01);
@@ -683,10 +1239,12 @@ public class PLYDirectLoader : MonoBehaviour
                 // Tam giác 2: (v10, v01, v11)
                 if (has10 && has01 && has11)
                 {
-                    float y10 = elevationGridY[x + 1, z];
-                    float y01 = elevationGridY[x, z + 1];
-                    float y11 = elevationGridY[x + 1, z + 1];
-                    if (Mathf.Abs(y10 - y01) < maxEdgeDy && Mathf.Abs(y10 - y11) < maxEdgeDy && Mathf.Abs(y01 - y11) < maxEdgeDy)
+                    bool anyPatched = patchedCellMask != null && (patchedCellMask[x + 1, z] || patchedCellMask[x, z + 1] || patchedCellMask[x + 1, z + 1]);
+                    float edgeLimit = anyPatched ? 0.14f : maxEdgeDy;
+                    float y10 = meshY[x + 1, z];
+                    float y01 = meshY[x, z + 1];
+                    float y11 = meshY[x + 1, z + 1];
+                    if (Mathf.Abs(y10 - y01) < edgeLimit && Mathf.Abs(y10 - y11) < edgeLimit && Mathf.Abs(y01 - y11) < edgeLimit)
                     {
                         triangles.Add(v10);
                         triangles.Add(v01);
@@ -726,16 +1284,424 @@ public class PLYDirectLoader : MonoBehaviour
         return surfaceMeshObject;
     }
 
+    public Vector2Int WorldToGridCell(float worldX, float worldZ)
+    {
+        int gx = Mathf.Clamp(Mathf.RoundToInt((worldX - gridMin.x) / (gridMax.x - gridMin.x) * (GRID_RES - 1)), 0, GRID_RES - 1);
+        int gz = Mathf.Clamp(Mathf.RoundToInt((worldZ - gridMin.z) / (gridMax.z - gridMin.z) * (GRID_RES - 1)), 0, GRID_RES - 1);
+        return new Vector2Int(gx, gz);
+    }
+
+    public Vector2 GridCellToWorldXZ(int gx, int gz)
+    {
+        float cellW = (gridMax.x - gridMin.x) / (GRID_RES - 1);
+        float cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
+        return new Vector2(gridMin.x + gx * cellW, gridMin.z + gz * cellD);
+    }
+
     /// <summary>
-    /// Kiểm tra trực tiếp tại tọa độ (worldX, worldZ) có điểm quét thực tế từ máy quét không (không qua nội suy lân cận)
-    /// Dùng để phát hiện chính xác 100% các lỗ khuyết tật và điểm mù không bị đánh lừa.
+    /// Kiểm tra trực tiếp trên LƯỚI CẢM BIẾN GỐC (rawElevationGridValid - chưa bị biến đổi bởi pin-hole fill hay vá lỗ).
+    /// Đảm bảo phát hiện chính xác 100% các lỗ khuyết tật thật!
     /// </summary>
     public bool HasSurfacePointAt(float worldX, float worldZ)
     {
+        if (rawElevationGridValid != null)
+        {
+            Vector2Int c = WorldToGridCell(worldX, worldZ);
+            return rawElevationGridValid[c.x, c.y];
+        }
         if (elevationGridValid == null) return false;
-        int gx = Mathf.Clamp(Mathf.RoundToInt((worldX - gridMin.x) / (gridMax.x - gridMin.x) * (GRID_RES - 1)), 0, GRID_RES - 1);
-        int gz = Mathf.Clamp(Mathf.RoundToInt((worldZ - gridMin.z) / (gridMax.z - gridMin.z) * (GRID_RES - 1)), 0, GRID_RES - 1);
-        return elevationGridValid[gx, gz];
+        Vector2Int cell = WorldToGridCell(worldX, worldZ);
+        return elevationGridValid[cell.x, cell.y];
+    }
+
+    /// <summary>
+    /// Lấy cao độ Y và màu RGB trực tiếp từ LƯỚI CẢM BIẾN GỐC tại (worldX, worldZ) — KHÔNG nội suy, KHÔNG lấy điểm đã vá.
+    /// Dùng làm đầu vào sạch cho các thuật toán vá lỗ (K-NN MLS, TPS RBF, Laplacian PDE).
+    /// </summary>
+    public bool TrySampleRawSurfaceAt(float worldX, float worldZ, out float rawY, out Color32 rawColor)
+    {
+        rawY = estimatedTableY;
+        rawColor = new Color32(140, 145, 155, 255);
+        if (rawElevationGridValid == null || rawElevationGridY == null) return false;
+        Vector2Int c = WorldToGridCell(worldX, worldZ);
+        if (!rawElevationGridValid[c.x, c.y]) return false;
+        rawY = rawElevationGridY[c.x, c.y];
+        rawColor = rawElevationGridColor[c.x, c.y];
+        return true;
+    }
+
+    /// <summary>
+    /// Thu thập K điểm cảm biến gốc hợp lệ gần nhất đối xứng xung quanh (worldX, worldZ) theo vòng tròn đồng tâm mở rộng.
+    /// Dừng ngay khi đủ K láng giềng (+2 vòng đối xứng), tốc độ nhanh gấp >10 lần ở độ phân giải lưới 480x480
+    /// và tự động mở rộng tới ~28 cm cho các vùng bị che lớn, đồng thời lọc bỏ điểm mặt bàn (`minClothY`).
+    /// </summary>
+    public List<Vector3> CollectRawSurfaceNeighbors(float worldX, float worldZ, float searchRadiusM, int maxNeighbors, float minClothY = -10f)
+    {
+        List<Vector3> result = new List<Vector3>(maxNeighbors);
+        if (rawElevationGridValid == null || rawElevationGridY == null) return result;
+
+        Vector2Int center = WorldToGridCell(worldX, worldZ);
+        float cellW = (gridMax.x - gridMin.x) / (GRID_RES - 1);
+        float cellD = (gridMax.z - gridMin.z) / (GRID_RES - 1);
+        float minCell = Mathf.Max(1e-4f, Mathf.Min(cellW, cellD));
+
+        int baseRing = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(0.02f, searchRadiusM) / minCell), 4, 48);
+        int hardMaxRing = Mathf.Clamp(Mathf.CeilToInt(0.28f / minCell), baseRing, 96);
+
+        List<(float distSq, Vector3 pos)> candidates = new List<(float, Vector3)>(maxNeighbors * 3);
+        int extraRingsLeft = -1;
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+            candidates.Clear();
+            extraRingsLeft = -1;
+            bool filterTable = (pass == 0 && minClothY > -10f);
+
+            for (int r = 1; r <= hardMaxRing; r++)
+            {
+                int x0 = center.x - r;
+                int x1 = center.x + r;
+                int z0 = center.y - r;
+                int z1 = center.y + r;
+
+                // Cạnh trên & dưới của vòng r
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    int nx = center.x + dx;
+                    if (nx < 0 || nx >= GRID_RES) continue;
+
+                    if (z0 >= 0 && z0 < GRID_RES && rawElevationGridValid[nx, z0])
+                    {
+                        float ry = rawElevationGridY[nx, z0];
+                        if (!filterTable || ry >= minClothY)
+                        {
+                            Vector2 wp = GridCellToWorldXZ(nx, z0);
+                            float d2 = (wp.x - worldX) * (wp.x - worldX) + (wp.y - worldZ) * (wp.y - worldZ);
+                            candidates.Add((d2, new Vector3(wp.x, ry, wp.y)));
+                        }
+                    }
+                    if (z1 >= 0 && z1 < GRID_RES && rawElevationGridValid[nx, z1])
+                    {
+                        float ry = rawElevationGridY[nx, z1];
+                        if (!filterTable || ry >= minClothY)
+                        {
+                            Vector2 wp = GridCellToWorldXZ(nx, z1);
+                            float d2 = (wp.x - worldX) * (wp.x - worldX) + (wp.y - worldZ) * (wp.y - worldZ);
+                            candidates.Add((d2, new Vector3(wp.x, ry, wp.y)));
+                        }
+                    }
+                }
+
+                // Cạnh trái & phải của vòng r (bỏ 4 góc đã duyệt)
+                for (int dz = -r + 1; dz <= r - 1; dz++)
+                {
+                    int nz = center.y + dz;
+                    if (nz < 0 || nz >= GRID_RES) continue;
+
+                    if (x0 >= 0 && x0 < GRID_RES && rawElevationGridValid[x0, nz])
+                    {
+                        float ry = rawElevationGridY[x0, nz];
+                        if (!filterTable || ry >= minClothY)
+                        {
+                            Vector2 wp = GridCellToWorldXZ(x0, nz);
+                            float d2 = (wp.x - worldX) * (wp.x - worldX) + (wp.y - worldZ) * (wp.y - worldZ);
+                            candidates.Add((d2, new Vector3(wp.x, ry, wp.y)));
+                        }
+                    }
+                    if (x1 >= 0 && x1 < GRID_RES && rawElevationGridValid[x1, nz])
+                    {
+                        float ry = rawElevationGridY[x1, nz];
+                        if (!filterTable || ry >= minClothY)
+                        {
+                            Vector2 wp = GridCellToWorldXZ(x1, nz);
+                            float d2 = (wp.x - worldX) * (wp.x - worldX) + (wp.y - worldZ) * (wp.y - worldZ);
+                            candidates.Add((d2, new Vector3(wp.x, ry, wp.y)));
+                        }
+                    }
+                }
+
+                if (extraRingsLeft < 0 && candidates.Count >= maxNeighbors)
+                {
+                    extraRingsLeft = 2; // Quét thêm 2 vòng để đảm bảo đối xứng tròn
+                }
+                else if (extraRingsLeft > 0)
+                {
+                    extraRingsLeft--;
+                    if (extraRingsLeft == 0) break;
+                }
+            }
+
+            if (candidates.Count >= Mathf.Min(6, maxNeighbors)) break;
+        }
+
+        candidates.Sort((a, b) => a.distSq.CompareTo(b.distSq));
+        int take = Mathf.Min(maxNeighbors, candidates.Count);
+        for (int i = 0; i < take; i++) result.Add(candidates[i].pos);
+        return result;
+    }
+
+    public bool IsRawCellValid(int gx, int gz)
+    {
+        if (rawElevationGridValid == null || gx < 0 || gx >= GRID_RES || gz < 0 || gz >= GRID_RES) return false;
+        return rawElevationGridValid[gx, gz];
+    }
+
+    public float GetRawCellY(int gx, int gz)
+    {
+        if (rawElevationGridY == null || gx < 0 || gx >= GRID_RES || gz < 0 || gz >= GRID_RES) return estimatedTableY;
+        return rawElevationGridY[gx, gz];
+    }
+
+    public void InjectSurfaceCell(int gx, int gz, float worldY, Color32 color)
+    {
+        if (elevationGridY == null || elevationGridValid == null) RebuildSurfaceElevationGrid();
+        if (elevationGridY == null || gx < 0 || gx >= GRID_RES || gz < 0 || gz >= GRID_RES) return;
+        if (patchedCellMask == null) patchedCellMask = new bool[GRID_RES, GRID_RES];
+        elevationGridY[gx, gz] = worldY;
+        elevationGridValid[gx, gz] = true;
+        patchedCellMask[gx, gz] = true;
+        if (elevationGridColor != null) elevationGridColor[gx, gz] = color;
+    }
+
+    /// <summary>
+    /// Xuất 3D Surface Mesh hiện tại (đã vá kín toàn bộ vùng bị che khuất) ra file chuẩn Wavefront .OBJ (có màu đỉnh & pháp tuyến)
+    /// </summary>
+    public string ExportSurfaceMeshToObj(string outputPath)
+    {
+        if (surfaceMeshObject == null) ConvertPointCloudToSurfaceMesh(applyPinHoleFill: true);
+        if (surfaceMeshObject == null) return "";
+        MeshFilter mf = surfaceMeshObject.GetComponent<MeshFilter>();
+        if (mf == null || mf.sharedMesh == null) return "";
+
+        Mesh m = mf.sharedMesh;
+        Vector3[] verts = m.vertices;
+        Vector3[] norms = m.normals;
+        Color32[] cols = m.colors32;
+        int[] tris = m.triangles;
+
+        string dir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+        using (StreamWriter sw = new StreamWriter(outputPath, false, System.Text.Encoding.UTF8))
+        {
+            sw.WriteLine("# Dobot CR10A Repaired 3D Garment Surface Mesh (.OBJ)");
+            sw.WriteLine($"# Vertices: {verts.Length} | Triangles: {tris.Length / 3}");
+            bool hasCols = (cols != null && cols.Length == verts.Length);
+            for (int i = 0; i < verts.Length; i++)
+            {
+                Vector3 wp = surfaceMeshObject.transform.TransformPoint(verts[i]);
+                if (hasCols)
+                {
+                    sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "v {0:F5} {1:F5} {2:F5} {3:F3} {4:F3} {5:F3}",
+                        wp.x, wp.y, wp.z, cols[i].r / 255f, cols[i].g / 255f, cols[i].b / 255f));
+                }
+                else
+                {
+                    sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "v {0:F5} {1:F5} {2:F5}", wp.x, wp.y, wp.z));
+                }
+            }
+            if (norms != null && norms.Length == verts.Length)
+            {
+                for (int i = 0; i < norms.Length; i++)
+                {
+                    sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "vn {0:F4} {1:F4} {2:F4}", norms[i].x, norms[i].y, norms[i].z));
+                }
+            }
+            for (int i = 0; i < tris.Length; i += 3)
+            {
+                int a = tris[i] + 1, b = tris[i + 1] + 1, c = tris[i + 2] + 1;
+                sw.WriteLine($"f {a}//{a} {b}//{b} {c}//{c}");
+            }
+        }
+        return outputPath;
+    }
+
+    /// <summary>
+    /// Nội suy màu RGB thực của vải xung quanh lỗ khuyết theo vòng đồng tâm (dừng ngay khi đủ mẫu -> siêu nhanh ở 480x480).
+    /// </summary>
+    public Color32 SampleSurroundingRawColor(float worldX, float worldZ, int searchCells = 14)
+    {
+        if (rawElevationGridValid == null || rawElevationGridColor == null)
+            return new Color32(120, 130, 148, 255);
+
+        Vector2Int c = WorldToGridCell(worldX, worldZ);
+        int maxR = Mathf.Max(48, searchCells * 4);
+        float sumR = 0f, sumG = 0f, sumB = 0f, sumW = 0f;
+        int found = 0;
+
+        for (int r = 1; r <= maxR; r++)
+        {
+            int x0 = c.x - r, x1 = c.x + r;
+            int z0 = c.y - r, z1 = c.y + r;
+
+            for (int dx = -r; dx <= r; dx++)
+            {
+                int nx = c.x + dx;
+                if (nx < 0 || nx >= GRID_RES) continue;
+                if (z0 >= 0 && z0 < GRID_RES && rawElevationGridValid[nx, z0])
+                {
+                    float w = 1f / (1f + dx * dx + r * r);
+                    Color32 col = rawElevationGridColor[nx, z0];
+                    sumR += col.r * w; sumG += col.g * w; sumB += col.b * w; sumW += w; found++;
+                }
+                if (z1 >= 0 && z1 < GRID_RES && rawElevationGridValid[nx, z1])
+                {
+                    float w = 1f / (1f + dx * dx + r * r);
+                    Color32 col = rawElevationGridColor[nx, z1];
+                    sumR += col.r * w; sumG += col.g * w; sumB += col.b * w; sumW += w; found++;
+                }
+            }
+            for (int dz = -r + 1; dz <= r - 1; dz++)
+            {
+                int nz = c.y + dz;
+                if (nz < 0 || nz >= GRID_RES) continue;
+                if (x0 >= 0 && x0 < GRID_RES && rawElevationGridValid[x0, nz])
+                {
+                    float w = 1f / (1f + r * r + dz * dz);
+                    Color32 col = rawElevationGridColor[x0, nz];
+                    sumR += col.r * w; sumG += col.g * w; sumB += col.b * w; sumW += w; found++;
+                }
+                if (x1 >= 0 && x1 < GRID_RES && rawElevationGridValid[x1, nz])
+                {
+                    float w = 1f / (1f + r * r + dz * dz);
+                    Color32 col = rawElevationGridColor[x1, nz];
+                    sumR += col.r * w; sumG += col.g * w; sumB += col.b * w; sumW += w; found++;
+                }
+            }
+
+            if (found >= 12) break;
+        }
+
+        if (sumW > 1e-5f)
+        {
+            return new Color32(
+                (byte)Mathf.Clamp(Mathf.RoundToInt(sumR / sumW), 0, 255),
+                (byte)Mathf.Clamp(Mathf.RoundToInt(sumG / sumW), 0, 255),
+                (byte)Mathf.Clamp(Mathf.RoundToInt(sumB / sumW), 0, 255),
+                255);
+        }
+        return new Color32(120, 130, 148, 255);
+    }
+
+    /// <summary>
+    /// Giải phương trình Laplace PDE (∇²Y = 0) bằng lặp Gauss-Seidel SOR nhiều vòng trên các ô khuyết
+    /// với điều kiện biên Dirichlet cố định từ các ô cảm biến gốc hợp lệ xung quanh.
+    /// Hỗ trợ lỗ rất lớn (>1400 ô ở lưới 480x480) hội tụ mượt, không bao giờ rớt độ cao!
+    /// </summary>
+    public Dictionary<Vector2Int, float> SolveLaplacianPdeOnHoleCells(HashSet<Vector2Int> holeCells, int iterations = 100, float relaxation = 1.45f, float minClothY = -10f)
+    {
+        Dictionary<Vector2Int, float> solved = new Dictionary<Vector2Int, float>();
+        if (rawElevationGridY == null || rawElevationGridValid == null || holeCells == null || holeCells.Count == 0)
+            return solved;
+
+        float[,] fieldY = (float[,])rawElevationGridY.Clone();
+        bool[,] known = new bool[GRID_RES, GRID_RES];
+        for (int x = 0; x < GRID_RES; x++)
+        {
+            for (int z = 0; z < GRID_RES; z++)
+            {
+                if (rawElevationGridValid[x, z] && rawElevationGridY[x, z] >= minClothY)
+                {
+                    known[x, z] = true;
+                }
+            }
+        }
+
+        // Khởi tạo giá trị ban đầu cho mỗi ô khuyết bằng biên vải hợp lệ gần nhất (tới 72 ô ~20cm)
+        List<Vector2Int> holeList = new List<Vector2Int>(holeCells);
+        for (int i = 0; i < holeList.Count; i++)
+        {
+            Vector2Int cell = holeList[i];
+            if (cell.x < 0 || cell.x >= GRID_RES || cell.y < 0 || cell.y >= GRID_RES) continue;
+            known[cell.x, cell.y] = false;
+        }
+
+        for (int i = 0; i < holeList.Count; i++)
+        {
+            Vector2Int cell = holeList[i];
+            if (cell.x < 0 || cell.x >= GRID_RES || cell.y < 0 || cell.y >= GRID_RES) continue;
+            float sumY = 0f, sumW = 0f;
+            for (int r = 1; r <= 72 && sumW <= 0f; r += (r < 10 ? 1 : 4))
+            {
+                int x0 = cell.x - r, x1 = cell.x + r;
+                int z0 = cell.y - r, z1 = cell.y + r;
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    int nx = cell.x + dx;
+                    if (nx < 0 || nx >= GRID_RES) continue;
+                    if (z0 >= 0 && z0 < GRID_RES && known[nx, z0])
+                    {
+                        float w = 1f / (dx * dx + r * r + 0.1f);
+                        sumY += fieldY[nx, z0] * w; sumW += w;
+                    }
+                    if (z1 >= 0 && z1 < GRID_RES && known[nx, z1])
+                    {
+                        float w = 1f / (dx * dx + r * r + 0.1f);
+                        sumY += fieldY[nx, z1] * w; sumW += w;
+                    }
+                }
+                for (int dz = -r + 1; dz <= r - 1; dz++)
+                {
+                    int nz = cell.y + dz;
+                    if (nz < 0 || nz >= GRID_RES) continue;
+                    if (x0 >= 0 && x0 < GRID_RES && known[x0, nz])
+                    {
+                        float w = 1f / (r * r + dz * dz + 0.1f);
+                        sumY += fieldY[x0, nz] * w; sumW += w;
+                    }
+                    if (x1 >= 0 && x1 < GRID_RES && known[x1, nz])
+                    {
+                        float w = 1f / (r * r + dz * dz + 0.1f);
+                        sumY += fieldY[x1, nz] * w; sumW += w;
+                    }
+                }
+            }
+            fieldY[cell.x, cell.y] = sumW > 0f ? (sumY / sumW) : (estimatedTableY + 0.06f);
+        }
+
+        for (int i = 0; i < holeList.Count; i++)
+        {
+            Vector2Int cell = holeList[i];
+            if (cell.x >= 0 && cell.x < GRID_RES && cell.y >= 0 && cell.y < GRID_RES)
+                known[cell.x, cell.y] = true;
+        }
+
+        // Lặp Gauss-Seidel SOR lan truyền hài (Harmonic / Laplace ∇²Y = 0)
+        float omega = Mathf.Clamp(relaxation, 0.5f, 1.65f);
+        for (int it = 0; it < iterations; it++)
+        {
+            for (int i = 0; i < holeList.Count; i++)
+            {
+                Vector2Int cell = holeList[i];
+                int x = cell.x;
+                int z = cell.y;
+                if (x <= 0 || x >= GRID_RES - 1 || z <= 0 || z >= GRID_RES - 1) continue;
+
+                float sum = 0f;
+                int cnt = 0;
+                if (known[x - 1, z]) { sum += fieldY[x - 1, z]; cnt++; }
+                if (known[x + 1, z]) { sum += fieldY[x + 1, z]; cnt++; }
+                if (known[x, z - 1]) { sum += fieldY[x, z - 1]; cnt++; }
+                if (known[x, z + 1]) { sum += fieldY[x, z + 1]; cnt++; }
+
+                if (cnt > 0)
+                {
+                    float avg = sum / cnt;
+                    fieldY[x, z] = fieldY[x, z] + omega * (avg - fieldY[x, z]);
+                }
+            }
+        }
+
+        for (int i = 0; i < holeList.Count; i++)
+        {
+            Vector2Int cell = holeList[i];
+            if (cell.x >= 0 && cell.x < GRID_RES && cell.y >= 0 && cell.y < GRID_RES)
+                solved[cell] = fieldY[cell.x, cell.y];
+        }
+        return solved;
     }
 
     /// <summary>
@@ -743,7 +1709,20 @@ public class PLYDirectLoader : MonoBehaviour
     /// </summary>
     public void RefreshSurfaceMeshFromGrid()
     {
-        ConvertPointCloudToSurfaceMesh();
+        ConvertPointCloudToSurfaceMesh(applyPinHoleFill: true);
+    }
+
+    /// <summary>
+    /// Bắn tia 3D trực tiếp lên MeshCollider của bề mặt quần (3D Surface Mesh) để tìm giao điểm phun mực chính xác.
+    /// </summary>
+    public bool RaycastSurfaceMesh(Ray ray, float maxDistance, out RaycastHit hit)
+    {
+        hit = default;
+        if (surfaceMeshCollider != null && surfaceMeshObject != null && surfaceMeshObject.activeInHierarchy)
+        {
+            return surfaceMeshCollider.Raycast(ray, out hit, maxDistance);
+        }
+        return false;
     }
 
     /// <summary>

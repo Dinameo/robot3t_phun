@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 =============================================================================
@@ -58,7 +58,7 @@ class AutoLabeling3D:
         ("waist_left", "thigh_left"), ("waist_right", "thigh_right")
     ]
 
-    DEFAULT_DATASET_DIR = Path("/media/nhan/01DC3601B2514510/RB3t_PJ/ai_src/dataset")
+    DEFAULT_DATASET_DIR = Path(__file__).resolve().parents[1] / "dataset"
 
     def __init__(self, dataset_dir=None, root_dir=None, height_threshold_mm=2.0, max_height_mm=120.0):
         self.step_dir = Path(__file__).resolve().parent
@@ -95,25 +95,13 @@ class AutoLabeling3D:
         self.max_height_mm = float(max_height_mm)
 
     def load_organized_ply(self, ply_path):
-        """Đọc đám mây điểm Zivid có cấu trúc (1200 x 1944)."""
-        dt = np.dtype([('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('r', 'u1'), ('g', 'u1'), ('b', 'u1')])
-        with open(ply_path, 'rb') as f:
-            while True:
-                line = f.readline()
-                if not line or line.strip() == b'end_header':
-                    break
-            data = np.fromfile(f, dtype=dt, count=2332800)
-
-        h, w = 1200, 1944
-        xyz = np.stack([data['x'].reshape(h, w), data['y'].reshape(h, w), data['z'].reshape(h, w)], axis=-1)
-        bgr = np.stack([data['b'].reshape(h, w), data['g'].reshape(h, w), data['r'].reshape(h, w)], axis=-1)
-        rgb = np.stack([data['r'].reshape(h, w), data['g'].reshape(h, w), data['b'].reshape(h, w)], axis=-1)
-        return xyz, bgr, rgb
+        from frame_io import load_frame
+        return load_frame(ply_path)
 
     def fit_table_plane(self, xyz):
         """Ước lượng mặt phẳng bàn làm việc bằng RANSAC trên toàn bộ FOV Zivid."""
         x, y, z = xyz[:, :, 0], xyz[:, :, 1], xyz[:, :, 2]
-        valid = (z > 1000.0) & (z < 2200.0)
+        valid = np.isfinite(xyz).all(axis=-1) & (z > 0.0) & (z < 10000.0)
         pts_xy = np.stack([x[valid], y[valid]], axis=-1)
         pts_z = z[valid]
 
@@ -121,9 +109,9 @@ class AutoLabeling3D:
             raise ValueError("Không đủ điểm 3D hợp lệ để xác định mặt phẳng bàn.")
 
         n_samples = min(40000, len(pts_xy))
-        idx = np.random.choice(len(pts_xy), size=n_samples, replace=False)
+        idx = np.random.default_rng(42).choice(len(pts_xy), size=n_samples, replace=False)
 
-        ransac = RANSACRegressor(LinearRegression(), min_samples=3, residual_threshold=2.5, max_trials=100)
+        ransac = RANSACRegressor(LinearRegression(), min_samples=3, residual_threshold=2.5, max_trials=100, random_state=42)
         ransac.fit(pts_xy[idx], pts_z[idx])
 
         a, b_coef = ransac.estimator_.coef_
@@ -141,7 +129,7 @@ class AutoLabeling3D:
 
         z_table = a * x + b_coef * y + c
         height = z_table - z
-        valid_z = (z > 1000.0) & (z < 2200.0)
+        valid_z = np.isfinite(xyz).all(axis=-1) & (z > 0.0) & (z < 10000.0)
 
         # 1. Lọc vật thể nổi cao hơn mặt bàn
         objects_raw = (height >= self.height_threshold_mm) & (height <= self.max_height_mm) & valid_z
