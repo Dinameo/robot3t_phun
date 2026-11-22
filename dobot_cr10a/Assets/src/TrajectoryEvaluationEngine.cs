@@ -64,7 +64,7 @@ public static class TrajectoryEvaluationEngine
         public float scanSpacingSMm = 18f;              // s – bước lượt quét song song (mm)
         public float sprayDistanceDMm = 20f;            // d – khoảng cách súng/TCP đến bề mặt (mm)
         public float sprayWidthWMm = 40f;               // w – bề rộng vệt phun tại khoảng cách d (mm)
-        public float overlapRatioR = 0.50f;             // r – tỷ lệ chồng lấn (0..0.85)
+        public float overlapRatioR = 0.25f;             // r – tỷ lệ chồng lấn tối đa 30% cho P1
         public float douglasPeuckerEpsMm = 4.0f;        // ngưỡng đơn giản hóa biên Douglas-Peucker (mm)
         public float turnaroundOverscanMm = 16f;        // lề quay đầu bên ngoài vùng phun (mm, tắt súng)
         public float openStrokeBrushRadiusMm = 20f;     // bề rộng nở nét khi người dùng vẽ nét hở (mm)
@@ -78,7 +78,7 @@ public static class TrajectoryEvaluationEngine
         public bool testOnBothLegs = true;              // Kiểm chứng trên cả 2 ống hay 1 ống trái
 
         public float EffectiveSpacingSMm => autoSpacingFromWidthOverlap
-            ? Mathf.Clamp(sprayWidthWMm * (1f - Mathf.Clamp(overlapRatioR, 0.05f, 0.85f)), 4f, 120f)
+            ? Mathf.Clamp(sprayWidthWMm * (1f - Mathf.Clamp(overlapRatioR, 0.05f, 0.30f)), 4f, 120f)
             : Mathf.Clamp(scanSpacingSMm, 4f, 120f);
     }
 
@@ -1157,6 +1157,47 @@ public static class TrajectoryEvaluationEngine
         return new Vector2(fallback.x / dAx, fallback.y);
     }
 
+    /// <summary>
+    /// Maps hand-drawn templates with one global similarity transform, preserving
+    /// their outline and proportions instead of bending each point by anatomy.
+    /// </summary>
+    private static Vector2 MapHandDrawnPatternSimilarity12(Vector2 pt, Vector2[] src12, Vector2[] dst12)
+    {
+        if (src12 == null || dst12 == null || src12.Length < 12 || dst12.Length < 12) return pt;
+
+        Vector2 srcCenter = Vector2.zero;
+        Vector2 dstCenter = Vector2.zero;
+        for (int i = 0; i < 12; i++)
+        {
+            srcCenter += src12[i];
+            dstCenter += dst12[i];
+        }
+        srcCenter /= 12f;
+        dstCenter /= 12f;
+
+        double dotSum = 0.0;
+        double crossSum = 0.0;
+        double srcNormSq = 0.0;
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 s = src12[i] - srcCenter;
+            Vector2 d = dst12[i] - dstCenter;
+            dotSum += Vector2.Dot(s, d);
+            crossSum += (double)s.x * d.y - (double)s.y * d.x;
+            srcNormSq += s.sqrMagnitude;
+        }
+
+        double magnitude = Math.Sqrt(dotSum * dotSum + crossSum * crossSum);
+        if (srcNormSq < 1e-10 || magnitude < 1e-10) return pt;
+
+        float cos = (float)(dotSum / magnitude);
+        float sin = (float)(crossSum / magnitude);
+        float scale = (float)(magnitude / srcNormSq);
+        Vector2 rel = (pt - srcCenter) * scale;
+        Vector2 rotated = new Vector2(cos * rel.x - sin * rel.y, sin * rel.x + cos * rel.y);
+        return dstCenter + rotated;
+    }
+
     // =========================================================================
     // 2D. ĐƠN GIẢN HÓA BIÊN DOUGLAS-PEUCKER, PCA TRỤC ỐNG & VÙNG MẪU R (P1 & P2)
     // =========================================================================
@@ -1893,6 +1934,27 @@ public static class TrajectoryEvaluationEngine
         return res;
     }
 
+    /// <summary>Returns the highest sampled garment surface height for a flat 2D path plane.</summary>
+    private static float GetHighestGarmentSurfaceY(DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, float fallbackY)
+    {
+        float maxY = float.NegativeInfinity;
+        if (plyLoader != null)
+        {
+            List<Vector3> surface = plyLoader.ExtractGarmentSurfaceCloudVoxelized(
+                0.004f, ctrl != null ? ctrl.garmentContourWorld : null, 12000);
+            if (surface != null)
+                for (int i = 0; i < surface.Count; i++) maxY = Mathf.Max(maxY, surface[i].y);
+        }
+        if (float.IsNegativeInfinity(maxY) && ctrl != null)
+        {
+            if (ctrl.garmentContourWorld != null)
+                for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) maxY = Mathf.Max(maxY, ctrl.garmentContourWorld[i].y);
+            if (ctrl.landmarksWorldPos != null)
+                for (int i = 0; i < ctrl.landmarksWorldPos.Count; i++) maxY = Mathf.Max(maxY, ctrl.landmarksWorldPos[i].y);
+        }
+        return float.IsNegativeInfinity(maxY) ? fallbackY : maxY;
+    }
+
     private struct TypedSurfacePoint
     {
         public Vector3 worldPos;
@@ -2307,6 +2369,8 @@ public static class TrajectoryEvaluationEngine
             for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) sumY += ctrl.garmentContourWorld[i].y;
             avgClothY = sumY / ctrl.garmentContourWorld.Count;
         }
+        if (p1Cfg.zHeightMode == P1ZHeightMode.Flat2DPlane)
+            avgClothY = GetHighestGarmentSurfaceY(ctrl, plyLoader, avgClothY);
 
         List<Vector2> garmentClip2D = null;
         if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 6)
@@ -2454,7 +2518,7 @@ public static class TrajectoryEvaluationEngine
                         float arcLen = 0f;
                         for (int p = 0; p < st.Count; p++)
                         {
-                            Vector2 wp = WarpPointBarycentric12(st[p], src12, dst12XZ);
+                            Vector2 wp = MapHandDrawnPatternSimilarity12(st[p], src12, dst12XZ);
                             if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
                             warped.Add(wp);
                             if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
@@ -2477,13 +2541,19 @@ public static class TrajectoryEvaluationEngine
                         }
                     }
 
-                    for (int i = 0; i < closedUserLoops.Count; i++)
+                    // Saved templates may store a closed shape both as a region
+                    // (the fill source) and as its outline stroke. Use the region
+                    // once, while keeping any independent open hand-drawn strokes.
+                    if (!usedUserDrawnRegions)
                     {
-                        var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
-                        if (simp.Count >= 3)
+                        for (int i = 0; i < closedUserLoops.Count; i++)
                         {
-                            candidateRawPolys.Add(simp);
-                            candidateAxes.Add(Vector2.up);
+                            var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
+                            if (simp.Count >= 3)
+                            {
+                                candidateRawPolys.Add(simp);
+                                candidateAxes.Add(Vector2.up);
+                            }
                         }
                     }
 
@@ -3536,6 +3606,8 @@ public static class TrajectoryEvaluationEngine
             for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) sumY += ctrl.garmentContourWorld[i].y;
             flatY = sumY / ctrl.garmentContourWorld.Count;
         }
+        if (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D)
+            flatY = GetHighestGarmentSurfaceY(ctrl, plyLoader, flatY);
 
         if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
         {
@@ -3564,7 +3636,7 @@ public static class TrajectoryEvaluationEngine
                     float arcLen = 0f;
                     for (int p = 0; p < st.Count; p++)
                     {
-                        Vector2 wp = WarpPointBarycentric12(st[p], src12, dst12XZ);
+                        Vector2 wp = MapHandDrawnPatternSimilarity12(st[p], src12, dst12XZ);
                         if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
                         warped.Add(wp);
                         if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
@@ -4476,6 +4548,12 @@ public static class TrajectoryEvaluationEngine
     }
 
 
+    /// <summary>
+    /// Fill hình kín (Tròn / Vuông / Đa giác) bằng các hàng raster luân phiên:
+    /// - Chạy sát từ mép minV đến maxV (edgeInset tối thiểu <= 1.5mm) để không hở chóp hình tròn/đa giác.
+    /// - Mỗi hàng là một stroke độc lập để robot tắt súng khi quay đầu giữa các hàng.
+    /// - Tự tách đoạn nếu đa giác lõm có nhiều khoảng cắt trên cùng một dòng quét.
+    /// </summary>
     private static List<List<Vector3>> BuildSimpleFillPassesInsidePolygon2D(List<Vector2> polyXZ, float spacingM)
     {
         var passes = new List<List<Vector3>>();
@@ -4494,36 +4572,50 @@ public static class TrajectoryEvaluationEngine
         }
 
         float spanV = Mathf.Max(0f, maxV - minV);
-        if (spanV < 0.002f) return passes;
+        if (spanV < 0.0015f) return passes;
 
+        // Bước quét mịn và sát biên trên/dưới để phủ kín 100% không chừa lỗ ở đỉnh hình tròn / góc đa giác
+        // Preserve the configured brush/overlap spacing. A small hard cap here
+        // forces extra raster rows and makes the fill deposit overlapping coats.
+        float effSpacingM = Mathf.Clamp(spacingM, 0.0025f, 0.035f);
         int numLines;
         float vFirst, vLast;
-        if (spanV <= spacingM * 0.90f)
+        if (spanV <= effSpacingM * 0.75f)
         {
             numLines = 1;
             vFirst = vLast = 0.5f * (minV + maxV);
         }
         else
         {
-            float edgeInset = Mathf.Min(spacingM * 0.30f, spanV * 0.12f);
+            float edgeInset = Mathf.Min(effSpacingM * 0.15f, 0.0015f);
             vFirst = minV + edgeInset;
             vLast = maxV - edgeInset;
             float innerSpan = Mathf.Max(0f, vLast - vFirst);
-            numLines = Mathf.Clamp(Mathf.CeilToInt(innerSpan / spacingM) + 1, 2, 120);
+            numLines = Mathf.Clamp(Mathf.CeilToInt(innerSpan / effSpacingM) + 1, 2, 220);
         }
 
-        float alongStepM = Mathf.Clamp(spacingM * 0.75f, 0.005f, 0.014f);
+        float alongStepM = Mathf.Clamp(effSpacingM * 0.65f, 0.004f, 0.010f);
+
         for (int li = 0; li < numLines; li++)
         {
             float vLine = (numLines == 1)
                 ? vFirst
                 : Mathf.Lerp(vFirst, vLast, (float)li / (numLines - 1));
             var ivs = IntersectPolygonWithScanlineUV(polyUV, vLine);
+            if (ivs == null || ivs.Count == 0)
+            {
+                continue;
+            }
+
+            // Each sprayed scanline is its own stroke. The waypoint builder
+            // turns the move between strokes off; joining rows here would
+            // keep spray on during the diagonal turnaround and overcoat ends.
             for (int k = 0; k < ivs.Count; k++)
             {
-                float u0 = (li % 2 == 0) ? ivs[k].x : ivs[k].y;
-                float u1 = (li % 2 == 0) ? ivs[k].y : ivs[k].x;
-                int sub = Mathf.Clamp(Mathf.CeilToInt(Mathf.Abs(u1 - u0) / alongStepM), 2, 60);
+                bool reverse = ((li + k) % 2) == 1;
+                float u0 = reverse ? ivs[k].y : ivs[k].x;
+                float u1 = reverse ? ivs[k].x : ivs[k].y;
+                int sub = Mathf.Clamp(Mathf.CeilToInt(Mathf.Abs(u1 - u0) / alongStepM), 2, 80);
                 var seg = new List<Vector3>(sub + 1);
                 for (int p = 0; p <= sub; p++)
                 {
@@ -7359,9 +7451,9 @@ public static class TrajectoryEvaluationEngine
     // 7. MÔ HÌNH BÀN THAO TÁC CÓ COLLIDER & KHUÔN CHÂN ĐỨNG 3D (ĐỢT 3 - PHẢN BIỆN #8)
     // =========================================================================
 
-    public static GameObject EnsurePhysicalWorktable(Transform parent, float tableTopYWorld = 0.0f)
+    public static GameObject EnsurePhysicalWorktable(Transform parent, float tableTopYWorld = 0.0f, GameObject existingTable = null)
     {
-        GameObject tbl = GameObject.Find("CR10A_Worktable_Collider");
+        GameObject tbl = existingTable != null ? existingTable : GameObject.Find("CR10A_Worktable_Collider");
         if (tbl == null)
         {
             tbl = GameObject.CreatePrimitive(PrimitiveType.Cube);

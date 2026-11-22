@@ -559,6 +559,7 @@ public class DobotCR10AIKController : MonoBehaviour
     public readonly List<Vector3> detectedHolePointsWorld = new List<Vector3>();
     public readonly List<Vector2Int> detectedHoleCells = new List<Vector2Int>();
     public readonly List<List<Vector3>> holeRegionOutlinesWorld = new List<List<Vector3>>();
+    public readonly List<Vector3> holeCrossHatchSegmentsWorld = new List<Vector3>();
     public readonly List<Vector3> compensatedSurfacePointsWorld = new List<Vector3>();
     public readonly List<Vector3> gunTiltNormalsWorld = new List<Vector3>();
     private readonly Dictionary<Vector2Int, float> compensatedHeightGrid = new Dictionary<Vector2Int, float>();
@@ -567,7 +568,7 @@ public class DobotCR10AIKController : MonoBehaviour
     private float lastGarmentMedianY = 0.080f;
 
     [Header("10. Vá Điểm 3D & Chuyển Thành 3D Mesh (3D Inpainting & Solid Mesh)")]
-    public bool autoInpaintHolesOnLoad = true;
+    public bool autoInpaintHolesOnLoad = false;
     public bool showInpaintedSurface3D = true;
     public bool renderInpaintedAsSolidMesh = true; // true = tạo 3D Mesh tam giác đặc liền kín mép, false = hạt điểm Point Cloud
     public bool highlightInpaintedMesh = false; // false = màu RGB tiệp vải thật, true = màu cyan nổi bật
@@ -827,7 +828,12 @@ public class DobotCR10AIKController : MonoBehaviour
         if (showPhysicalWorktable)
         {
             PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
-            worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, pl != null ? pl.estimatedTableY : 0f);
+            worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, pl != null ? pl.estimatedTableY : 0f, worktableObj);
+        }
+        else
+        {
+            if (worktableObj == null) worktableObj = GameObject.Find("CR10A_Worktable_Collider");
+            if (worktableObj != null) worktableObj.SetActive(false);
         }
 
         // Ban đầu khi khởi động (lúc chưa bấm CHẠY), robot luôn ở cấu hình Home (0°)
@@ -927,6 +933,7 @@ public class DobotCR10AIKController : MonoBehaviour
         PlayerPrefs.SetInt("CR10A_ConfigSubTab", configSubTab);
         PlayerPrefs.SetInt("CR10A_ShowGizmos", showGizmos ? 1 : 0);
         PlayerPrefs.SetInt("CR10A_ShowCameraAxes", showCameraAxesInCalibration ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_ShowWorktable", showPhysicalWorktable ? 1 : 0);
 
         PlayerPrefs.SetFloat("CR10A_PlaybackSpeed", playbackSpeed);
         PlayerPrefs.SetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
@@ -1214,6 +1221,7 @@ public class DobotCR10AIKController : MonoBehaviour
             configSubTab = PlayerPrefs.GetInt("CR10A_ConfigSubTab", 0);
             showGizmos = PlayerPrefs.GetInt("CR10A_ShowGizmos", 1) == 1;
             showCameraAxesInCalibration = PlayerPrefs.GetInt("CR10A_ShowCameraAxes", 0) == 1;
+            showPhysicalWorktable = PlayerPrefs.GetInt("CR10A_ShowWorktable", 0) == 1;
 
             playbackSpeed = PlayerPrefs.GetFloat("CR10A_PlaybackSpeed", 1.0f);
             maxJointSpeedDegPerSecond = PlayerPrefs.GetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
@@ -2551,12 +2559,15 @@ public class DobotCR10AIKController : MonoBehaviour
     public void SelectSampleByFullPath(string fullPath)
     {
         if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return;
+        PreserveTeachingTemplateAndHideCurrentProjection();
         InvalidateGeneratedTrajectoryOnEdit();
         lastMissingLandmarksSampleName = "";
         selectedSampleName = Path.GetFileNameWithoutExtension(fullPath);
+        strokesProjectedSampleName = selectedSampleName;
         customPlyPath = fullPath;
         ReloadPointCloudFromPath(fullPath);
         LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
+        PreserveTeachingTemplateAndHideCurrentProjection();
         SaveAllSettings();
     }
 
@@ -2596,7 +2607,9 @@ public class DobotCR10AIKController : MonoBehaviour
     public void SelectSample(string sampleName, bool loadLocalPointCloud = true)
     {
         if (string.IsNullOrEmpty(sampleName)) return;
+        PreserveTeachingTemplateAndHideCurrentProjection();
         selectedSampleName = sampleName.Trim();
+        strokesProjectedSampleName = selectedSampleName;
         if (availableSamples.Count == 0) ScanAvailableSamples();
         selectedSampleIdx = availableSamples.IndexOf(selectedSampleName);
 
@@ -2609,7 +2622,44 @@ public class DobotCR10AIKController : MonoBehaviour
         InvalidateGeneratedTrajectoryOnEdit();
         lastMissingLandmarksSampleName = "";
         LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
+        PreserveTeachingTemplateAndHideCurrentProjection();
         SaveAllSettings();
+    }
+
+    /// <summary>
+    /// Keep a canonical copy of the taught pattern, but hide its projection when
+    /// a different PLY is selected. The template returns only after explicit apply.
+    /// </summary>
+    private void PreserveTeachingTemplateAndHideCurrentProjection()
+    {
+        if (customDrawnRegions != null && customDrawnRegions.Count > 0 &&
+            (taughtCanonicalRegions == null || taughtCanonicalRegions.Count == 0))
+        {
+            CaptureCurrentDrawnRegionsToCanonical();
+        }
+        if (canonicalPatternStrokes.Count == 0 && customDrawnStrokes != null && customDrawnStrokes.Count > 0)
+        {
+            List<List<Vector2>> canonical = GetCanonicalTemplateStrokesForMethods();
+            canonicalPatternStrokes.Clear();
+            for (int i = 0; i < canonical.Count; i++)
+                if (canonical[i] != null && canonical[i].Count >= 2)
+                    canonicalPatternStrokes.Add(new List<Vector2>(canonical[i]));
+        }
+
+        customDrawnRegions.Clear();
+        customDrawnStrokes.Clear();
+        selectedRegionIndex = -1;
+        activeRegionEditMode = RegionEditMode.None;
+        activePolygonVerticesUV.Clear();
+        undoHistoryIsRegion.Clear();
+        projectedTargetRegionR2D.Clear();
+        projectedSafeRegionRsafe2D.Clear();
+        projectedTrajectoryOn2D.Clear();
+        projectedTrajectoryOff2D.Clear();
+        projectedP2Skeleton2D.Clear();
+        projectedP3MeshTriangles2D.Clear();
+        projectedP3TriangleFlipped2D.Clear();
+        strokesReferenceLandmarksUV = null;
     }
 
     /// <summary>
@@ -3206,6 +3256,15 @@ public class DobotCR10AIKController : MonoBehaviour
         else if (methodToRun == "P2") SyncP2ConfigFromTechParamsIfNeeded();
         else if (methodToRun == "P3") SyncP3ConfigFromTechParamsIfNeeded();
         else if (methodToRun == "P4") SyncP4ConfigFromTechParamsIfNeeded();
+
+        bool hasTaughtGeometry = taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0 ||
+            customDrawnRegions.Count > 0 || customDrawnStrokes.Count > 0;
+        if (methodToRun == "P1" && hasTaughtGeometry &&
+            (p1Config.regionSource == TrajectoryEvaluationEngine.P1RegionSourceMode.TestCircle ||
+             p1Config.regionSource == TrajectoryEvaluationEngine.P1RegionSourceMode.TestRectangle))
+        {
+            p1Config.regionSource = TrajectoryEvaluationEngine.P1RegionSourceMode.FromTemplateStrokes;
+        }
 
         GenerateAndApplyMethodTrajectory(methodToRun);
         showGizmos = true;
@@ -5323,6 +5382,7 @@ public class DobotCR10AIKController : MonoBehaviour
         detectedHolePointsWorld.Clear();
         detectedHoleCells.Clear();
         holeRegionOutlinesWorld.Clear();
+        holeCrossHatchSegmentsWorld.Clear();
         compensatedSurfacePointsWorld.Clear();
         gunTiltNormalsWorld.Clear();
         compensatedHeightGrid.Clear();
@@ -6021,7 +6081,7 @@ public class DobotCR10AIKController : MonoBehaviour
         showLandmarks3D = GUILayout.Toggle(showLandmarks3D, " 12 mốc AI & khung xương", AntigravityUITheme.StyleToggle);
         if (showLandmarks3D) showLandmarkLabels = GUILayout.Toggle(showLandmarkLabels, " Nhãn tên & cao độ Z", AntigravityUITheme.StyleToggle);
         showSegmentationContour3D = GUILayout.Toggle(showSegmentationContour3D, " Đường bao thân quần", AntigravityUITheme.StyleToggle);
-        showHoleRegionOutlines3D = GUILayout.Toggle(showHoleRegionOutlines3D, " Viền đỏ vùng cần vá", AntigravityUITheme.StyleToggle);
+        showHoleRegionOutlines3D = GUILayout.Toggle(showHoleRegionOutlines3D, " Gạch chéo vùng lỗ cần vá", AntigravityUITheme.StyleToggle);
 
         bool prevShowInp = showInpaintedSurface3D;
         showInpaintedSurface3D = GUILayout.Toggle(showInpaintedSurface3D, " Lớp vá 3D", AntigravityUITheme.StyleToggle);
@@ -6068,12 +6128,16 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             if (showPhysicalWorktable)
             {
-                worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, plyLoader != null ? plyLoader.estimatedTableY : 0f);
+                worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, plyLoader != null ? plyLoader.estimatedTableY : 0f, worktableObj);
             }
-            else if (worktableObj != null)
+            else
             {
-                worktableObj.SetActive(false);
+                if (worktableObj == null) worktableObj = GameObject.Find("CR10A_Worktable_Collider");
+                if (worktableObj != null) worktableObj.SetActive(false);
             }
+            PlayerPrefs.SetInt("CR10A_ShowWorktable", showPhysicalWorktable ? 1 : 0);
+            PlayerPrefs.Save();
+            MarkSettingsDirty();
         }
         GUILayout.EndVertical();
 
@@ -6124,10 +6188,10 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         GUILayout.Space(6);
-        GUILayout.Label("1. QUÉT VÙNG BỊ CHE", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. QUÉT & ĐÁNH CHÉO LỖ TRÊN QUẦN", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Quét & Khoanh đỏ", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+        if (GUILayout.Button("Quét & Đánh chéo lỗ", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
         {
             showHoleRegionOutlines3D = true;
             DetectOcclusionAndHoles();
@@ -6137,6 +6201,7 @@ public class DobotCR10AIKController : MonoBehaviour
             detectedHolePointsWorld.Clear();
             detectedHoleCells.Clear();
             holeRegionOutlinesWorld.Clear();
+            holeCrossHatchSegmentsWorld.Clear();
             compensatedSurfacePointsWorld.Clear();
             gunTiltNormalsWorld.Clear();
             compensatedHeightGrid.Clear();
@@ -6185,14 +6250,8 @@ public class DobotCR10AIKController : MonoBehaviour
             {
                 selectedOcclusionAlgorithm = i;
                 showHoleRegionOutlines3D = true;
-                if (detectedHoleCells == null || detectedHoleCells.Count == 0 || holeRegionOutlinesWorld.Count == 0)
-                {
-                    DetectOcclusionAndHoles();
-                }
-                if (detectedHoleCells != null && detectedHoleCells.Count > 0)
-                {
-                    RunOcclusionCompensation();
-                }
+                DetectOcclusionAndHoles();
+                occlusionStatusMsg = $"Đã chọn [{algos[i]}] — đánh chéo {detectedHoleRegionCount} vùng ({detectedHoleCount} ô). Bấm 'Vá & Áp dụng' để vá.";
             }
         }
         GUILayout.EndVertical();
@@ -6224,11 +6283,20 @@ public class DobotCR10AIKController : MonoBehaviour
 
         GUILayout.Space(6);
         GUILayout.Label("4. THỰC THI & XUẤT MESH", AntigravityUITheme.StyleSectionLabel);
-        if (GUILayout.Button("Vá kín 100% vùng bị che", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
+        if (GUILayout.Button("Vá & Áp dụng (100% lỗ)", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
         {
-            showHoleRegionOutlines3D = true;
+            showInpaintedSurface3D = true;
+            renderInpaintedAsSolidMesh = true;
             if (detectedHoleCells.Count == 0) DetectOcclusionAndHoles();
-            RunOcclusionCompensation();
+            if (detectedHoleCells.Count > 0)
+            {
+                RunOcclusionCompensation();
+                showHoleRegionOutlines3D = false;
+                if (waypoints != null && waypoints.Count > 0)
+                {
+                    ApplyOcclusionCompensationToTrajectory();
+                }
+            }
         }
         GUILayout.Space(4);
         if (GUILayout.Button("Chuyển thành 3D Mesh hoàn chỉnh", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(32)))
@@ -6255,6 +6323,8 @@ public class DobotCR10AIKController : MonoBehaviour
         detectedHolePointsWorld.Clear();
         detectedHoleCells.Clear();
         holeRegionOutlinesWorld.Clear();
+        holeCrossHatchSegmentsWorld.Clear();
+        holeCrossHatchSegmentsWorld.Clear();
         detectedHoleRegionCount = 0;
 
         PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
@@ -6270,7 +6340,7 @@ public class DobotCR10AIKController : MonoBehaviour
             plyLoader.RebuildSurfaceElevationGrid();
             plyLoader.GetCellWorldSize(out cellW, out cellD);
         }
-        if (cellW <= 1e-6f || cellD <= 1e-6f)
+        if (cellW <= 1e-6f || cellD <= 1e-6f || plyLoader.totalLoadedPoints <= 0)
         {
             occlusionStatusMsg = "Chưa nạp file PLY.";
             return;
@@ -6297,66 +6367,124 @@ public class DobotCR10AIKController : MonoBehaviour
             };
         }
 
-        List<Vector3> activePoly = (garmentContourWorld != null && garmentContourWorld.Count > 5)
+        List<Vector3> activePolyRaw = (garmentContourWorld != null && garmentContourWorld.Count > 5)
             ? garmentContourWorld
             : anatomicalPoly;
 
-        if (activePoly == null || activePoly.Count < 3)
+        List<Vector3> activePoly = null;
+        if (activePolyRaw != null && activePolyRaw.Count >= 3)
         {
-            occlusionStatusMsg = "Chưa có đường bao quần hoặc 12 mốc.";
-            return;
-        }
-
-        // SỬA LỖI QUÉT THIẾU VÙNG: Tính hộp bao (Bounding Box) từ HỢP của garmentContourWorld VÀ landmarksWorldPos
-        // để quét trọn vẹn 100% thân quần (không bị cắt mất phần hông/mép gấu ngoài 12 mốc!)
-        float minX = float.MaxValue, maxX = float.MinValue;
-        float minZ = float.MaxValue, maxZ = float.MinValue;
-        for (int i = 0; i < activePoly.Count; i++)
-        {
-            minX = Mathf.Min(minX, activePoly[i].x);
-            maxX = Mathf.Max(maxX, activePoly[i].x);
-            minZ = Mathf.Min(minZ, activePoly[i].z);
-            maxZ = Mathf.Max(maxZ, activePoly[i].z);
-        }
-        if (landmarksWorldPos != null)
-        {
-            for (int i = 0; i < landmarksWorldPos.Count; i++)
+            float flatY = GetGarmentOverlayFlatPlaneY();
+            activePoly = new List<Vector3>(activePolyRaw.Count);
+            for (int i = 0; i < activePolyRaw.Count; i++)
             {
-                minX = Mathf.Min(minX, landmarksWorldPos[i].x);
-                maxX = Mathf.Max(maxX, landmarksWorldPos[i].x);
-                minZ = Mathf.Min(minZ, landmarksWorldPos[i].z);
-                maxZ = Mathf.Max(maxZ, landmarksWorldPos[i].z);
+                activePoly.Add(ProjectWorldPointAlongZividRayToPlaneY(activePolyRaw[i], flatY));
             }
         }
-        minX -= cellW * 2f; maxX += cellW * 2f;
-        minZ -= cellD * 2f; maxZ += cellD * 2f;
 
-        Vector2Int cMin = plyLoader.WorldToGridCell(minX, minZ);
-        Vector2Int cMax = plyLoader.WorldToGridCell(maxX, maxZ);
-        int gxMin = Mathf.Clamp(Mathf.Min(cMin.x, cMax.x), 0, PLYDirectLoader.GRID_RES - 1);
-        int gxMax = Mathf.Clamp(Mathf.Max(cMin.x, cMax.x), 0, PLYDirectLoader.GRID_RES - 1);
-        int gzMin = Mathf.Clamp(Mathf.Min(cMin.y, cMax.y), 0, PLYDirectLoader.GRID_RES - 1);
-        int gzMax = Mathf.Clamp(Mathf.Max(cMin.y, cMax.y), 0, PLYDirectLoader.GRID_RES - 1);
+        int res = PLYDirectLoader.GRID_RES;
+        float tableY = plyLoader.estimatedTableY;
 
-        // Pass A: Xác định từng ô lưới nằm trong thân quần & tính cao độ vải trung vị thực tế
-        bool[,] insideMask = new bool[PLYDirectLoader.GRID_RES, PLYDirectLoader.GRID_RES];
+        // Pass A: Flood-fill vùng ngoài phạm vi quét PLY từ 4 biên lưới 480x480 qua các ô không có điểm (!IsRawCellValid).
+        // Mọi ô `!IsRawCellValid && !outsidePly` là vùng TRỐNG THẬT SỰ KHÔNG CÓ ĐIỂM POINT CLOUD NÀO nằm bên trong khung quét!
+        bool[,] outsidePly = new bool[res, res];
+        Queue<Vector2Int> qOut = new Queue<Vector2Int>(4096);
+        void EnqueuePlyBorder(int bx, int bz)
+        {
+            if (!plyLoader.IsRawCellValid(bx, bz) && !outsidePly[bx, bz])
+            {
+                outsidePly[bx, bz] = true;
+                qOut.Enqueue(new Vector2Int(bx, bz));
+            }
+        }
+        for (int gx = 0; gx < res; gx++) { EnqueuePlyBorder(gx, 0); EnqueuePlyBorder(gx, res - 1); }
+        for (int gz = 0; gz < res; gz++) { EnqueuePlyBorder(0, gz); EnqueuePlyBorder(res - 1, gz); }
+
+        while (qOut.Count > 0)
+        {
+            Vector2Int cur = qOut.Dequeue();
+            int x = cur.x, z = cur.y;
+            if (x > 0 && !plyLoader.IsRawCellValid(x - 1, z) && !outsidePly[x - 1, z]) { outsidePly[x - 1, z] = true; qOut.Enqueue(new Vector2Int(x - 1, z)); }
+            if (x < res - 1 && !plyLoader.IsRawCellValid(x + 1, z) && !outsidePly[x + 1, z]) { outsidePly[x + 1, z] = true; qOut.Enqueue(new Vector2Int(x + 1, z)); }
+            if (z > 0 && !plyLoader.IsRawCellValid(x, z - 1) && !outsidePly[x, z - 1]) { outsidePly[x, z - 1] = true; qOut.Enqueue(new Vector2Int(x, z - 1)); }
+            if (z < res - 1 && !plyLoader.IsRawCellValid(x, z + 1) && !outsidePly[x, z + 1]) { outsidePly[x, z + 1] = true; qOut.Enqueue(new Vector2Int(x, z + 1)); }
+        }
+
+        // Xác định hộp bao vùng quần (mở rộng +14cm quanh quần để bao trọn cả các vùng khuất mất điểm sát sườn ống quần & giữa 2 ống)
+        float minX = float.MaxValue, maxX = float.MinValue;
+        float minZ = float.MaxValue, maxZ = float.MinValue;
         List<float> clothHeights = new List<float>(4096);
 
-        for (int gx = gxMin; gx <= gxMax; gx++)
+        if (activePoly != null && activePoly.Count >= 3)
         {
-            for (int gz = gzMin; gz <= gzMax; gz++)
+            for (int i = 0; i < activePoly.Count; i++)
             {
-                Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
-                if (!IsPointInPolygonXZ(wxz.x, wxz.y, activePoly)) continue;
-                insideMask[gx, gz] = true;
-                if (plyLoader.IsRawCellValid(gx, gz))
+                minX = Mathf.Min(minX, activePoly[i].x);
+                maxX = Mathf.Max(maxX, activePoly[i].x);
+                minZ = Mathf.Min(minZ, activePoly[i].z);
+                maxZ = Mathf.Max(maxZ, activePoly[i].z);
+            }
+        }
+        if (landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+        {
+            float flatY = GetGarmentOverlayFlatPlaneY();
+            for (int i = 0; i < landmarksWorldPos.Count; i++)
+            {
+                Vector3 lp = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i], flatY);
+                minX = Mathf.Min(minX, lp.x);
+                maxX = Mathf.Max(maxX, lp.x);
+                minZ = Mathf.Min(minZ, lp.z);
+                maxZ = Mathf.Max(maxZ, lp.z);
+            }
+        }
+
+        // Nếu chưa có AI contour/mốc -> lấy hộp bao của tất cả các ô vải cao hơn mặt bàn > 10mm
+        if (minX >= maxX || minZ >= maxZ)
+        {
+            for (int gx = 0; gx < res; gx++)
+            {
+                for (int gz = 0; gz < res; gz++)
                 {
-                    clothHeights.Add(plyLoader.GetRawCellY(gx, gz));
+                    if (!plyLoader.IsRawCellValid(gx, gz)) continue;
+                    float y = plyLoader.GetRawCellY(gx, gz);
+                    if (y > tableY + 0.010f)
+                    {
+                        Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
+                        minX = Mathf.Min(minX, wxz.x);
+                        maxX = Mathf.Max(maxX, wxz.x);
+                        minZ = Mathf.Min(minZ, wxz.y);
+                        maxZ = Mathf.Max(maxZ, wxz.y);
+                        clothHeights.Add(y);
+                    }
                 }
             }
         }
 
-        float tableY = plyLoader.estimatedTableY;
+        if (minX >= maxX || minZ >= maxZ)
+        {
+            occlusionStatusMsg = "Không xác định được vùng phôi quần trong file PLY.";
+            return;
+        }
+
+        // Mở rộng +14cm quanh quần để bao phủ đúng các vùng bóng khuất mất điểm sát 2 bên sườn & giữa 2 ống
+        const float padM = 0.14f;
+        Vector2Int cMin = plyLoader.WorldToGridCell(minX - padM, minZ - padM);
+        Vector2Int cMax = plyLoader.WorldToGridCell(maxX + padM, maxZ + padM);
+        int gxMin = Mathf.Clamp(Mathf.Min(cMin.x, cMax.x), 0, res - 1);
+        int gxMax = Mathf.Clamp(Mathf.Max(cMin.x, cMax.x), 0, res - 1);
+        int gzMin = Mathf.Clamp(Mathf.Min(cMin.y, cMax.y), 0, res - 1);
+        int gzMax = Mathf.Clamp(Mathf.Max(cMin.y, cMax.y), 0, res - 1);
+
+        // Tính độ cao trung vị vải thật bên trong vùng quần
+        for (int gx = gxMin; gx <= gxMax; gx++)
+        {
+            for (int gz = gzMin; gz <= gzMax; gz++)
+            {
+                if (!plyLoader.IsRawCellValid(gx, gz)) continue;
+                float y = plyLoader.GetRawCellY(gx, gz);
+                if (y > tableY + 0.010f) clothHeights.Add(y);
+            }
+        }
         if (clothHeights.Count > 10)
         {
             clothHeights.Sort();
@@ -6373,86 +6501,99 @@ public class DobotCR10AIKController : MonoBehaviour
             lastGarmentMedianY = tableY + 0.05f;
         }
 
-        bool garmentAboveTable = (lastGarmentMedianY - tableY) > 0.010f;
-        lastGarmentMinClothY = garmentAboveTable
-            ? (tableY + Mathf.Clamp((lastGarmentMedianY - tableY) * 0.22f, 0.004f, 0.018f))
-            : (tableY - 0.01f);
+        lastGarmentMinClothY = tableY + 0.010f;
 
-        // Pass B: CHỈ tìm các vùng thực sự CÓ LỖ trên bề mặt quần (lưới mịn 480x480 ~3mm):
-        //   1) Ô mất điểm cảm biến thật (!IsRawCellValid)
-        //   2) Ô rơi điểm xuống mặt bàn bên trong thân quần (rawY < lastGarmentMinClothY)
-        //   3) Ô hụt độ sâu đột ngột (>= 4.2cm so với vải kề bên) gây rách/rớt tam giác trong 3D Mesh
-        // KHÔNG gắn nhầm các nếp gấp vải nguyên vẹn (không bị thủng lỗ) là lỗ vá!
-        bool[,] holeMask = new bool[PLYDirectLoader.GRID_RES, PLYDirectLoader.GRID_RES];
-        float sumDepthDiffMm = 0f;
-        int depthSamples = 0;
+        // Pass B: Đánh dấu CHÍNH XÁC 100% các ô KHÔNG CÓ BẤT KỲ ĐIỂM POINT CLOUD NÀO (!IsRawCellValid && !outsidePly)
+        // nằm trong vùng quần & sát sườn quần — KHÔNG đánh nhầm bất kỳ điểm vải nguyên vẹn nào!
+        bool[,] holeMask = new bool[res, res];
         int rawHoleCells = 0;
-        int dropoutCells = 0;
-        int cliffCells = 0;
 
         for (int gx = gxMin; gx <= gxMax; gx++)
         {
             for (int gz = gzMin; gz <= gzMax; gz++)
             {
-                if (!insideMask[gx, gz]) continue;
-
-                Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
-                bool isValid = plyLoader.IsRawCellValid(gx, gz);
-
-                if (!isValid)
+                if (!plyLoader.IsRawCellValid(gx, gz) && !outsidePly[gx, gz])
                 {
                     holeMask[gx, gz] = true;
-                    detectedHoleCells.Add(new Vector2Int(gx, gz));
-                    detectedHolePointsWorld.Add(new Vector3(wxz.x, lastGarmentMedianY, wxz.y));
                     rawHoleCells++;
-                }
-                else
-                {
-                    float rawY = plyLoader.GetRawCellY(gx, gz);
-                    if (garmentAboveTable && rawY < lastGarmentMinClothY)
-                    {
-                        holeMask[gx, gz] = true;
-                        detectedHoleCells.Add(new Vector2Int(gx, gz));
-                        detectedHolePointsWorld.Add(new Vector3(wxz.x, rawY, wxz.y));
-                        sumDepthDiffMm += Mathf.Max(0f, (lastGarmentMedianY - rawY) * 1000f);
-                        depthSamples++;
-                        dropoutCells++;
-                    }
-                    else
-                    {
-                        // Kiểm tra ô tụt độ cao >= 4.2cm so với ô vải hợp lệ kề bên (sẽ bị cắt rách tam giác trong Mesh3D)
-                        bool isBrokenTriangleLow = false;
-                        const float cliffThreshM = 0.042f;
-                        if (gx > 0 && insideMask[gx - 1, gz] && plyLoader.IsRawCellValid(gx - 1, gz) &&
-                            (plyLoader.GetRawCellY(gx - 1, gz) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
-                        else if (gx < PLYDirectLoader.GRID_RES - 1 && insideMask[gx + 1, gz] && plyLoader.IsRawCellValid(gx + 1, gz) &&
-                            (plyLoader.GetRawCellY(gx + 1, gz) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
-                        else if (gz > 0 && insideMask[gx, gz - 1] && plyLoader.IsRawCellValid(gx, gz - 1) &&
-                            (plyLoader.GetRawCellY(gx, gz - 1) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
-                        else if (gz < PLYDirectLoader.GRID_RES - 1 && insideMask[gx, gz + 1] && plyLoader.IsRawCellValid(gx, gz + 1) &&
-                            (plyLoader.GetRawCellY(gx, gz + 1) - rawY) >= cliffThreshM) isBrokenTriangleLow = true;
-
-                        if (isBrokenTriangleLow)
-                        {
-                            holeMask[gx, gz] = true;
-                            detectedHoleCells.Add(new Vector2Int(gx, gz));
-                            detectedHolePointsWorld.Add(new Vector3(wxz.x, rawY, wxz.y));
-                            sumDepthDiffMm += Mathf.Max(0f, (lastGarmentMedianY - rawY) * 1000f);
-                            depthSamples++;
-                            cliffCells++;
-                        }
-                    }
                 }
             }
         }
 
-        // Pass C: Trích xuất các ĐƯỜNG VIỀN KÍN MÀU ĐỎ bao quanh các vùng thực sự có lỗ vá
+        // Lọc bỏ các hạt nhiễu đơn lẻ 1-2 ô trên mặt bàn xa quần; giữ lại mọi vùng lỗ thật (>= 3 ô) hoặc lỗ nằm bên trong thân quần
+        bool[,] cleanHoleMask = new bool[res, res];
+        bool[,] visF = new bool[res, res];
+        Queue<Vector2Int> qF = new Queue<Vector2Int>(512);
+        List<Vector2Int> compF = new List<Vector2Int>(512);
+
+        for (int gx = gxMin; gx <= gxMax; gx++)
+        {
+            for (int gz = gzMin; gz <= gzMax; gz++)
+            {
+                if (!holeMask[gx, gz] || visF[gx, gz]) continue;
+                compF.Clear();
+                visF[gx, gz] = true;
+                qF.Enqueue(new Vector2Int(gx, gz));
+                bool touchesElevatedCloth = false;
+
+                while (qF.Count > 0)
+                {
+                    Vector2Int cur = qF.Dequeue();
+                    compF.Add(cur);
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int nx = cur.x + dx;
+                        if (nx < gxMin || nx > gxMax) continue;
+                        for (int dz = -1; dz <= 1; dz++)
+                        {
+                            if (dx == 0 && dz == 0) continue;
+                            int nz = cur.y + dz;
+                            if (nz < gzMin || nz > gzMax) continue;
+                            if (holeMask[nx, nz] && !visF[nx, nz])
+                            {
+                                visF[nx, nz] = true;
+                                qF.Enqueue(new Vector2Int(nx, nz));
+                            }
+                            else if (!touchesElevatedCloth && plyLoader.IsRawCellValid(nx, nz) &&
+                                     plyLoader.GetRawCellY(nx, nz) > tableY + 0.012f)
+                            {
+                                touchesElevatedCloth = true;
+                            }
+                        }
+                    }
+                }
+
+                // Giữ lại mọi vùng trống tiếp xúc với vải quần (>= 2 ô)
+                if (touchesElevatedCloth && compF.Count >= 2)
+                {
+                    for (int k = 0; k < compF.Count; k++)
+                    {
+                        cleanHoleMask[compF[k].x, compF[k].y] = true;
+                    }
+                }
+            }
+        }
+        holeMask = cleanHoleMask;
+
+        // Đồng bộ danh sách detectedHoleCells & detectedHolePointsWorld từ holeMask hoàn chỉnh
+        for (int gx = gxMin; gx <= gxMax; gx++)
+        {
+            for (int gz = gzMin; gz <= gzMax; gz++)
+            {
+                if (!holeMask[gx, gz]) continue;
+                Vector2 wxz = plyLoader.GridCellToWorldXZ(gx, gz);
+                detectedHoleCells.Add(new Vector2Int(gx, gz));
+                detectedHolePointsWorld.Add(new Vector3(wxz.x, lastGarmentMedianY, wxz.y));
+            }
+        }
+
+        // Pass C: Sinh các đường gạch chéo cho toàn bộ vùng không có điểm Point Cloud
         ExtractHoleRegionOutlines(plyLoader, holeMask, gxMin, gxMax, gzMin, gzMax, cellW, cellD);
 
         detectedHoleCount = detectedHoleCells.Count;
         detectedOcclusionAreaCm2 = detectedHoleCount * (cellW * cellD * 10000f);
-        avgCreaseDepthMm = depthSamples > 0 ? (sumDepthDiffMm / depthSamples) : 0f;
-        occlusionStatusMsg = $"Tìm thấy {detectedHoleRegionCount} vùng lỗ ({rawHoleCells + dropoutCells + cliffCells} ô, {detectedOcclusionAreaCm2:F1} cm²).";
+        avgCreaseDepthMm = 0f;
+        occlusionStatusMsg = $"Tìm thấy {detectedHoleRegionCount} vùng mất điểm ({detectedHoleCount} ô, {detectedOcclusionAreaCm2:F1} cm²).";
     }
 
     /// <summary>
@@ -6466,6 +6607,7 @@ public class DobotCR10AIKController : MonoBehaviour
         float cellW, float cellD)
     {
         holeRegionOutlinesWorld.Clear();
+        holeCrossHatchSegmentsWorld.Clear();
         detectedHoleRegionCount = 0;
 
         int res = PLYDirectLoader.GRID_RES;
@@ -6474,7 +6616,32 @@ public class DobotCR10AIKController : MonoBehaviour
         Queue<Vector2Int> bfs = new Queue<Vector2Int>();
         List<Vector2Int> compCells = new List<Vector2Int>(256);
 
-        // 1. Gom cụm 8-connected và chỉ đưa các vùng lỗ thật (>= 3 ô, ~25mm²) vào đường viền đỏ
+        float SampleLocalHatchY(int cx, int cz)
+        {
+            if (plyLoader.IsRawCellValid(cx, cz))
+                return plyLoader.GetRawCellY(cx, cz) + 0.0035f;
+            for (int r = 1; r <= 16; r += (r < 5 ? 1 : 2))
+            {
+                float sumY = 0f;
+                int cnt = 0;
+                int x0 = Mathf.Max(0, cx - r), x1 = Mathf.Min(res - 1, cx + r);
+                int z0 = Mathf.Max(0, cz - r), z1 = Mathf.Min(res - 1, cz + r);
+                for (int nx = x0; nx <= x1; nx++)
+                {
+                    if (plyLoader.IsRawCellValid(nx, z0)) { sumY += plyLoader.GetRawCellY(nx, z0); cnt++; }
+                    if (z1 != z0 && plyLoader.IsRawCellValid(nx, z1)) { sumY += plyLoader.GetRawCellY(nx, z1); cnt++; }
+                }
+                for (int nz = z0 + 1; nz < z1; nz++)
+                {
+                    if (plyLoader.IsRawCellValid(x0, nz)) { sumY += plyLoader.GetRawCellY(x0, nz); cnt++; }
+                    if (x1 != x0 && plyLoader.IsRawCellValid(x1, nz)) { sumY += plyLoader.GetRawCellY(x1, nz); cnt++; }
+                }
+                if (cnt > 0) return (sumY / cnt) + 0.0035f;
+            }
+            return plyLoader.estimatedTableY + 0.010f;
+        }
+
+        // 1. Gom cụm 8-connected và đánh dấu TẤT CẢ các vùng lỗ thật (>= 1 ô) + sinh đường đánh chéo (cross-hatch) bám đúng cao độ 3D cục bộ
         for (int x = gxMin; x <= gxMax; x++)
         {
             for (int z = gzMin; z <= gzMax; z++)
@@ -6483,10 +6650,15 @@ public class DobotCR10AIKController : MonoBehaviour
                 compCells.Clear();
                 visited[x, z] = true;
                 bfs.Enqueue(new Vector2Int(x, z));
+                int cMinX = x, cMaxX = x, cMinZ = z, cMaxZ = z;
                 while (bfs.Count > 0)
                 {
                     Vector2Int cur = bfs.Dequeue();
                     compCells.Add(cur);
+                    if (cur.x < cMinX) cMinX = cur.x;
+                    if (cur.x > cMaxX) cMaxX = cur.x;
+                    if (cur.y < cMinZ) cMinZ = cur.y;
+                    if (cur.y > cMaxZ) cMaxZ = cur.y;
                     for (int dx = -1; dx <= 1; dx++)
                     {
                         for (int dz = -1; dz <= 1; dz++)
@@ -6504,12 +6676,102 @@ public class DobotCR10AIKController : MonoBehaviour
                     }
                 }
 
-                if (compCells.Count >= 3)
+                if (compCells.Count >= 1)
                 {
                     detectedHoleRegionCount++;
                     for (int k = 0; k < compCells.Count; k++)
                     {
                         outlineMask[compCells[k].x, compCells[k].y] = true;
+                    }
+
+                    // Sinh các đoạn đánh chéo (Cross-Hatch / và \) bám đúng độ cao 3D cục bộ của từng vùng lỗ
+                    if (compCells.Count <= 2)
+                    {
+                        // Lỗ nhỏ 1-2 ô: vẽ dấu X sắc nét ngay tâm lỗ đúng cao độ thực tế
+                        Vector2 pA = plyLoader.GridCellToWorldXZ(cMinX, cMinZ);
+                        Vector2 pB = plyLoader.GridCellToWorldXZ(cMaxX, cMaxZ);
+                        float localY = SampleLocalHatchY((cMinX + cMaxX) / 2, (cMinZ + cMaxZ) / 2);
+                        float halfW = Mathf.Max(cellW * 0.65f, 0.0035f);
+                        float halfD = Mathf.Max(cellD * 0.65f, 0.0035f);
+                        float cx = 0.5f * (pA.x + pB.x);
+                        float cz = 0.5f * (pA.y + pB.y);
+                        holeCrossHatchSegmentsWorld.Add(new Vector3(cx - halfW, localY, cz - halfD));
+                        holeCrossHatchSegmentsWorld.Add(new Vector3(cx + halfW, localY, cz + halfD));
+                        holeCrossHatchSegmentsWorld.Add(new Vector3(cx - halfW, localY, cz + halfD));
+                        holeCrossHatchSegmentsWorld.Add(new Vector3(cx + halfW, localY, cz - halfD));
+                    }
+                    else
+                    {
+                        HashSet<Vector2Int> compSet = new HashSet<Vector2Int>(compCells);
+                        int step = Mathf.Clamp(Mathf.Max(cMaxX - cMinX, cMaxZ - cMinZ) / 7, 2, 5);
+
+                        // Chéo hướng 1: x - z = d (góc +45°)
+                        for (int d = cMinX - cMaxZ; d <= cMaxX - cMinZ; d += step)
+                        {
+                            int xStart = Mathf.Max(cMinX, cMinZ + d);
+                            int xEnd = Mathf.Min(cMaxX, cMaxZ + d);
+                            bool inRun = false;
+                            Vector2Int runA = default, runB = default;
+                            for (int hx = xStart; hx <= xEnd; hx++)
+                            {
+                                int hz = hx - d;
+                                bool inside = compSet.Contains(new Vector2Int(hx, hz));
+                                if (inside)
+                                {
+                                    if (!inRun) { runA = new Vector2Int(hx, hz); inRun = true; }
+                                    runB = new Vector2Int(hx, hz);
+                                }
+                                if ((!inside || hx == xEnd) && inRun)
+                                {
+                                    Vector2 wA = plyLoader.GridCellToWorldXZ(runA.x, runA.y);
+                                    Vector2 wB = plyLoader.GridCellToWorldXZ(runB.x, runB.y);
+                                    float yA = SampleLocalHatchY(runA.x, runA.y);
+                                    float yB = SampleLocalHatchY(runB.x, runB.y);
+                                    if (runA == runB)
+                                    {
+                                        wA -= new Vector2(cellW * 0.45f, cellD * 0.45f);
+                                        wB += new Vector2(cellW * 0.45f, cellD * 0.45f);
+                                    }
+                                    holeCrossHatchSegmentsWorld.Add(new Vector3(wA.x, yA, wA.y));
+                                    holeCrossHatchSegmentsWorld.Add(new Vector3(wB.x, yB, wB.y));
+                                    inRun = false;
+                                }
+                            }
+                        }
+
+                        // Chéo hướng 2: x + z = s (góc -45°)
+                        for (int s = cMinX + cMinZ; s <= cMaxX + cMaxZ; s += step)
+                        {
+                            int xStart = Mathf.Max(cMinX, s - cMaxZ);
+                            int xEnd = Mathf.Min(cMaxX, s - cMinZ);
+                            bool inRun = false;
+                            Vector2Int runA = default, runB = default;
+                            for (int hx = xStart; hx <= xEnd; hx++)
+                            {
+                                int hz = s - hx;
+                                bool inside = compSet.Contains(new Vector2Int(hx, hz));
+                                if (inside)
+                                {
+                                    if (!inRun) { runA = new Vector2Int(hx, hz); inRun = true; }
+                                    runB = new Vector2Int(hx, hz);
+                                }
+                                if ((!inside || hx == xEnd) && inRun)
+                                {
+                                    Vector2 wA = plyLoader.GridCellToWorldXZ(runA.x, runA.y);
+                                    Vector2 wB = plyLoader.GridCellToWorldXZ(runB.x, runB.y);
+                                    float yA = SampleLocalHatchY(runA.x, runA.y);
+                                    float yB = SampleLocalHatchY(runB.x, runB.y);
+                                    if (runA == runB)
+                                    {
+                                        wA += new Vector2(-cellW * 0.45f, cellD * 0.45f);
+                                        wB += new Vector2(cellW * 0.45f, -cellD * 0.45f);
+                                    }
+                                    holeCrossHatchSegmentsWorld.Add(new Vector3(wA.x, yA, wA.y));
+                                    holeCrossHatchSegmentsWorld.Add(new Vector3(wB.x, yB, wB.y));
+                                    inRun = false;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6873,7 +7135,7 @@ public class DobotCR10AIKController : MonoBehaviour
             plyLoader.InjectSurfaceCell(gx, gz, compY, clothCol);
         }
 
-        // Bước 4: Cập nhật cao độ đường viền đỏ ôm sát đúng bề mặt mới vá (+4.5mm)
+        // Bước 4: Cập nhật cao độ đường viền đỏ & nét đánh chéo ôm sát đúng bề mặt mới vá (+4.5mm)
         for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
         {
             List<Vector3> loop = holeRegionOutlinesWorld[r];
@@ -6887,8 +7149,18 @@ public class DobotCR10AIKController : MonoBehaviour
                 }
             }
         }
+        for (int k = 0; k < holeCrossHatchSegmentsWorld.Count; k++)
+        {
+            Vector3 p = holeCrossHatchSegmentsWorld[k];
+            Vector2Int c = plyLoader.WorldToGridCell(p.x, p.z);
+            if (filledValid[c.x, c.y])
+            {
+                holeCrossHatchSegmentsWorld[k] = new Vector3(p.x, filledGrid[c.x, c.y] + 0.0048f, p.z);
+            }
+        }
 
-        // Bước 5: Xây dựng Mesh vá đặc (Solid Triangulated Patch Mesh) & cập nhật WorkpieceSurfaceMesh nếu đang ở chế độ Mesh3D
+        // Bước 5: Bật hiển thị & dựng Mesh vá đặc (Solid Triangulated Patch Mesh) + cập nhật WorkpieceSurfaceMesh
+        showInpaintedSurface3D = true;
         BuildAndDisplayInpaintedMesh(plyLoader);
 
         occlusionStatusMsg = $"Đã vá kín {detectedHoleRegionCount} vùng ({compensatedSurfacePointsWorld.Count} ô) - {algoNames[Mathf.Clamp(selectedOcclusionAlgorithm, 0, 4)]}.";
@@ -7859,14 +8131,8 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             if (hasRealLandmarks && curLandmarksUV != null && strokesProjectedSampleName != activeSampleNow)
             {
-                if (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" || activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4")
-                {
-                    GenerateAndApplyMethodTrajectory(activeTrajectoryMethod);
-                }
-                else
-                {
-                    ReprojectCanonicalPatternOntoCurrentCameraImage();
-                }
+                // Chỉ chiếu lại nét vẽ 2D theo 12 mốc mới — KHÔNG tự động sinh quỹ đạo 3D ngoài ý muốn!
+                ReprojectCanonicalPatternOntoCurrentCameraImage();
             }
             else if (!hasRealLandmarks && !string.IsNullOrEmpty(strokesProjectedSampleName) && strokesProjectedSampleName != activeSampleNow)
             {
@@ -7946,13 +8212,29 @@ public class DobotCR10AIKController : MonoBehaviour
         // Xử lý sự kiện chuột vẽ trực tiếp (Vẽ tay / Hình tròn / Hình vuông / Đa giác) trên ảnh Camera 2D
         Handle2DCanvasMouseInput(canvasRect, isFullscreen: false, hasRealLandmarks, curLandmarksUV);
 
+        // Vẽ đường bao Segment trên ảnh 2D quần
+        if (showSegmentationContour3D)
+        {
+            DrawSegmentationContourOn2DCanvas(canvasRect, plyLoader, isFullscreen: false);
+        }
+
         // Vẽ 12 điểm mốc AI đúng vị trí thực tế trên ảnh Camera 2D
         if (isEditingLandmarksMode && editableLandmarksUV != null && editableLandmarksUV.Length == 12)
         {
             DrawEditableLandmarksOn2DCanvas(canvasRect, isFullscreen: false);
         }
-        else if (curLandmarksUV != null && curLandmarksUV.Length == 12)
+        else if (showLandmarks3D && curLandmarksUV != null && curLandmarksUV.Length == 12)
         {
+            int numPairs = LandmarkSkeletonPairs.GetLength(0);
+            Color skelCol = new Color(1f, 0.78f, 0.15f, 0.48f);
+            for (int k = 0; k < numPairs; k++)
+            {
+                int i0 = LandmarkSkeletonPairs[k, 0];
+                int i1 = LandmarkSkeletonPairs[k, 1];
+                Vector2 s0 = new Vector2(canvasRect.x + curLandmarksUV[i0].x * canvasRect.width, canvasRect.y + curLandmarksUV[i0].y * canvasRect.height);
+                Vector2 s1 = new Vector2(canvasRect.x + curLandmarksUV[i1].x * canvasRect.width, canvasRect.y + curLandmarksUV[i1].y * canvasRect.height);
+                DrawGuiLine2D(s0, s1, skelCol, 1.3f);
+            }
             for (int i = 0; i < curLandmarksUV.Length; i++)
             {
                 Vector2 uv = curLandmarksUV[i];
@@ -9978,6 +10260,33 @@ public class DobotCR10AIKController : MonoBehaviour
         }
     }
 
+    private void DrawSegmentationContourOn2DCanvas(Rect canvasRect, PLYDirectLoader plyLoader, bool isFullscreen)
+    {
+        if (plyLoader == null || garmentContourWorld == null || garmentContourWorld.Count < 3) return;
+        int n = garmentContourWorld.Count;
+        List<Vector2> pts = new List<Vector2>(n);
+        for (int i = 0; i < n; i++)
+        {
+            if (plyLoader.TryWorldToCameraUV(garmentContourWorld[i], out Vector2 uv))
+            {
+                pts.Add(new Vector2(canvasRect.x + uv.x * canvasRect.width, canvasRect.y + uv.y * canvasRect.height));
+            }
+        }
+        if (pts.Count < 3) return;
+
+        Color segHalo = new Color(0.01f, 0.14f, 0.06f, 0.85f);
+        Color segCore = new Color(0.05f, 1.0f, 0.48f, 0.96f);
+        float wHalo = isFullscreen ? 3.8f : 2.8f;
+        float wCore = isFullscreen ? 2.0f : 1.5f;
+        for (int i = 0; i < pts.Count; i++)
+        {
+            Vector2 a = pts[i];
+            Vector2 b = pts[(i + 1) % pts.Count];
+            DrawGuiLine2D(a, b, segHalo, wHalo);
+            DrawGuiLine2D(a, b, segCore, wCore);
+        }
+    }
+
     private void DrawEditableLandmarksOn2DCanvas(Rect canvasRect, bool isFullscreen)
     {
         if (editableLandmarksUV == null || editableLandmarksUV.Length != 12) return;
@@ -10416,14 +10725,8 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             if (hasRealLandmarks && curLandmarksUV != null && strokesProjectedSampleName != activeSampleNow)
             {
-                if (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" || activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4")
-                {
-                    GenerateAndApplyMethodTrajectory(activeTrajectoryMethod);
-                }
-                else
-                {
-                    ReprojectCanonicalPatternOntoCurrentCameraImage();
-                }
+                // Chỉ chiếu lại nét vẽ 2D theo 12 mốc mới — KHÔNG tự động sinh quỹ đạo 3D ngoài ý muốn!
+                ReprojectCanonicalPatternOntoCurrentCameraImage();
             }
             else if (!hasRealLandmarks && !string.IsNullOrEmpty(strokesProjectedSampleName) && strokesProjectedSampleName != activeSampleNow)
             {
@@ -10592,12 +10895,18 @@ public class DobotCR10AIKController : MonoBehaviour
         // Xử lý chuột vẽ mịn (Vẽ tay / Tròn / Vuông / Đa giác) trên khung phóng to
         Handle2DCanvasMouseInput(canvasRect, isFullscreen: true, hasRealLandmarks, curLandmarksUV);
 
+        // Vẽ đường bao Segment trên ảnh 2D phóng to
+        if (showSegmentationContour3D)
+        {
+            DrawSegmentationContourOn2DCanvas(canvasRect, plyLoader, isFullscreen: true);
+        }
+
         // Vẽ 12 mốc AI + khung nối giải phẫu trên khung phóng to
         if (isEditingLandmarksMode && editableLandmarksUV != null && editableLandmarksUV.Length == 12)
         {
             DrawEditableLandmarksOn2DCanvas(canvasRect, isFullscreen: true);
         }
-        else if (curLandmarksUV != null && curLandmarksUV.Length == 12)
+        else if (showLandmarks3D && curLandmarksUV != null && curLandmarksUV.Length == 12)
         {
             int numPairs = LandmarkSkeletonPairs.GetLength(0);
             Color skelCol = new Color(1f, 0.78f, 0.15f, 0.42f);
@@ -11170,6 +11479,17 @@ public class DobotCR10AIKController : MonoBehaviour
                 taughtCanonicalRegions.Clear();
                 undoHistoryIsRegion.Clear();
                 customDrawnStrokes.Clear();
+                // Recognition must not silently apply an imported pattern.
+                // Re-enable this explicitly in the teaching panel if desired.
+                autoApplyTaughtOnNewSample = false;
+
+                // P4 point clouds and 3D strokes are session state, not part of
+                // the imported JSON. Do not let a previous template's reference
+                // trajectory leak into this template's application.
+                templateReferenceCloud3DWorld.Clear();
+                templateReferenceLandmarks3D.Clear();
+                templateReferenceStrokes3DWorld.Clear();
+                templateReferenceSampleName = "";
 
                 if (hasTplStrokes)
                 {
@@ -11271,7 +11591,6 @@ public class DobotCR10AIKController : MonoBehaviour
                     {
                         taughtMethod = tc.taughtMethod;
                     }
-                    autoApplyTaughtOnNewSample = tc.autoApplyOnSampleChange;
                     if (tc.sprayWidthMm > 0.4f) UpdateSprayWidth(tc.sprayWidthMm);
                     if (tc.zOffsetMm >= 0f)
                     {
@@ -11286,11 +11605,26 @@ public class DobotCR10AIKController : MonoBehaviour
                     if (tc.p4 != null) p4Config = CloneSerializable(tc.p4);
                     p1ConfigInitializedFromTech = true;
                     p2ConfigInitializedFromTech = true;
+                    if (p1Config != null && p1Config.autoSpacingFromWidthOverlap)
+                    {
+                        p1Config.overlapRatioR = Mathf.Clamp(p1Config.overlapRatioR, 0.05f, 0.30f);
+                        p1Config.scanSpacingSMm = p1Config.EffectiveSpacingSMm;
+                    }
                     hasRecordedTeachingRecipe = true;
+
                 }
                 else
                 {
                     hasRecordedTeachingRecipe = (taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0);
+                }
+
+                // A saved P1 test mode (two circles / test rectangle) must not
+                // override actual geometry carried by an imported template.
+                if ((hasTplStrokes || hasTplRegions || hasTplCanonRegions) &&
+                    (p1Config.regionSource == TrajectoryEvaluationEngine.P1RegionSourceMode.TestCircle ||
+                     p1Config.regionSource == TrajectoryEvaluationEngine.P1RegionSourceMode.TestRectangle))
+                {
+                    p1Config.regionSource = TrajectoryEvaluationEngine.P1RegionSourceMode.FromTemplateStrokes;
                 }
 
                 saveTemplateFileName = Path.GetFileNameWithoutExtension(fullPath);
@@ -12403,16 +12737,59 @@ public class DobotCR10AIKController : MonoBehaviour
             loadedLandmarksSampleName = rawClean;
             landmarks3D = payload.landmarks ?? new List<LandmarkItem3D>();
             landmarksWorldPos.Clear();
+            PLYDirectLoader plyLoaderSync = FindAnyObjectByType<PLYDirectLoader>();
+            int camImgW = (plyLoaderSync != null && plyLoaderSync.cameraImageWidth > 1) ? plyLoaderSync.cameraImageWidth
+                        : (realCameraFileTex != null ? realCameraFileTex.width : 0);
+            int camImgH = (plyLoaderSync != null && plyLoaderSync.cameraImageHeight > 1) ? plyLoaderSync.cameraImageHeight
+                        : (realCameraFileTex != null ? realCameraFileTex.height : 0);
+            bool canProjectFromCameraPixel = plyLoaderSync != null && plyLoaderSync.hasOrganizedCameraFrame && camImgW > 1 && camImgH > 1;
+
+            Vector3 sumPixelDelta = Vector3.zero;
+            int pixelDeltaCount = 0;
+
             for (int i = 0; i < landmarks3D.Count; i++)
             {
-                Vector3 posMm = new Vector3(landmarks3D[i].x_mm, landmarks3D[i].y_mm, landmarks3D[i].z_mm);
-                Vector3 worldP = globalReference != null
-                    ? globalReference.TransformPoint(posMm * 0.001f)
-                    : new Vector3(-posMm.y * 0.001f, posMm.z * 0.001f, 1.100f - posMm.x * 0.001f);
+                Vector3 posMmOrig = new Vector3(landmarks3D[i].x_mm, landmarks3D[i].y_mm, landmarks3D[i].z_mm);
+                Vector3 jsonWorldP = globalReference != null
+                    ? globalReference.TransformPoint(posMmOrig * 0.001f)
+                    : new Vector3(-posMmOrig.y * 0.001f, posMmOrig.z * 0.001f, 1.100f - posMmOrig.x * 0.001f);
+
+                Vector3 worldP = jsonWorldP;
+                if (canProjectFromCameraPixel && (landmarks3D[i].pixel_u > 0 || landmarks3D[i].pixel_v > 0))
+                {
+                    Vector2 uv = new Vector2(
+                        Mathf.Clamp01(landmarks3D[i].pixel_u / (float)(camImgW - 1)),
+                        Mathf.Clamp01(landmarks3D[i].pixel_v / (float)(camImgH - 1))
+                    );
+                    if (plyLoaderSync.TrySampleCameraUVToWorld(uv, out Vector3 sampledWorld, out _))
+                    {
+                        worldP = sampledWorld;
+                        sumPixelDelta += (sampledWorld - jsonWorldP);
+                        pixelDeltaCount++;
+                        if (globalReference != null)
+                        {
+                            Vector3 robotMm = globalReference.InverseTransformPoint(worldP) * 1000f;
+                            landmarks3D[i].x_mm = robotMm.x;
+                            landmarks3D[i].y_mm = robotMm.y;
+                            landmarks3D[i].z_mm = robotMm.z;
+                        }
+                    }
+                }
                 landmarksWorldPos.Add(worldP);
             }
 
             garmentContourWorld = ConvertPoint3DListToWorld(payload.garment_contour_3d);
+            if (pixelDeltaCount > 0 && garmentContourWorld != null && garmentContourWorld.Count > 0)
+            {
+                Vector3 avgDelta = sumPixelDelta / pixelDeltaCount;
+                for (int i = 0; i < garmentContourWorld.Count; i++)
+                {
+                    Vector3 p = garmentContourWorld[i] + new Vector3(avgDelta.x, 0f, avgDelta.z);
+                    if (plyLoaderSync != null && plyLoaderSync.TrySampleRawSurfaceAt(p.x, p.z, out float sy, out _))
+                        p.y = sy;
+                    garmentContourWorld[i] = p;
+                }
+            }
             sprayZoneLeftWorld = ConvertPoint3DListToWorld(payload.spray_zone_left_3d);
             sprayZoneRightWorld = ConvertPoint3DListToWorld(payload.spray_zone_right_3d);
 
@@ -12550,7 +12927,9 @@ public class DobotCR10AIKController : MonoBehaviour
         hasInitializedDefaultStrokes = true;
 
         if ((canonicalPatternStrokes == null || canonicalPatternStrokes.Count == 0) &&
-            (customDrawnStrokes == null || customDrawnStrokes.Count == 0))
+            (customDrawnStrokes == null || customDrawnStrokes.Count == 0) &&
+            (customDrawnRegions == null || customDrawnRegions.Count == 0) &&
+            (taughtCanonicalRegions == null || taughtCanonicalRegions.Count == 0))
         {
             LoadPresetWhiskersAndThighOn2DCanvas();
         }
@@ -12855,22 +13234,28 @@ public class DobotCR10AIKController : MonoBehaviour
 
         Vector3 camPos = cam.transform.position;
         float pxToWorld = (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad)) / Mathf.Max(200f, Screen.height);
+        float flatGarmentY = GetGarmentOverlayFlatPlaneY();
 
-        // 1. Đường Bao Segment Thân Quần 3D
+        // 1. Đường Bao Segment Thân Quần — chiếu dọc tia Camera Zivid lên mặt phẳng ngang tại độ cao lớn nhất của quần
         if (showSegmentationContour3D && garmentContourWorld != null && garmentContourWorld.Count > 2)
         {
             int cCount = garmentContourWorld.Count;
+            List<Vector3> flatContour = new List<Vector3>(cCount);
+            for (int i = 0; i < cCount; i++)
+            {
+                flatContour.Add(ProjectWorldPointAlongZividRayToPlaneY(garmentContourWorld[i], flatGarmentY));
+            }
             Color hatchCol = new Color(0.05f, 1.0f, 0.50f, 0.22f);
             for (int i = 0; i < cCount / 2; i += 4)
             {
                 int opp = (cCount - 1 - i) % cCount;
-                AddDepthOverlaySegment3D(camPos, pxToWorld, garmentContourWorld[i], garmentContourWorld[opp], hatchCol, 1.4f, 0.0018f);
+                AddDepthOverlaySegment3D(camPos, pxToWorld, flatContour[i], flatContour[opp], hatchCol, 1.4f, 0.0018f);
             }
-            AddDepthOverlayLoop3D(camPos, pxToWorld, garmentContourWorld, new Color(0.01f, 0.14f, 0.06f, 0.92f), 5.6f, true, 0.0020f);
-            AddDepthOverlayLoop3D(camPos, pxToWorld, garmentContourWorld, new Color(0.05f, 1.0f, 0.48f, 1.0f), 3.2f, true, 0.0024f);
+            AddDepthOverlayLoop3D(camPos, pxToWorld, flatContour, new Color(0.01f, 0.14f, 0.06f, 0.92f), 5.6f, true, 0.0020f);
+            AddDepthOverlayLoop3D(camPos, pxToWorld, flatContour, new Color(0.05f, 1.0f, 0.48f, 1.0f), 3.2f, true, 0.0024f);
             for (int i = 0; i < cCount; i += 3)
             {
-                AddDepthOverlayDot3D(cam, camPos, pxToWorld, garmentContourWorld[i], 2.4f, new Color(0.2f, 1.0f, 0.6f, 0.95f), 0.0028f);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, flatContour[i], 2.4f, new Color(0.2f, 1.0f, 0.6f, 0.95f), 0.0028f);
             }
         }
 
@@ -13065,7 +13450,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        // 4. 12 Điểm Mốc Giải Phẫu AI + Khung Xương — BỊ TAY ROBOT CHE THEO ĐÚNG ĐỘ SÂU 3D!
+        // 4. 12 Điểm Mốc Giải Phẫu AI + Khung Xương — chiếu dọc tia Camera Zivid lên mặt phẳng ngang tại độ cao lớn nhất của quần
         if (showLandmarks3D && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
         {
             Color boneHalo = new Color(0.16f, 0.02f, 0.14f, 0.88f);
@@ -13077,30 +13462,34 @@ public class DobotCR10AIKController : MonoBehaviour
                 int i1 = LandmarkSkeletonPairs[k, 1];
                 if (i0 < landmarksWorldPos.Count && i1 < landmarksWorldPos.Count)
                 {
-                    AddDepthOverlaySegment3D(camPos, pxToWorld, landmarksWorldPos[i0], landmarksWorldPos[i1], boneHalo, 4.0f, 0.0028f);
-                    AddDepthOverlaySegment3D(camPos, pxToWorld, landmarksWorldPos[i0], landmarksWorldPos[i1], boneCol, 2.3f, 0.0032f);
+                    Vector3 p0 = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i0], flatGarmentY);
+                    Vector3 p1 = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i1], flatGarmentY);
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, p0, p1, boneHalo, 4.0f, 0.0028f);
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, p0, p1, boneCol, 2.3f, 0.0032f);
                 }
             }
             Color dotOuter = new Color(0.05f, 0.05f, 0.08f, 0.98f);
             Color dotInner = new Color(1.0f, 0.88f, 0.12f, 1.0f);
             for (int i = 0; i < landmarksWorldPos.Count; i++)
             {
-                AddDepthOverlayDot3D(cam, camPos, pxToWorld, landmarksWorldPos[i], 5.6f, dotOuter, 0.0034f);
-                AddDepthOverlayDot3D(cam, camPos, pxToWorld, landmarksWorldPos[i], 3.8f, dotInner, 0.0038f);
+                Vector3 pi = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i], flatGarmentY);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, pi, 5.6f, dotOuter, 0.0034f);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, pi, 3.8f, dotInner, 0.0038f);
             }
         }
 
-        // 5. Đường viền màu đỏ vùng cần vá + tia bù góc
-        if (showHoleRegionOutlines3D && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
+        // 5. Gạch đánh chéo các vùng lỗ cần vá (không vẽ viền bao) + tia bù góc
+        if (showHoleRegionOutlines3D && holeCrossHatchSegmentsWorld != null && holeCrossHatchSegmentsWorld.Count >= 2)
         {
-            Color redOutlineHalo = new Color(0.24f, 0.01f, 0.01f, 0.94f);
-            Color redOutlineCore = new Color(1.00f, 0.10f, 0.08f, 1.00f);
-            for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+            Color hatchHalo = new Color(0.22f, 0.02f, 0.01f, 0.85f);
+            Color hatchCore = new Color(1.00f, 0.24f, 0.10f, 0.98f);
+            int maxSegs = Mathf.Min(holeCrossHatchSegmentsWorld.Count, 12000);
+            for (int s = 0; s + 1 < maxSegs; s += 2)
             {
-                List<Vector3> loop = holeRegionOutlinesWorld[r];
-                if (loop == null || loop.Count < 3) continue;
-                AddDepthOverlayLoop3D(camPos, pxToWorld, loop, redOutlineHalo, 4.6f, true, 0.0024f);
-                AddDepthOverlayLoop3D(camPos, pxToWorld, loop, redOutlineCore, 2.6f, true, 0.0028f);
+                Vector3 a = holeCrossHatchSegmentsWorld[s];
+                Vector3 b = holeCrossHatchSegmentsWorld[s + 1];
+                AddDepthOverlaySegment3D(camPos, pxToWorld, a, b, hatchHalo, 3.2f, 0.0025f);
+                AddDepthOverlaySegment3D(camPos, pxToWorld, a, b, hatchCore, 1.8f, 0.0029f);
             }
         }
         if (showGunTiltVectors3D && interfaceTab == 7 &&
@@ -13195,8 +13584,9 @@ public class DobotCR10AIKController : MonoBehaviour
         // Lưu ý: Toàn bộ đường hình học 3D (Segment, Vùng phun, Quỹ đạo, 12 Mốc & Khung xương, Vùng vá) đã được vẽ bằng
         // Mesh 3D có kiểm tra Z-Buffer trong RebuildDepthTested3DOverlayMesh() để bị tay robot che chính xác!
         // Hàm OnGUI này chỉ vẽ các NHÃN CHỮ 2D (tự ẩn khi điểm neo bị cánh tay robot che khuất).
+        float flatGarmentY = GetGarmentOverlayFlatPlaneY();
 
-        // 1. Nhãn tên Đường Bao Segment (ẩn nếu bị tay robot che)
+        // 1. Nhãn tên Đường Bao Segment (neo trên mặt phẳng độ cao lớn nhất của quần)
         if (showSegmentationContour3D && garmentContourWorld != null && garmentContourWorld.Count > 2)
         {
             int cCount = garmentContourWorld.Count;
@@ -13205,7 +13595,8 @@ public class DobotCR10AIKController : MonoBehaviour
             Vector3 bestSegWorld = Vector3.zero;
             for (int i = 0; i < cCount; i++)
             {
-                Vector3 sp = cam.WorldToScreenPoint(garmentContourWorld[i]);
+                Vector3 wpFlat = ProjectWorldPointAlongZividRayToPlaneY(garmentContourWorld[i], flatGarmentY);
+                Vector3 sp = cam.WorldToScreenPoint(wpFlat);
                 if (sp.z > 0.05f)
                 {
                     float gy = Screen.height - sp.y;
@@ -13213,7 +13604,7 @@ public class DobotCR10AIKController : MonoBehaviour
                     {
                         minGy = gy;
                         bestSegPt = new Vector2(sp.x, gy);
-                        bestSegWorld = garmentContourWorld[i];
+                        bestSegWorld = wpFlat;
                     }
                 }
             }
@@ -13225,12 +13616,12 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        // 2. Nhãn tên 12 Điểm Mốc Giải Phẫu AI (tự ẩn khi bị cánh tay robot che!)
+        // 2. Nhãn tên 12 Điểm Mốc Giải Phẫu AI (neo trên mặt phẳng độ cao lớn nhất của quần)
         if (showLandmarks3D && showLandmarkLabels && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
         {
             for (int i = 0; i < landmarksWorldPos.Count && i < landmarks3D.Count; i++)
             {
-                Vector3 wPos = landmarksWorldPos[i];
+                Vector3 wPos = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i], flatGarmentY);
                 Vector3 sp = cam.WorldToScreenPoint(wPos);
                 if (sp.z <= 0.05f) continue;
                 if (IsWorldPointOccludedByRobotArm(cam, wPos)) continue;
@@ -13482,15 +13873,134 @@ public class DobotCR10AIKController : MonoBehaviour
     // VẼ GIZMO 3D QUỸ ĐẠO, 12 ĐIỂM MỐC & SEGMENT ĐÈ LÊN PHÔI (SCENE VIEW)
     // =========================================================================
 
+    private Vector3 cachedZividRayOrigin = Vector3.zero;
+    private int cachedZividRayOriginFrame = -1;
+    private bool hasCachedZividRayOrigin = false;
+
+    /// <summary>
+    /// Chiếu 1 điểm 3D dọc theo đúng tia quang học từ Camera Zivid lên mặt phẳng ngang y = planeY.
+    /// Đảm bảo điểm trên mặt phẳng chiếu trùng khít 0 pixel với ảnh 2D camera (không bị lệch thị sai khi mốc rớt xuống bàn!).
+    /// </summary>
+    private Vector3 ProjectWorldPointAlongZividRayToPlaneY(Vector3 worldPt, float planeY)
+    {
+        if (cachedZividRayOriginFrame != Time.frameCount)
+        {
+            cachedZividRayOriginFrame = Time.frameCount;
+            FixedRigCamera rig = FindAnyObjectByType<FixedRigCamera>();
+            if (rig != null)
+            {
+                cachedZividRayOrigin = rig.transform.position;
+                hasCachedZividRayOrigin = true;
+            }
+            else
+            {
+                hasCachedZividRayOrigin = false;
+            }
+        }
+
+        if (hasCachedZividRayOrigin)
+        {
+            float denom = worldPt.y - cachedZividRayOrigin.y;
+            if (Mathf.Abs(denom) > 0.05f)
+            {
+                float t = (planeY - cachedZividRayOrigin.y) / denom;
+                if (t > 0.1f && t < 3.0f)
+                {
+                    return cachedZividRayOrigin + (worldPt - cachedZividRayOrigin) * t;
+                }
+            }
+        }
+        return new Vector3(worldPt.x, planeY, worldPt.z);
+    }
+
+    private float cachedGarmentOverlayPlaneY = 0.08f;
+    private int cachedGarmentOverlayFrame = -1;
+
+    /// <summary>
+    /// Tính độ cao mặt phẳng ngang (Y) tại điểm cao nhất của phôi quần (+5mm)
+    /// để chiếu 12 mốc AI & đường bao Segment phẳng trên camera 3D, không bị lún vào nếp gấp vải.
+    /// </summary>
+    private float GetGarmentOverlayFlatPlaneY()
+    {
+        if (cachedGarmentOverlayFrame == Time.frameCount) return cachedGarmentOverlayPlaneY;
+        cachedGarmentOverlayFrame = Time.frameCount;
+
+        List<float> sampleYs = new List<float>(300);
+        float minX = float.MaxValue, maxX = float.MinValue;
+        float minZ = float.MaxValue, maxZ = float.MinValue;
+
+        if (garmentContourWorld != null)
+        {
+            for (int i = 0; i < garmentContourWorld.Count; i++)
+            {
+                Vector3 p = garmentContourWorld[i];
+                sampleYs.Add(p.y);
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+        }
+        if (landmarksWorldPos != null)
+        {
+            for (int i = 0; i < landmarksWorldPos.Count; i++)
+            {
+                Vector3 p = landmarksWorldPos[i];
+                sampleYs.Add(p.y);
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+        }
+
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (plyLoader != null && plyLoader.totalLoadedPoints > 0 && minX < maxX && minZ < maxZ)
+        {
+            const int N = 16;
+            for (int ix = 0; ix <= N; ix++)
+            {
+                float wx = Mathf.Lerp(minX, maxX, ix / (float)N);
+                for (int iz = 0; iz <= N; iz++)
+                {
+                    float wz = Mathf.Lerp(minZ, maxZ, iz / (float)N);
+                    if (garmentContourWorld != null && garmentContourWorld.Count >= 4 &&
+                        !IsPointInPolygonXZ(wx, wz, garmentContourWorld))
+                        continue;
+                    if (plyLoader.TrySampleRawSurfaceAt(wx, wz, out float sy, out _))
+                    {
+                        sampleYs.Add(sy);
+                    }
+                }
+            }
+        }
+
+        float topY = 0.08f;
+        if (sampleYs.Count > 0)
+        {
+            sampleYs.Sort();
+            // Dùng phân vị 98% để chống điểm nhiễu bay cao làm lệch thị sai (parallax) góc nhìn camera
+            int idx98 = Mathf.Clamp(Mathf.FloorToInt((sampleYs.Count - 1) * 0.98f), 0, sampleYs.Count - 1);
+            topY = sampleYs[idx98];
+        }
+        cachedGarmentOverlayPlaneY = topY + 0.003f;
+        return cachedGarmentOverlayPlaneY;
+    }
+
     private void OnDrawGizmos()
     {
-        // 1. Vẽ Đường bao Segment Thân Quần 3D trong Scene View
+        float flatGarmentY = GetGarmentOverlayFlatPlaneY();
+
+        // 1. Vẽ Đường bao Segment Thân Quần trên mặt phẳng độ cao lớn nhất của quần (theo tia Camera Zivid)
         if (showSegmentationContour3D && garmentContourWorld != null && garmentContourWorld.Count > 2)
         {
             Gizmos.color = new Color(0.05f, 0.95f, 0.55f, 0.95f);
-            for (int i = 0; i < garmentContourWorld.Count - 1; i++)
-                Gizmos.DrawLine(garmentContourWorld[i], garmentContourWorld[i + 1]);
-            Gizmos.DrawLine(garmentContourWorld[garmentContourWorld.Count - 1], garmentContourWorld[0]);
+            for (int i = 0; i < garmentContourWorld.Count; i++)
+            {
+                Vector3 a = ProjectWorldPointAlongZividRayToPlaneY(garmentContourWorld[i], flatGarmentY);
+                Vector3 b = ProjectWorldPointAlongZividRayToPlaneY(garmentContourWorld[(i + 1) % garmentContourWorld.Count], flatGarmentY);
+                Gizmos.DrawLine(a, b);
+            }
         }
 
         // 2. Vẽ CHỖ CẦN PHUN (Vùng R màu Vàng Cam & Vùng R_safe màu Xanh Lá) trong Scene View
@@ -13611,7 +14121,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        // 3. Vẽ 12 Điểm Mốc Giải Phẫu AI 3D + Khung Xương trong Scene View
+        // 3. Vẽ 12 Điểm Mốc Giải Phẫu AI + Khung Xương trên mặt phẳng độ cao lớn nhất của quần (theo tia Camera Zivid)
         if (showLandmarks3D && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
         {
             Gizmos.color = new Color(1.0f, 0.35f, 0.85f, 0.90f);
@@ -13621,27 +14131,28 @@ public class DobotCR10AIKController : MonoBehaviour
                 int i0 = LandmarkSkeletonPairs[k, 0];
                 int i1 = LandmarkSkeletonPairs[k, 1];
                 if (i0 < landmarksWorldPos.Count && i1 < landmarksWorldPos.Count)
-                    Gizmos.DrawLine(landmarksWorldPos[i0], landmarksWorldPos[i1]);
+                {
+                    Vector3 p0 = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i0], flatGarmentY);
+                    Vector3 p1 = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i1], flatGarmentY);
+                    Gizmos.DrawLine(p0, p1);
+                }
             }
 
             Gizmos.color = new Color(1.0f, 0.85f, 0.15f, 1.0f);
             for (int i = 0; i < landmarksWorldPos.Count; i++)
             {
-                Gizmos.DrawSphere(landmarksWorldPos[i], 0.010f);
+                Vector3 pi = ProjectWorldPointAlongZividRayToPlaneY(landmarksWorldPos[i], flatGarmentY);
+                Gizmos.DrawSphere(pi, 0.010f);
             }
         }
 
-        // 3b. Vẽ ĐƯỜNG VIỀN MÀU ĐỎ bao quanh các vùng cần vá trong Scene View (luôn hiện dù chưa sinh quỹ đạo)
-        if (showHoleRegionOutlines3D && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
+        // 3b. Vẽ GẠCH ĐÁNH CHÉO các vùng lỗ cần vá trong Scene View (không vẽ đường bao)
+        if (showHoleRegionOutlines3D && holeCrossHatchSegmentsWorld != null && holeCrossHatchSegmentsWorld.Count >= 2)
         {
-            Gizmos.color = new Color(1.0f, 0.10f, 0.08f, 1.0f);
-            for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+            Gizmos.color = new Color(1.0f, 0.24f, 0.10f, 0.98f);
+            for (int s = 0; s + 1 < holeCrossHatchSegmentsWorld.Count; s += 2)
             {
-                List<Vector3> loop = holeRegionOutlinesWorld[r];
-                if (loop == null || loop.Count < 3) continue;
-                for (int k = 0; k < loop.Count - 1; k++)
-                    Gizmos.DrawLine(loop[k], loop[k + 1]);
-                Gizmos.DrawLine(loop[loop.Count - 1], loop[0]);
+                Gizmos.DrawLine(holeCrossHatchSegmentsWorld[s], holeCrossHatchSegmentsWorld[s + 1]);
             }
         }
 
@@ -13986,13 +14497,18 @@ public class DobotCR10AIKController : MonoBehaviour
             if (sprayTechParams != null)
             {
                 p1Config.sprayWidthWMm = Mathf.Clamp(sprayTechParams.sprayWidthMm, 15f, 150f);
-                p1Config.overlapRatioR = Mathf.Clamp(Mathf.Max(sprayTechParams.overlapRatio, 0.45f), 0.05f, 0.85f);
+                p1Config.overlapRatioR = Mathf.Clamp(sprayTechParams.overlapRatio, 0.05f, 0.30f);
                 p1Config.scanSpacingSMm = p1Config.EffectiveSpacingSMm;
             }
         }
         else
         {
             p1Config.sprayDistanceDMm = customDrawZOffsetMm;
+            if (p1Config.autoSpacingFromWidthOverlap)
+            {
+                p1Config.overlapRatioR = Mathf.Clamp(p1Config.overlapRatioR, 0.05f, 0.30f);
+                p1Config.scanSpacingSMm = p1Config.EffectiveSpacingSMm;
+            }
         }
     }
 
@@ -14136,7 +14652,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             GUILayout.BeginHorizontal();
             GUILayout.Label($"Chồng lấn r: {p1Config.overlapRatioR * 100f:F0}%", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(135));
-            float newR = Mathf.Round(GUILayout.HorizontalSlider(p1Config.overlapRatioR, 0.05f, 0.80f) * 20f) / 20f;
+            float newR = Mathf.Round(GUILayout.HorizontalSlider(p1Config.overlapRatioR, 0.05f, 0.30f) * 20f) / 20f;
             if (Mathf.Abs(newR - p1Config.overlapRatioR) > 0.005f)
             {
                 p1Config.overlapRatioR = newR;
@@ -14617,7 +15133,7 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         // 6. Tùy chọn vùng kín & cắt biên quần
-        float p3BrushStep = Mathf.Clamp(sprayWidthMm * 0.75f, 2f, 55f);
+        float p3BrushStep = ComputeEffectiveRegionFillSpacingMm();
         bool newFill3 = GUILayout.Toggle(p3Config.fillClosedDrawnRegions, $" Phủ kín hình kín theo cỡ cọ ({sprayWidthMm:F0}mm -> bước {p3BrushStep:F1}mm)", AntigravityUITheme.StyleToggle);
         if (newFill3 != p3Config.fillClosedDrawnRegions) { p3Config.fillClosedDrawnRegions = newFill3; changed = true; }
 
@@ -14841,7 +15357,7 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        float p4BrushStep = Mathf.Clamp(sprayWidthMm * 0.75f, 2f, 55f);
+        float p4BrushStep = ComputeEffectiveRegionFillSpacingMm();
         bool newFill4 = GUILayout.Toggle(p4Config.fillClosedDrawnRegions, $" Phủ kín hình kín theo cỡ cọ ({sprayWidthMm:F0}mm -> bước {p4BrushStep:F1}mm)", AntigravityUITheme.StyleToggle);
         if (newFill4 != p4Config.fillClosedDrawnRegions) { p4Config.fillClosedDrawnRegions = newFill4; changed = true; }
 
@@ -15610,10 +16126,31 @@ public class DobotCR10AIKController : MonoBehaviour
         string activeSample = GetActiveCloudSampleName();
         if (string.IsNullOrEmpty(activeSample)) activeSample = selectedSampleName;
 
+        // Applying a method/template always replaces the previous route and its
+        // overlays, including when validation below rejects the new generation.
+        isPlaying = false;
+        SetSprayState(false);
+        ClearInkTrail();
+        if (waypoints != null) waypoints.Clear();
+        currentWaypointIndex = 0;
+        projectedTrajectoryOn2D.Clear();
+        projectedTrajectoryOff2D.Clear();
+        projectedTargetRegionR2D.Clear();
+        projectedSafeRegionRsafe2D.Clear();
+        lastP1Result = null;
+        lastP2Result = null;
+        lastP3Result = null;
+        lastP4Result = null;
+
         if (landmarksWorldPos == null || landmarksWorldPos.Count < 12 ||
             (!string.IsNullOrEmpty(activeSample) && loadedLandmarksSampleName != activeSample))
         {
             LoadLandmarksAndSegmentationForSample(activeSample);
+        }
+        if ((customDrawnRegions == null || customDrawnRegions.Count == 0) &&
+            taughtCanonicalRegions != null && taughtCanonicalRegions.Count > 0)
+        {
+            ReprojectTaughtCanonicalRegionsOntoCurrentCamera();
         }
 
         bool has12Lm = (landmarksWorldPos != null && landmarksWorldPos.Count >= 12);

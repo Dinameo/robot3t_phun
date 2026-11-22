@@ -202,18 +202,18 @@ public static class DobotCR10AKinematics
             }
         }
 
-        // Chuyển n và tangent từ Robot Unity (X_u, Y_u, Z_u) sang DH Robotics (X_dh = -X_u, Y_dh = Y_u, Z_dh = Z_u)
+        // Chuyển n từ Robot Unity (X_u, Y_u, Z_u) sang DH Robotics (X_dh = -X_u, Y_dh = Y_u, Z_dh = Z_u)
         Vector3 nDh = new Vector3(-n.x, n.y, n.z).normalized;
         Vector3 zTool = -nDh; // trục phun cắm vào bề mặt
 
-        Vector3 tRef = pathTangentRobot.sqrMagnitude > 1e-6f ? pathTangentRobot.normalized : new Vector3(1f, 0f, 0f);
-        Vector3 tDh = new Vector3(-tRef.x, tRef.y, tRef.z).normalized;
-
+        // Đầu phun đối xứng tròn xoay quanh trục zTool:
+        // Giữ trục tham chiếu X cố định (1, 0, 0) trong hệ DH (trùng quy ước Roll=180°, Pitch=0°, Yaw=0° khi súng thẳng đứng)
+        // thay vì bám theo vector tiếp tuyến pathTangentRobot (vốn đảo 90°–180° tại mọi góc vuông / điểm quay đầu Zigzag gây giật J6!).
+        Vector3 tDh = Vector3.right;
         Vector3 yTool = Vector3.Cross(zTool, tDh);
         if (yTool.sqrMagnitude < 1e-5f)
         {
-            yTool = Vector3.Cross(zTool, Vector3.right);
-            if (yTool.sqrMagnitude < 1e-5f) yTool = Vector3.Cross(zTool, Vector3.up);
+            yTool = Vector3.Cross(zTool, Vector3.up);
         }
         yTool.Normalize();
         Vector3 xTool = Vector3.Cross(yTool, zTool).normalized;
@@ -548,9 +548,10 @@ public static class DobotCR10AKinematics
                 }
                 else
                 {
-                    // Trường hợp kỳ dị cổ tay: Khớp 4 và 6 đồng trục, quy ước q6 = 0
-                    q6 = 0.0;
-                    q234 = Math.Atan2(T16[1, 0], T16[0, 0]);
+                    // Trường hợp kỳ dị cổ tay: Khớp 4 và 6 đồng trục -> giữ nguyên góc q6 hiện tại để tránh bước nhảy J6 đột ngột
+                    double sumAngle = Math.Atan2(T16[1, 0], T16[0, 0]);
+                    q6 = (currentJointsRad != null && currentJointsRad.Length >= 6) ? currentJointsRad[5] : 0.0;
+                    q234 = (cos_q5 >= 0.0) ? (sumAngle - q6) : (sumAngle + q6);
                 }
 
                 // 3.4. Bước 4: Giải tích cơ cấu cánh tay phẳng 2R (q2, q3, q4)
@@ -584,6 +585,17 @@ public static class DobotCR10AKinematics
                     double q2 = Math.Atan2(-P14_x, P14_y) - Math.Atan2(K2, K1);
                     double q4 = q234 - q2 - q3;
 
+                    double q6Final = WrapPi(q6);
+                    if (currentJointsRad != null && currentJointsRad.Length >= 6)
+                    {
+                        // Mở cuộn (unwrap) J6 liên tục quanh góc hiện tại trong giới hạn ±359° của Dobot CR10A để không bị nhảy ±360° khi qua ±180°
+                        double unwrapped = currentJointsRad[5] + WrapPi(q6Final - currentJointsRad[5]);
+                        if (Math.Abs(unwrapped) <= 359.0 * Math.PI / 180.0)
+                        {
+                            q6Final = unwrapped;
+                        }
+                    }
+
                     double[] qSol = new double[6]
                     {
                         WrapPi(q1),
@@ -591,7 +603,7 @@ public static class DobotCR10AKinematics
                         WrapPi(q3),
                         WrapPi(q4),
                         WrapPi(q5),
-                        WrapPi(q6)
+                        q6Final
                     };
 
                     double[] qSolDeg = new double[6];
