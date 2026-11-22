@@ -1995,13 +1995,54 @@ public static class TrajectoryEvaluationEngine
             ComputePolygonAreaSqM(stroke) >= 0.00020f;
     }
 
+    private static float PointSegmentDistanceSquared(Vector2 point, Vector2 from, Vector2 to)
+    {
+        Vector2 delta = to - from;
+        float lengthSquared = delta.sqrMagnitude;
+        float t = lengthSquared > 1e-10f ? Mathf.Clamp01(Vector2.Dot(point - from, delta) / lengthSquared) : 0f;
+        return (point - (from + delta * t)).sqrMagnitude;
+    }
+
+    private static bool MatchesRegionOutline(List<Vector2> stroke, List<List<Vector2>> regions)
+    {
+        if (regions.Count == 0 || !IsClosedHandDrawnStroke(stroke)) return false;
+        const float toleranceSquared = 0.004f * 0.004f;
+        bool FollowsBoundary(List<Vector2> points, List<Vector2> boundary)
+        {
+            foreach (Vector2 point in points)
+            {
+                bool nearEdge = false;
+                for (int i = 0; i < boundary.Count && !nearEdge; i++)
+                    nearEdge = PointSegmentDistanceSquared(point, boundary[i], boundary[(i + 1) % boundary.Count]) <= toleranceSquared;
+                if (!nearEdge) return false;
+            }
+            return true;
+        }
+
+        foreach (var region in regions)
+            if (FollowsBoundary(stroke, region) && FollowsBoundary(region, stroke)) return true;
+        return false;
+    }
+
     private static List<Vector3> BuildWorldStroke(List<Vector2> pointsXZ, bool close = false)
     {
         var stroke = new List<Vector3>(pointsXZ.Count + (close ? 1 : 0));
-        foreach (Vector2 p in pointsXZ)
-            stroke.Add(new Vector3(p.x, 0.02f, p.y));
-        if (close && stroke.Count > 0 && stroke[0] != stroke[stroke.Count - 1])
-            stroke.Add(stroke[0]);
+        if (pointsXZ.Count == 0) return stroke;
+        stroke.Add(new Vector3(pointsXZ[0].x, 0.02f, pointsXZ[0].y));
+        int pointCount = pointsXZ.Count + (close ? 1 : 0);
+        for (int i = 1; i < pointCount; i++)
+        {
+            Vector2 from = pointsXZ[i - 1];
+            Vector2 to = pointsXZ[i % pointsXZ.Count];
+            float length = Vector2.Distance(from, to);
+            if (length < 1e-5f) continue;
+            int samples = Mathf.CeilToInt(length / 0.008f);
+            for (int k = 1; k <= samples; k++)
+            {
+                Vector2 p = Vector2.Lerp(from, to, (float)k / samples);
+                stroke.Add(new Vector3(p.x, 0.02f, p.y));
+            }
+        }
         return stroke;
     }
 
@@ -2427,7 +2468,7 @@ public static class TrajectoryEvaluationEngine
         bool hasMaskFallback = (garmentClip2D != null && garmentClip2D.Count >= 3)
             || (ctrl.sprayZoneLeftWorld != null && ctrl.sprayZoneLeftWorld.Count >= 3)
             || (ctrl.sprayZoneRightWorld != null && ctrl.sprayZoneRightWorld.Count >= 3)
-            || ctrl.HasCustomDrawnRegions2D;
+            || ctrl.HasCustomDrawnRegions2D || ctrl.HasCustomDrawnStrokes2D;
         if (!has12Landmarks && !hasMaskFallback)
         {
             p1Result.warningMessage = "Chưa có Mask 2D (đường bao quần / vùng ống) hoặc 12 mốc AI cho phôi hiện tại.";
@@ -2545,58 +2586,26 @@ public static class TrajectoryEvaluationEngine
                         }
                     }
                 }
-                if (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0 &&
-                    (!usedUserDrawnRegions || ctrl.HasCustomDrawnStrokes2D))
+                var drawnStrokes = GetHandDrawnStrokesXZ(ctrl, plyLoader, templateStrokesUV,
+                    has12Landmarks ? pt => MapHandDrawnPatternSimilarity12(pt, src12, dst12XZ) : null);
+                if (drawnStrokes.Count > 0)
                 {
                     var closedUserLoops = new List<List<Vector2>>();
                     var openStrokesWorld2D = new List<List<Vector2>>();
-
-                    for (int s = 0; s < templateStrokesUV.Count; s++)
+                    foreach (var stroke in drawnStrokes)
                     {
-                        var st = templateStrokesUV[s];
-                        if (st == null || st.Count < 2) continue;
-
-                        var warped = new List<Vector2>(st.Count);
-                        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
-                        float arcLen = 0f;
-                        for (int p = 0; p < st.Count; p++)
-                        {
-                            Vector2 wp = MapHandDrawnPatternSimilarity12(st[p], src12, dst12XZ);
-                            if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
-                            warped.Add(wp);
-                            if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
-                            if (wp.y < minY) minY = wp.y; if (wp.y > maxY) maxY = wp.y;
-                        }
-                        float diag = Mathf.Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
-                        float endGap = Vector2.Distance(warped[0], warped[warped.Count - 1]);
-                        float area = ComputePolygonAreaSqM(warped);
-
-                        // Nhận diện thông minh vòng khép kín vẽ tay (hình tròn, oval, hình vuông, hình tự do...)
-                        bool isLoopShape = (warped.Count >= 6 && diag > 0.025f && area >= 0.00025f)
-                            && (endGap <= Mathf.Max(0.065f, diag * 0.42f) || (endGap > 1e-4f && arcLen / endGap >= 2.2f));
-                        if (isLoopShape)
-                        {
-                            closedUserLoops.Add(warped);
-                        }
-                        else
-                        {
-                            openStrokesWorld2D.Add(warped);
-                        }
+                        if (IsClosedHandDrawnStroke(stroke)) closedUserLoops.Add(stroke);
+                        else openStrokesWorld2D.Add(stroke);
                     }
 
-                    // Saved templates may store a closed shape both as a region
-                    // (the fill source) and as its outline stroke. Use the region
-                    // once, while keeping any independent open hand-drawn strokes.
-                    if (!usedUserDrawnRegions)
+                    foreach (var loop in closedUserLoops)
                     {
-                        for (int i = 0; i < closedUserLoops.Count; i++)
+                        if (MatchesRegionOutline(loop, candidateRawPolys)) continue;
+                        var simp = SimplifyClosedPolygonDouglasPeucker(loop, dpEpsM);
+                        if (simp.Count >= 3)
                         {
-                            var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
-                            if (simp.Count >= 3)
-                            {
-                                candidateRawPolys.Add(simp);
-                                candidateAxes.Add(Vector2.up);
-                            }
+                            candidateRawPolys.Add(simp);
+                            candidateAxes.Add(Vector2.up);
                         }
                     }
 
@@ -3618,7 +3627,9 @@ public static class TrajectoryEvaluationEngine
             if (drawnRegionPolys != null)
                 legMaskPolys.AddRange(drawnRegionPolys);
         }
-        if (legMaskPolys.Count == 0)
+        bool canUseDrawnStrokes = p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion &&
+            (ctrl.HasCustomDrawnStrokes2D || (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0));
+        if (legMaskPolys.Count == 0 && !canUseDrawnStrokes)
         {
             p2Exec.summaryText = "P2 chưa có mask ống quần hoặc vùng vẽ kín ánh xạ được lên phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
@@ -3636,7 +3647,7 @@ public static class TrajectoryEvaluationEngine
                 validLegMasks.Add(legMaskPolys[li]);
             }
         }
-        if (legSpines.Count == 0)
+        if (legSpines.Count == 0 && !canUseDrawnStrokes && (drawnRegionPolys == null || drawnRegionPolys.Count == 0))
         {
             p2Exec.summaryText = "P2 không tìm được trục giữa. Kiểm tra vùng vẽ có đủ bề rộng và nằm trên phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
@@ -3662,68 +3673,35 @@ public static class TrajectoryEvaluationEngine
         if (flat2DMode)
             flatY = GetHighestGarmentSurfaceY(ctrl, plyLoader, flatY);
 
+        var openStrokeTargets = new List<(List<Vector2> stroke, List<List<Vector2>> masks)>();
         if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
         {
             if (drawnRegionPolys != null)
+                targetPolysXZ.AddRange(drawnRegionPolys);
+
+            var drawnStrokes = GetHandDrawnStrokesXZ(ctrl, plyLoader, templateStrokesUV,
+                has12Landmarks ? pt => MapHandDrawnPatternSimilarity12(pt, src12, dst12XZ) : null);
+            foreach (var stroke in drawnStrokes)
             {
-                for (int i = 0; i < drawnRegionPolys.Count; i++)
-                {
-                    if (drawnRegionPolys[i] != null && drawnRegionPolys[i].Count >= 3)
-                        targetPolysXZ.Add(drawnRegionPolys[i]);
-                }
-            }
-            else if (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0)
-            {
-                var closedUserLoops = new List<List<Vector2>>();
-                var openStrokesWorld2D = new List<List<Vector2>>();
-                float dpEpsM = 0.003f;
-
-                for (int s = 0; s < templateStrokesUV.Count; s++)
-                {
-                    var st = templateStrokesUV[s];
-                    if (st == null || st.Count < 2) continue;
-
-                    var warped = new List<Vector2>(st.Count);
-                    float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
-                    float arcLen = 0f;
-                    for (int p = 0; p < st.Count; p++)
-                    {
-                        Vector2 wp = MapHandDrawnPatternSimilarity12(st[p], src12, dst12XZ);
-                        if (warped.Count > 0) arcLen += Vector2.Distance(warped[warped.Count - 1], wp);
-                        warped.Add(wp);
-                        if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
-                        if (wp.y < minY) minY = wp.y; if (wp.y > maxY) maxY = wp.y;
-                    }
-                    float diag = Mathf.Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
-                    float endGap = Vector2.Distance(warped[0], warped[warped.Count - 1]);
-                    float area = ComputePolygonAreaSqM(warped);
-
-                    bool isLoopShape = (warped.Count >= 6 && diag > 0.020f && area >= 0.00020f)
-                        && (endGap <= Mathf.Max(0.065f, diag * 0.42f) || (endGap > 1e-4f && arcLen / endGap >= 2.2f));
-                    if (isLoopShape) closedUserLoops.Add(warped);
-                    else openStrokesWorld2D.Add(warped);
-                }
-
-                for (int i = 0; i < closedUserLoops.Count; i++)
-                {
-                    var simp = SimplifyClosedPolygonDouglasPeucker(closedUserLoops[i], dpEpsM);
-                    if (simp.Count >= 3) targetPolysXZ.Add(simp);
-                }
-
-                if (openStrokesWorld2D.Count > 0)
+                if (!IsClosedHandDrawnStroke(stroke))
                 {
                     float bandRadiusM = Mathf.Clamp(p2Cfg.openStrokeSprayWidthMm * 0.5f, 6f, 60f) * 0.001f;
-                    var strokePolys = BuildMaskPolygonsFromOpenStrokes2D(openStrokesWorld2D, bandRadiusM, dpEpsM);
-                    for (int i = 0; i < strokePolys.Count; i++)
-                    {
-                        if (strokePolys[i] != null && strokePolys[i].Count >= 3)
-                            targetPolysXZ.Add(strokePolys[i]);
-                    }
+                    var masks = BuildMaskPolygonsFromOpenStrokes2D(new List<List<Vector2>> { stroke }, bandRadiusM, 0.003f);
+                    openStrokeTargets.Add((stroke, masks));
+                    continue;
                 }
+                if (MatchesRegionOutline(stroke, targetPolysXZ)) continue;
+                var polygon = SimplifyClosedPolygonDouglasPeucker(stroke, 0.003f);
+                if (polygon.Count >= 3) targetPolysXZ.Add(polygon);
             }
         }
 
-        bool isFullMaskMode = (p2Cfg.regionScope == P2RegionScopeMode.FullLegMask || targetPolysXZ.Count == 0);
+        var closedTargets = new List<List<Vector2>>(targetPolysXZ);
+        foreach (var open in openStrokeTargets)
+            targetPolysXZ.AddRange(open.masks);
+
+        bool isFullMaskMode = p2Cfg.regionScope == P2RegionScopeMode.FullLegMask ||
+            (targetPolysXZ.Count == 0 && openStrokeTargets.Count == 0);
         if (isFullMaskMode)
         {
             targetPolysXZ.Clear();
@@ -3751,7 +3729,8 @@ public static class TrajectoryEvaluationEngine
         // Bước 3..6: Sinh các lượt QUỸ ĐẠO QUÉT dọc theo Trục giữa Mask thật (Cách A) hoặc Offset đồng tâm từ biên (Cách B)
         var perPassSprayFlags = new List<List<bool>>();
         float[] marginAttempts = { borderEMm, borderEMm * 0.35f, 0f };
-        for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0; attempt++)
+        for (int attempt = 0; attempt < marginAttempts.Length && strokesWorld.Count == 0 &&
+            (isFullMaskMode || targetPolysXZ.Count > 0); attempt++)
         {
             float activeMargin = marginAttempts[attempt];
             List<Vector3> activeContour = (attempt < 2) ? ctrl.garmentContourWorld : null;
@@ -3912,6 +3891,99 @@ public static class TrajectoryEvaluationEngine
                 strokesWorld.AddRange(legFinalPaths);
                 perPassSprayFlags.AddRange(legFinalFlags);
             }
+        }
+
+        // A pass along the entire leg can miss a small or isolated painted target.
+        // Cover each missed target independently of the others.
+        bool HasSprayedPass(List<Vector2> polygon)
+        {
+            for (int s = 0; s < strokesWorld.Count; s++)
+            {
+                var path = strokesWorld[s];
+                for (int p = 1; p < path.Count; p++)
+                {
+                    if (!perPassSprayFlags[s][p]) continue;
+                    Vector3 mid = (path[p - 1] + path[p]) * 0.5f;
+                    if (IsPointInPolygonXZ(new Vector2(mid.x, mid.z), polygon)) return true;
+                }
+            }
+            return false;
+        }
+
+        void AddLocalP2Pass(List<Vector3> path)
+        {
+            var safePath = new List<Vector3>();
+            foreach (Vector3 point in path)
+            {
+                if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
+                    safePath.Add(point);
+                else
+                {
+                    AddSegment(safePath);
+                    safePath = new List<Vector3>();
+                }
+            }
+            AddSegment(safePath);
+        }
+
+        void AddSegment(List<Vector3> path)
+        {
+            if (path.Count < 2) return;
+            var flags = new List<bool>(path.Count) { false };
+            for (int p = 1; p < path.Count; p++) flags.Add(true);
+            strokesWorld.Add(path);
+            perPassSprayFlags.Add(flags);
+        }
+
+        foreach (var polygon in closedTargets)
+        {
+            if (HasSprayedPass(polygon)) continue;
+            foreach (var pass in BuildSimpleFillPassesInsidePolygon2D(polygon, stepSM))
+                AddLocalP2Pass(pass);
+        }
+        foreach (var open in openStrokeTargets)
+        {
+            if (!open.masks.Exists(HasSprayedPass))
+            {
+                AddLocalP2Pass(BuildWorldStroke(open.stroke));
+                continue;
+            }
+
+            // A full-leg pass can cross the band once and still miss most of a curved stroke.
+            float coverageRadius = Mathf.Min(stepSM, p2Cfg.openStrokeSprayWidthMm * 0.001f) * 0.5f;
+            float radiusSquared = coverageRadius * coverageRadius;
+            int existingPassCount = strokesWorld.Count;
+            bool PointIsCovered(Vector3 point)
+            {
+                Vector2 xz = new Vector2(point.x, point.z);
+                for (int s = 0; s < existingPassCount; s++)
+                {
+                    var pass = strokesWorld[s];
+                    for (int p = 1; p < pass.Count; p++)
+                    {
+                        if (!perPassSprayFlags[s][p]) continue;
+                        Vector2 a = new Vector2(pass[p - 1].x, pass[p - 1].z);
+                        Vector2 b = new Vector2(pass[p].x, pass[p].z);
+                        if (PointSegmentDistanceSquared(xz, a, b) <= radiusSquared) return true;
+                    }
+                }
+                return false;
+            }
+
+            var center = BuildWorldStroke(open.stroke);
+            var uncovered = new List<Vector3>();
+            for (int p = 1; p < center.Count; p++)
+            {
+                if (PointIsCovered((center[p - 1] + center[p]) * 0.5f))
+                {
+                    AddLocalP2Pass(uncovered);
+                    uncovered = new List<Vector3>();
+                    continue;
+                }
+                if (uncovered.Count == 0) uncovered.Add(center[p - 1]);
+                uncovered.Add(center[p]);
+            }
+            AddLocalP2Pass(uncovered);
         }
 
         // Bước 7 & 8: Gán tọa độ Z, hướng súng, bật/tắt súng theo từng đoạn và kiểm tra quỹ đạo
@@ -4474,105 +4546,73 @@ public static class TrajectoryEvaluationEngine
             p3Exec.warningMessage = $"Cảnh báo P3: có {p3Exec.flippedTriangleCount}/{p3Exec.totalTriangles} tam giác bị đảo ngược hoặc suy biến (kiểm tra thứ tự mốc)!";
 
         // Bước 5 & 6: Lấy quỹ đạo mẫu (hỗ trợ cả vùng hình Tròn/Vuông/Đa giác đã vẽ LẪN các nét mẫu Canonical UV) và biến đổi Barycentric!
-        var activeCanonicalStrokes = new List<List<Vector2>>();
-        var regionPolysForOverlay = new List<List<Vector2>>();
-
-        if (ctrl.HasCustomDrawnRegions2D)
+        var regionPolysForOverlay = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader, onlyLocalRegions: true);
+        var canonicalRegions = ctrl.GetCustomDrawnRegionCanonicalPolygonsUV(onlyProjectedRegions: regionPolysForOverlay.Count > 0);
+        foreach (var canonical in canonicalRegions)
         {
-            // P3 chuẩn: lấy tọa độ tương đối (canonical UV) của từng hình Tròn/Vuông/Đa giác và biến đổi
-            // qua đúng lưới 32 tam giác Barycentric sang quần mới (tự dịch/xoay/co giãn khi đổi phôi!)
-            var canonRegionPolysUV = ctrl.GetCustomDrawnRegionCanonicalPolygonsUV();
-            float fillStepMm = ctrl.ComputeEffectiveRegionFillSpacingMm();
-            for (int r = 0; r < canonRegionPolysUV.Count; r++)
-            {
-                var canonPoly = canonRegionPolysUV[r];
-                if (canonPoly == null || canonPoly.Count < 3) continue;
-
-                var warpedPolyXZ = new List<Vector2>(canonPoly.Count);
-                for (int i = 0; i < canonPoly.Count; i++)
-                {
-                    warpedPolyXZ.Add(WarpPointBarycentric12(canonPoly[i], src12, dst12XZ));
-                }
-                if (warpedPolyXZ.Count < 3) continue;
-                regionPolysForOverlay.Add(warpedPolyXZ);
-
-                var outline = new List<Vector3>(warpedPolyXZ.Count + 1);
-                for (int i = 0; i <= warpedPolyXZ.Count; i++)
-                {
-                    Vector2 p2 = warpedPolyXZ[i % warpedPolyXZ.Count];
-                    outline.Add(new Vector3(p2.x, 0.02f, p2.y));
-                }
-                strokesWorld.Add(outline);
-
-                if (p3Cfg.fillClosedDrawnRegions)
-                {
-                    var fillPasses = BuildSimpleFillPassesInsidePolygon2D(warpedPolyXZ, fillStepMm * 0.001f);
-                    for (int f = 0; f < fillPasses.Count; f++) strokesWorld.Add(fillPasses[f]);
-                }
-            }
+            var projected = new List<Vector2>(canonical.Count);
+            foreach (Vector2 uv in canonical)
+                projected.Add(WarpPointBarycentric12(uv, src12, dst12XZ));
+            regionPolysForOverlay.Add(projected);
         }
-        else if (templateStrokesUV != null && templateStrokesUV.Count > 0)
+
+        float fillStepM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
+        foreach (var region in regionPolysForOverlay)
         {
-            activeCanonicalStrokes.AddRange(templateStrokesUV);
+            strokesWorld.Add(BuildWorldStroke(region, close: true));
+            if (p3Cfg.fillClosedDrawnRegions)
+                strokesWorld.AddRange(BuildSimpleFillPassesInsidePolygon2D(region, fillStepM));
+        }
+
+        var handStrokes = ctrl.GetCustomDrawnStrokesWorldXZ(plyLoader, onlyLocalStrokes: true);
+        if (handStrokes.Count == 0 && templateStrokesUV != null)
+        {
+            float stepUV = Mathf.Clamp(p3Cfg.resampleStepUV, 0.006f, 0.04f);
+            foreach (var stroke in templateStrokesUV)
+            {
+                if (stroke == null || stroke.Count < 2) continue;
+                var projected = new List<Vector2>();
+                foreach (Vector2 uv in ResampleUV(stroke, stepUV))
+                    projected.Add(WarpPointBarycentric12(uv, src12, dst12XZ));
+                if (projected.Count >= 2) handStrokes.Add(projected);
+            }
         }
 
         int totalCandidatePts = 0;
         int insideGarmentPts = 0;
-
-        if (strokesWorld.Count == 0 && activeCanonicalStrokes.Count > 0)
+        float marginMm = Mathf.Clamp(p3Cfg.borderMarginEMm, 0f, 35f);
+        foreach (var path in strokesWorld)
         {
-            float stepUV = Mathf.Clamp(p3Cfg.resampleStepUV, 0.006f, 0.04f);
-            float marginMm = Mathf.Clamp(p3Cfg.borderMarginEMm, 0f, 35f);
-            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+            foreach (Vector3 point in path)
             {
-                totalCandidatePts = 0;
-                insideGarmentPts = 0;
-                for (int s = 0; s < activeCanonicalStrokes.Count; s++)
-                {
-                    var raw = activeCanonicalStrokes[s];
-                    if (raw == null || raw.Count < 2) continue;
-                    var resampled = ResampleUV(raw, stepUV);
-                    var worldStroke = new List<Vector3>();
-
-                    for (int p = 0; p < resampled.Count; p++)
-                    {
-                        // Biến đổi Affine từng mảnh chuẩn Barycentric: P' = alpha*A' + beta*B' + gamma*C'
-                        Vector2 wXZ = WarpPointBarycentric12(resampled[p], src12, dst12XZ);
-                        Vector3 w = new Vector3(wXZ.x, 0.02f, wXZ.y);
-                        totalCandidatePts++;
-                        bool isIn = IsInsideValidSprayZone(w.x, w.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm * 0.5f, out _);
-                        if (isIn) insideGarmentPts++;
-
-                        bool keep = (!p3Cfg.clipToGarmentContour || attempt == 1) ? true : isIn;
-                        if (keep)
-                        {
-                            worldStroke.Add(w);
-                        }
-                        else if (worldStroke.Count >= 2)
-                        {
-                            strokesWorld.Add(worldStroke);
-                            worldStroke = new List<Vector3>();
-                        }
-                        else
-                        {
-                            worldStroke.Clear();
-                        }
-                    }
-                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
-                }
+                totalCandidatePts++;
+                if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
+                    insideGarmentPts++;
             }
         }
-        else if (strokesWorld.Count > 0)
+        foreach (var stroke in handStrokes)
         {
-            for (int s = 0; s < strokesWorld.Count; s++)
+            if (MatchesRegionOutline(stroke, regionPolysForOverlay)) continue;
+            var path = BuildWorldStroke(stroke);
+            var validSegments = new List<List<Vector3>>();
+            var segment = new List<Vector3>();
+            foreach (Vector3 point in path)
             {
-                for (int p = 0; p < strokesWorld[s].Count; p++)
+                totalCandidatePts++;
+                bool inside = IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm * 0.5f, out _);
+                if (inside) insideGarmentPts++;
+                if (inside || !p3Cfg.clipToGarmentContour)
                 {
-                    totalCandidatePts++;
-                    if (IsInsideValidSprayZone(strokesWorld[s][p].x, strokesWorld[s][p].z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
-                        insideGarmentPts++;
+                    segment.Add(point);
+                }
+                else
+                {
+                    if (segment.Count >= 2) validSegments.Add(segment);
+                    segment = new List<Vector3>();
                 }
             }
+            if (segment.Count >= 2) validSegments.Add(segment);
+            if (validSegments.Count > 0) strokesWorld.AddRange(validSegments);
         }
 
         for (int i = 0; i < regionPolysForOverlay.Count; i++)
@@ -5478,59 +5518,68 @@ public static class TrajectoryEvaluationEngine
             ctrl.templateReferenceCloud3DWorld.Count >= 30 &&
             ctrl.templateReferenceStrokes3DWorld != null && ctrl.templateReferenceStrokes3DWorld.Count > 0;
 
-        // Chuẩn bị quỹ đạo mẫu 3D (nếu người dùng vừa vẽ hình Tròn/Vuông/Đa giác trực tiếp trên phôi hiện tại, trích luôn thành đường mẫu 3D!)
-        List<List<Vector3>> activeRefStrokes3D = null;
-        if (ctrl.HasCustomDrawnRegions2D &&
-            (!hasSavedReference || ctrl.templateReferenceSampleName == targetSampleName))
+        bool transferringReference = hasSavedReference &&
+            !string.Equals(ctrl.templateReferenceSampleName, targetSampleName, StringComparison.Ordinal);
+        if (!transferringReference)
         {
-            var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
-            float fillStepM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
-            var built = new List<List<Vector3>>();
-            for (int r = 0; r < directRegionsXZ.Count; r++)
+            var directRegions = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+            var directStrokes = ctrl.GetCustomDrawnStrokesWorldXZ(plyLoader);
+            if (directRegions.Count > 0 || directStrokes.Count > 0)
             {
-                var polyXZ = directRegionsXZ[r];
-                if (polyXZ == null || polyXZ.Count < 3) continue;
-                p4Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(polyXZ, ctrl, plyLoader, flat2D, flatY));
-                var outline = new List<Vector3>(polyXZ.Count + 1);
-                for (int i = 0; i <= polyXZ.Count; i++)
+                float spacingM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
+                foreach (var region in directRegions)
                 {
-                    Vector2 p2 = polyXZ[i % polyXZ.Count];
-                    float y = flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, p2.x, p2.y);
-                    outline.Add(new Vector3(p2.x, y, p2.y));
+                    p4Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(region, ctrl, plyLoader, flat2D, flatY));
+                    strokesWorld.Add(BuildWorldStroke(region, close: true));
+                    if (p4Cfg.fillClosedDrawnRegions)
+                        strokesWorld.AddRange(BuildSimpleFillPassesInsidePolygon2D(region, spacingM));
                 }
-                built.Add(outline);
-                if (p4Cfg.fillClosedDrawnRegions)
+                foreach (var stroke in directStrokes)
+                    if (!MatchesRegionOutline(stroke, directRegions))
+                        strokesWorld.Add(BuildWorldStroke(stroke));
+
+                if (p4Cfg.clipToGarmentContour)
                 {
-                    var fills = BuildSimpleFillPassesInsidePolygon2D(polyXZ, fillStepM);
-                    for (int f = 0; f < fills.Count; f++)
+                    var clippedStrokes = new List<List<Vector3>>();
+                    float marginMm = tech != null ? tech.borderMarginMm * 0.5f : 8f;
+                    foreach (var path in strokesWorld)
                     {
-                        for (int k = 0; k < fills[f].Count; k++)
+                        var segment = new List<Vector3>();
+                        foreach (Vector3 point in path)
                         {
-                            Vector3 pt = fills[f][k];
-                            pt.y = flat2D ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, pt.x, pt.z);
-                            fills[f][k] = pt;
+                            if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm, out _))
+                                segment.Add(point);
+                            else
+                            {
+                                if (segment.Count >= 2) clippedStrokes.Add(segment);
+                                segment = new List<Vector3>();
+                            }
                         }
-                        built.Add(fills[f]);
+                        if (segment.Count >= 2) clippedStrokes.Add(segment);
                     }
+                    strokesWorld = clippedStrokes;
+                    if (strokesWorld.Count == 0)
+                        p4Exec.warningMessage = "P4 không còn đoạn vẽ hợp lệ sau khi cắt theo biên và vùng cấm.";
                 }
+
+                // Drawing and target already share a frame. Sample height at the drawn XZ.
+                var localWaypoints = BuildSprayWaypointsFromWorldStrokes(strokesWorld, ctrl, plyLoader, tech, "P4_CURRENT_SURFACE",
+                    useFixedVerticalNormal: useFixedVert, useFlatPlaneZ: flat2D, flatPlaneWorldY: flatY,
+                    overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+                p4Exec.sourceSampleName = targetSampleName;
+                p4Exec.strokeCount = strokesWorld.Count;
+                p4Exec.normalStabilityStdDeg = ComputeNormalTiltStdDeg(localWaypoints);
+                p4Exec.summaryText = "Bám bề mặt phôi đang vẽ. Chỉ đăng ký 3D khi chuyển sang phôi khác.";
+                ComputeSprayAndTravelLengths(localWaypoints, out p4Exec.totalSprayLengthMm, out p4Exec.totalTravelLengthMm);
+                genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
+                return localWaypoints;
             }
-            if (built.Count > 0)
-            {
-                activeRefStrokes3D = built;
-            }
-        }
-        if (activeRefStrokes3D == null && hasSavedReference)
-        {
-            activeRefStrokes3D = ctrl.templateReferenceStrokes3DWorld;
         }
 
-        // A preview built from the current phôi must not become the 3D reference for another phôi.
+        var activeRefStrokes3D = hasSavedReference ? ctrl.templateReferenceStrokes3DWorld : null;
         var srcCloud = hasSavedReference ? ctrl.templateReferenceCloud3DWorld : targetCloud3D;
         var srcLandmarks = hasSavedReference ? ctrl.templateReferenceLandmarks3D : ctrl.landmarksWorldPos;
-
-        // NHÁNH CHÍNH CHUẨN P4 (9 BƯỚC TRANG 8): ĐĂNG KÝ ĐÁM MÂY ĐIỂM 3D THẬT (SOURCE CLOUD -> TARGET CLOUD)
-        bool hasRefCloud3D = srcCloud.Count >= 30 && targetCloud3D.Count >= 30 &&
-            activeRefStrokes3D != null && activeRefStrokes3D.Count > 0;
+        bool hasRefCloud3D = hasSavedReference && targetCloud3D.Count >= 30;
 
         if (hasRefCloud3D)
         {
@@ -5987,51 +6036,49 @@ public static class TrajectoryEvaluationEngine
             }
         }
 
-        if (strokesWorld.Count == 0 && templateStrokesUV != null)
+        if (templateStrokesUV != null && templateStrokesUV.Count > 0)
         {
-            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+            for (int s = 0; s < templateStrokesUV.Count; s++)
             {
-                for (int s = 0; s < templateStrokesUV.Count; s++)
+                var raw = templateStrokesUV[s];
+                if (raw == null || raw.Count < 2) continue;
+                var resampled = ResampleUV(raw, 0.018f);
+                List<Vector3> worldStroke = new List<Vector3>();
+
+                for (int p = 0; p < resampled.Count; p++)
                 {
-                    var raw = templateStrokesUV[s];
-                    if (raw == null || raw.Count < 2) continue;
-                    var resampled = ResampleUV(raw, 0.018f);
-                    List<Vector3> worldStroke = new List<Vector3>();
-
-                    for (int p = 0; p < resampled.Count; p++)
+                    Vector2 uvPt = resampled[p];
+                    Vector2 qP3 = WarpPointBarycentric12(uvPt, src12, dst12XZ);
+                    Vector2 qIcp = (uvPt.x <= 0.50f)
+                        ? ApplyRigid2D(qP3, icpCosL, icpSinL, icpCenterL, icpTransL)
+                        : ApplyRigid2D(qP3, icpCosR, icpSinR, icpCenterR, icpTransR);
+                    Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
+                    if (Vector2.Distance(qWarped, qP3) > 0.032f)
                     {
-                        Vector2 uvPt = resampled[p];
-                        Vector2 qP3 = WarpPointBarycentric12(uvPt, src12, dst12XZ);
-                        Vector2 qIcp = (uvPt.x <= 0.50f)
-                            ? ApplyRigid2D(qP3, icpCosL, icpSinL, icpCenterL, icpTransL)
-                            : ApplyRigid2D(qP3, icpCosR, icpSinR, icpCenterR, icpTransR);
-                        Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
-                        if (Vector2.Distance(qWarped, qP3) > 0.032f)
-                        {
-                            qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
-                        }
-
-                        bool keep = (attempt == 0)
-                            ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
-                            : true;
-                        if (keep)
-                        {
-                            worldStroke.Add(new Vector3(qWarped.x, 0.02f, qWarped.y));
-                        }
-                        else if (worldStroke.Count >= 2)
-                        {
-                            strokesWorld.Add(worldStroke);
-                            worldStroke = new List<Vector3>();
-                        }
-                        else
-                        {
-                            worldStroke.Clear();
-                        }
+                        qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
                     }
-                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+
+                    bool keep = p4Cfg.clipToGarmentContour
+                        ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
+                        : true;
+                    if (keep)
+                    {
+                        worldStroke.Add(new Vector3(qWarped.x, 0.02f, qWarped.y));
+                    }
+                    else if (worldStroke.Count >= 2)
+                    {
+                        strokesWorld.Add(worldStroke);
+                        worldStroke = new List<Vector3>();
+                    }
+                    else
+                    {
+                        worldStroke.Clear();
+                    }
                 }
+                if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
             }
         }
+
 
         // Nhánh dự phòng vẫn sử dụng BÁM MẶT 3D THẬT (Nearest 3D + Chia mịn cung 3D + Pháp tuyến PCA 3D) để không bị chiếu thẳng đứng!
         List<Vector3> denseFallbackCloud3D = (plyLoader != null && !flat2D)
