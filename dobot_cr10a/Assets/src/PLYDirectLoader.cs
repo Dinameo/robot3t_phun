@@ -1276,6 +1276,44 @@ public class PLYDirectLoader : MonoBehaviour
         return pts;
     }
 
+    /// <summary>Finds the maximum measured world Y inside the garment outline.</summary>
+    public bool TryGetHighestGarmentSurfaceY(List<Vector3> contourWorld, out float maxY)
+    {
+        maxY = float.NegativeInfinity;
+        if (contourWorld == null || contourWorld.Count < 3) return false;
+
+        float minX = float.PositiveInfinity, maxX = float.NegativeInfinity;
+        float minZ = float.PositiveInfinity, maxZ = float.NegativeInfinity;
+        foreach (Vector3 point in contourWorld)
+        {
+            minX = Mathf.Min(minX, point.x);
+            maxX = Mathf.Max(maxX, point.x);
+            minZ = Mathf.Min(minZ, point.z);
+            maxZ = Mathf.Max(maxZ, point.z);
+        }
+
+        var vertices = new List<Vector3>();
+        for (int c = 0; c < transform.childCount; c++)
+        {
+            Transform chunk = transform.GetChild(c);
+            if (!chunk.name.StartsWith("CloudChunk_")) continue;
+            MeshFilter meshFilter = chunk.GetComponent<MeshFilter>();
+            if (meshFilter == null || meshFilter.sharedMesh == null) continue;
+
+            meshFilter.sharedMesh.GetVertices(vertices);
+            Matrix4x4 localToWorld = chunk.localToWorldMatrix;
+            foreach (Vector3 vertex in vertices)
+            {
+                Vector3 point = localToWorld.MultiplyPoint3x4(vertex);
+                if (!(point.y > maxY) || float.IsInfinity(point.y)) continue;
+                if (point.x < minX || point.x > maxX || point.z < minZ || point.z > maxZ) continue;
+                if (IsPointInPolygonXZStatic(point.x, point.z, contourWorld))
+                    maxY = point.y;
+            }
+        }
+        return !float.IsNegativeInfinity(maxY);
+    }
+
     private static bool IsPointInPolygonXZStatic(float x, float z, List<Vector3> poly)
     {
         bool inside = false;
@@ -1908,119 +1946,84 @@ public class PLYDirectLoader : MonoBehaviour
     }
 
     /// <summary>
-    /// Giải phương trình Laplace PDE (∇²Y = 0) bằng lặp Gauss-Seidel SOR nhiều vòng trên các ô khuyết
-    /// với điều kiện biên Dirichlet cố định từ các ô cảm biến gốc hợp lệ xung quanh.
-    /// Hỗ trợ lỗ rất lớn (>1400 ô ở lưới 480x480) hội tụ mượt, không bao giờ rớt độ cao!
+    /// Solves Laplace's equation on hole cells connected to measured cloth.
+    /// Measured neighbors remain fixed. Cells without measured boundary support are omitted.
     /// </summary>
-    public Dictionary<Vector2Int, float> SolveLaplacianPdeOnHoleCells(HashSet<Vector2Int> holeCells, int iterations = 100, float relaxation = 1.45f, float minClothY = -10f)
+    public Dictionary<Vector2Int, float> SolveLaplacianPdeOnHoleCells(
+        HashSet<Vector2Int> holeCells, int iterations = 100, float relaxation = 1.45f, float minClothY = -10f)
     {
-        Dictionary<Vector2Int, float> solved = new Dictionary<Vector2Int, float>();
+        var solved = new Dictionary<Vector2Int, float>();
         if (rawElevationGridY == null || rawElevationGridValid == null || holeCells == null || holeCells.Count == 0)
             return solved;
 
-        float[,] fieldY = (float[,])rawElevationGridY.Clone();
-        bool[,] known = new bool[GRID_RES, GRID_RES];
-        for (int x = 0; x < GRID_RES; x++)
+        GetCellWorldSize(out float dx, out float dz);
+        if (dx <= 0f || dz <= 0f) return solved;
+        float wx = 1f / (dx * dx), wz = 1f / (dz * dz);
+        var neighbors = new[] { Vector2Int.left, Vector2Int.right, Vector2Int.down, Vector2Int.up };
+        bool IsMeasuredCloth(Vector2Int cell) =>
+            cell.x >= 0 && cell.x < GRID_RES && cell.y >= 0 && cell.y < GRID_RES &&
+            !holeCells.Contains(cell) && rawElevationGridValid[cell.x, cell.y] &&
+            rawElevationGridY[cell.x, cell.y] >= minClothY;
+
+        // Initialize from real boundary cells and propagate only to connected holes.
+        var order = new List<Vector2Int>(holeCells.Count);
+        foreach (var cell in holeCells)
         {
-            for (int z = 0; z < GRID_RES; z++)
+            if (cell.x < 0 || cell.x >= GRID_RES || cell.y < 0 || cell.y >= GRID_RES) continue;
+            float sum = 0f, weight = 0f;
+            foreach (var offset in neighbors)
             {
-                if (rawElevationGridValid[x, z] && rawElevationGridY[x, z] >= minClothY)
-                {
-                    known[x, z] = true;
-                }
+                var adjacent = cell + offset;
+                if (!IsMeasuredCloth(adjacent)) continue;
+                float w = offset.x != 0 ? wx : wz;
+                sum += w * rawElevationGridY[adjacent.x, adjacent.y];
+                weight += w;
+            }
+            if (weight <= 0f) continue;
+            solved.Add(cell, sum / weight);
+            order.Add(cell);
+        }
+
+        for (int i = 0; i < order.Count; i++)
+        {
+            var cell = order[i];
+            foreach (var offset in neighbors)
+            {
+                var adjacent = cell + offset;
+                if (adjacent.x < 0 || adjacent.x >= GRID_RES || adjacent.y < 0 || adjacent.y >= GRID_RES ||
+                    !holeCells.Contains(adjacent) || solved.ContainsKey(adjacent)) continue;
+                solved.Add(adjacent, solved[cell]);
+                order.Add(adjacent);
             }
         }
 
-        // Khởi tạo giá trị ban đầu cho mỗi ô khuyết bằng biên vải hợp lệ gần nhất (tới 72 ô ~20cm)
-        List<Vector2Int> holeList = new List<Vector2Int>(holeCells);
-        for (int i = 0; i < holeList.Count; i++)
-        {
-            Vector2Int cell = holeList[i];
-            if (cell.x < 0 || cell.x >= GRID_RES || cell.y < 0 || cell.y >= GRID_RES) continue;
-            known[cell.x, cell.y] = false;
-        }
-
-        for (int i = 0; i < holeList.Count; i++)
-        {
-            Vector2Int cell = holeList[i];
-            if (cell.x < 0 || cell.x >= GRID_RES || cell.y < 0 || cell.y >= GRID_RES) continue;
-            float sumY = 0f, sumW = 0f;
-            for (int r = 1; r <= 72 && sumW <= 0f; r += (r < 10 ? 1 : 4))
-            {
-                int x0 = cell.x - r, x1 = cell.x + r;
-                int z0 = cell.y - r, z1 = cell.y + r;
-                for (int dx = -r; dx <= r; dx++)
-                {
-                    int nx = cell.x + dx;
-                    if (nx < 0 || nx >= GRID_RES) continue;
-                    if (z0 >= 0 && z0 < GRID_RES && known[nx, z0])
-                    {
-                        float w = 1f / (dx * dx + r * r + 0.1f);
-                        sumY += fieldY[nx, z0] * w; sumW += w;
-                    }
-                    if (z1 >= 0 && z1 < GRID_RES && known[nx, z1])
-                    {
-                        float w = 1f / (dx * dx + r * r + 0.1f);
-                        sumY += fieldY[nx, z1] * w; sumW += w;
-                    }
-                }
-                for (int dz = -r + 1; dz <= r - 1; dz++)
-                {
-                    int nz = cell.y + dz;
-                    if (nz < 0 || nz >= GRID_RES) continue;
-                    if (x0 >= 0 && x0 < GRID_RES && known[x0, nz])
-                    {
-                        float w = 1f / (r * r + dz * dz + 0.1f);
-                        sumY += fieldY[x0, nz] * w; sumW += w;
-                    }
-                    if (x1 >= 0 && x1 < GRID_RES && known[x1, nz])
-                    {
-                        float w = 1f / (r * r + dz * dz + 0.1f);
-                        sumY += fieldY[x1, nz] * w; sumW += w;
-                    }
-                }
-            }
-            fieldY[cell.x, cell.y] = sumW > 0f ? (sumY / sumW) : (estimatedTableY + 0.06f);
-        }
-
-        for (int i = 0; i < holeList.Count; i++)
-        {
-            Vector2Int cell = holeList[i];
-            if (cell.x >= 0 && cell.x < GRID_RES && cell.y >= 0 && cell.y < GRID_RES)
-                known[cell.x, cell.y] = true;
-        }
-
-        // Lặp Gauss-Seidel SOR lan truyền hài (Harmonic / Laplace ∇²Y = 0)
         float omega = Mathf.Clamp(relaxation, 0.5f, 1.65f);
+        const float toleranceM = 0.00005f;
         for (int it = 0; it < iterations; it++)
         {
-            for (int i = 0; i < holeList.Count; i++)
+            float maxDelta = 0f;
+            foreach (var cell in order)
             {
-                Vector2Int cell = holeList[i];
-                int x = cell.x;
-                int z = cell.y;
-                if (x <= 0 || x >= GRID_RES - 1 || z <= 0 || z >= GRID_RES - 1) continue;
-
-                float sum = 0f;
-                int cnt = 0;
-                if (known[x - 1, z]) { sum += fieldY[x - 1, z]; cnt++; }
-                if (known[x + 1, z]) { sum += fieldY[x + 1, z]; cnt++; }
-                if (known[x, z - 1]) { sum += fieldY[x, z - 1]; cnt++; }
-                if (known[x, z + 1]) { sum += fieldY[x, z + 1]; cnt++; }
-
-                if (cnt > 0)
+                float sum = 0f, weight = 0f;
+                foreach (var offset in neighbors)
                 {
-                    float avg = sum / cnt;
-                    fieldY[x, z] = fieldY[x, z] + omega * (avg - fieldY[x, z]);
+                    var adjacent = cell + offset;
+                    float y;
+                    if (IsMeasuredCloth(adjacent))
+                        y = rawElevationGridY[adjacent.x, adjacent.y];
+                    else if (!solved.TryGetValue(adjacent, out y))
+                        continue;
+                    float w = offset.x != 0 ? wx : wz;
+                    sum += w * y;
+                    weight += w;
                 }
+                if (weight <= 0f) continue;
+                float current = solved[cell];
+                float delta = omega * (sum / weight - current);
+                solved[cell] = current + delta;
+                maxDelta = Mathf.Max(maxDelta, Mathf.Abs(delta));
             }
-        }
-
-        for (int i = 0; i < holeList.Count; i++)
-        {
-            Vector2Int cell = holeList[i];
-            if (cell.x >= 0 && cell.x < GRID_RES && cell.y >= 0 && cell.y < GRID_RES)
-                solved[cell] = fieldY[cell.x, cell.y];
+            if (maxDelta <= toleranceM) break;
         }
         return solved;
     }
