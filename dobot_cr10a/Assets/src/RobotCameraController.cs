@@ -800,13 +800,21 @@ public class RobotCameraController : MonoBehaviour
         }
         GUI.color = prevColor;
 
-        // Thanh nhãn trạng thái Góc nhìn Camera Zivid ở góc trên bên trái vùng 3D
+        // Thanh nhãn trạng thái Góc nhìn Camera Zivid ở góc trên bên trái vùng 3D (tự co giãn theo chiều rộng, không tràn chữ)
         FixedRigCamera rig = EnsureFixedRigCamera(createIfMissing: false);
         float hCm = rig != null ? rig.heightFromGround_cm : 168.5f;
         float dCm = rig != null ? rig.distanceFromAxis_cm : 33.5f;
         float fov = rig != null ? rig.cameraFovDeg : 45.0f;
 
-        float badgeW = Mathf.Min(490f, viewW - 24f);
+        string fullLabel = $"CAMERA ZIVID  |  Cao {hCm:F1}cm  |  Trục {dCm:F1}cm  |  FOV {fov:F0}°";
+        string shortLabel = $"CAMERA ZIVID | H:{hCm:F0}cm | D:{dCm:F0}cm | FOV {fov:F0}°";
+        float fullTextW = AntigravityUITheme.StyleLabelCyan.CalcSize(new GUIContent(fullLabel)).x;
+        float maxBadgeW = Mathf.Max(220f, viewW - 24f);
+        bool useShort = (fullTextW + 86f > maxBadgeW);
+        string activeLabel = useShort ? shortLabel : fullLabel;
+        float activeTextW = AntigravityUITheme.StyleLabelCyan.CalcSize(new GUIContent(activeLabel)).x;
+
+        float badgeW = Mathf.Min(maxBadgeW, Mathf.Max(250f, activeTextW + 88f));
         float badgeH = 30f;
         Rect badgeRect = new Rect(12f, topH + 10f, badgeW, badgeH);
         DraggableUIManager.RegisterBlockingRect(badgeRect);
@@ -815,16 +823,18 @@ public class RobotCameraController : MonoBehaviour
         GUI.DrawTexture(new Rect(badgeRect.x, badgeRect.y, badgeRect.width, 1f), AntigravityUITheme.TexSliderThumb);
         GUI.DrawTexture(new Rect(badgeRect.x, badgeRect.yMax - 1f, badgeRect.width, 1f), AntigravityUITheme.TexBorder);
 
-        GUILayout.BeginArea(new Rect(badgeRect.x + 8f, badgeRect.y + 3f, badgeRect.width - 16f, badgeRect.height - 6f));
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"GÓC NHÌN CAMERA ZIVID  |  Cao {hCm:F1}cm  |  Cách trục {dCm:F1}cm  |  FOV {fov:F0}°", AntigravityUITheme.StyleLabelCyan);
-        GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Về 3D", AntigravityUITheme.StyleButton, GUILayout.Width(58), GUILayout.Height(22)))
+        GUIStyle singleLineCyan = new GUIStyle(AntigravityUITheme.StyleLabelCyan)
+        {
+            wordWrap = false,
+            clipping = TextClipping.Clip,
+            alignment = TextAnchor.MiddleLeft
+        };
+        float btnW = 58f;
+        GUI.Label(new Rect(badgeRect.x + 10f, badgeRect.y + 2f, Mathf.Max(60f, badgeRect.width - btnW - 22f), badgeRect.height - 4f), activeLabel, singleLineCyan);
+        if (GUI.Button(new Rect(badgeRect.xMax - btnW - 6f, badgeRect.y + 4f, btnW, 22f), "Về 3D", AntigravityUITheme.StyleButton))
         {
             SetPresetPerspective();
         }
-        GUILayout.EndHorizontal();
-        GUILayout.EndArea();
     }
 
     private void DrawZividPipOverlay()
@@ -890,14 +900,19 @@ public class RobotCameraController : MonoBehaviour
             Event.current.Use();
         }
 
-        // Dòng thông số phía dưới
+        // Dòng thông số phía dưới (gọn, không tràn khung PiP)
         FixedRigCamera rig = fixedRigCamera;
         float hCm = rig != null ? rig.heightFromGround_cm : 168.5f;
         float dCm = rig != null ? rig.distanceFromAxis_cm : 33.5f;
         float fov = rig != null ? rig.cameraFovDeg : 45.0f;
+        GUIStyle pipFooterStyle = new GUIStyle(AntigravityUITheme.StyleLabelMuted)
+        {
+            wordWrap = false,
+            clipping = TextClipping.Clip
+        };
         GUI.Label(new Rect(boxX + 6f, imgRect.yMax + 2f, boxW - 12f, footerH),
-            $"Cao {hCm:F1}cm | Cách trục {dCm:F1}cm | FOV {fov:F0}°  (Bấm ảnh để phóng)",
-            AntigravityUITheme.StyleLabelMuted);
+            $"Cao {hCm:F0}cm | Trục {dCm:F0}cm | FOV {fov:F0}°",
+            pipFooterStyle);
     }
 
     private void DrawFloatingViewportToolbar()

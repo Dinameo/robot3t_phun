@@ -75,6 +75,7 @@ public class FixedRigCamera : MonoBehaviour
     private Transform visualCameraHead;
     private LineRenderer fovLinesRenderer;
     private LineRenderer opticalAxisRenderer;
+    private PLYDirectLoader cachedPlyLoader;
     private readonly System.Collections.Generic.List<Material> createdMaterials = new System.Collections.Generic.List<Material>();
 
     private bool hasLoadedRigPrefs = false;
@@ -384,26 +385,27 @@ public class FixedRigCamera : MonoBehaviour
         lensRight.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
         lensRight.transform.localScale = new Vector3(0.040f, 0.012f, 0.040f);
 
-        // 3. Khung hình nón vùng nhìn FOV xuống mặt bàn (LineRenderer chuẩn URP)
-        GameObject fovGo = new GameObject("ZividFovFrustum");
+        // 3. Khung viền phẳng vùng thu nhận thực tế của Camera trên mặt bàn (khớp ảnh từ PLY — không vẽ tia chiếu chóp)
+        GameObject fovGo = new GameObject("ZividCaptureFootprint");
         fovGo.hideFlags = HideFlags.HideAndDontSave;
         fovGo.transform.SetParent(runtimeVisualRoot.transform, false);
         fovLinesRenderer = fovGo.AddComponent<LineRenderer>();
         fovLinesRenderer.useWorldSpace = true;
-        fovLinesRenderer.loop = false;
-        fovLinesRenderer.startWidth = 0.006f;
-        fovLinesRenderer.endWidth = 0.006f;
-        fovLinesRenderer.material = CreateUrpSafeMaterial(new Color(0.15f, 0.88f, 1.0f, 0.85f), true);
+        fovLinesRenderer.loop = true;
+        fovLinesRenderer.startWidth = 0.007f;
+        fovLinesRenderer.endWidth = 0.007f;
+        fovLinesRenderer.material = CreateUrpSafeMaterial(new Color(0.15f, 0.90f, 1.0f, 0.92f), true);
         fovLinesRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         fovLinesRenderer.receiveShadows = false;
 
-        // 4. Tia trục quang học từ tâm ống kính xuống sàn
+        // 4. Trục quang học (ẩn mặc định theo yêu cầu chỉ hiện vùng thu nhận thực tế)
         GameObject axisGo = new GameObject("ZividOpticalAxis");
         axisGo.hideFlags = HideFlags.HideAndDontSave;
         axisGo.transform.SetParent(runtimeVisualRoot.transform, false);
         opticalAxisRenderer = axisGo.AddComponent<LineRenderer>();
         opticalAxisRenderer.useWorldSpace = true;
         opticalAxisRenderer.positionCount = 2;
+        opticalAxisRenderer.enabled = false;
         opticalAxisRenderer.startWidth = 0.005f;
         opticalAxisRenderer.endWidth = 0.005f;
         opticalAxisRenderer.material = CreateUrpSafeMaterial(new Color(0.15f, 1.0f, 0.45f, 0.85f), true);
@@ -411,9 +413,49 @@ public class FixedRigCamera : MonoBehaviour
         opticalAxisRenderer.receiveShadows = false;
     }
 
+    private bool TryComputeGeometricCameraFootprintWorld(out Vector3 cTL, out Vector3 cTR, out Vector3 cBR, out Vector3 cBL)
+    {
+        cTL = cTR = cBR = cBL = Vector3.zero;
+        Vector3 origin = transform.position;
+        float tableY = (cachedPlyLoader != null && cachedPlyLoader.totalLoadedPoints > 0)
+            ? cachedPlyLoader.estimatedTableY + 0.004f
+            : 0.005f;
+
+        float vFovRad = Mathf.Clamp(cameraFovDeg, 15f, 120f) * Mathf.Deg2Rad;
+        float halfH = Mathf.Tan(vFovRad * 0.5f);
+        float aspect = (cam != null && cam.aspect > 0.2f) ? cam.aspect : (1944f / 1200f);
+        float halfW = halfH * aspect;
+
+        Vector3[] localDirs =
+        {
+            new Vector3(-halfW,  halfH, 1f).normalized, // TL
+            new Vector3( halfW,  halfH, 1f).normalized, // TR
+            new Vector3( halfW, -halfH, 1f).normalized, // BR
+            new Vector3(-halfW, -halfH, 1f).normalized  // BL
+        };
+
+        Vector3[] hits = new Vector3[4];
+        for (int i = 0; i < 4; i++)
+        {
+            Vector3 dirW = transform.TransformDirection(localDirs[i]);
+            if (Mathf.Abs(dirW.y) < 1e-4f) return false;
+            float t = (tableY - origin.y) / dirW.y;
+            if (t <= 0.05f || t > 10f) return false;
+            hits[i] = origin + dirW * t;
+        }
+
+        cTL = hits[0];
+        cTR = hits[1];
+        cBR = hits[2];
+        cBL = hits[3];
+        return true;
+    }
+
     private void UpdateRuntimeVisual()
     {
-        bool showAny = showRuntimeRigVisual && !visualSuppressedByPov;
+        bool showRigModel = showRuntimeRigVisual && !visualSuppressedByPov;
+        bool showFootprint = showRuntimeFovFrustum && !visualSuppressedByPov;
+        bool showAny = showRigModel || showFootprint;
         if (!showAny)
         {
             if (runtimeVisualRoot != null && runtimeVisualRoot.activeSelf)
@@ -433,18 +475,22 @@ public class FixedRigCamera : MonoBehaviour
 
         if (visualMast != null)
         {
-            Vector3 mastDir = bracketTop - robotOrigin;
-            float mastLen = Mathf.Max(0.01f, mastDir.magnitude);
-            visualMast.position = (robotOrigin + bracketTop) * 0.5f;
-            visualMast.up = mastDir.normalized;
-            visualMast.localScale = new Vector3(0.032f, mastLen * 0.5f, 0.032f);
+            visualMast.gameObject.SetActive(showRigModel);
+            if (showRigModel)
+            {
+                Vector3 mastDir = bracketTop - robotOrigin;
+                float mastLen = Mathf.Max(0.01f, mastDir.magnitude);
+                visualMast.position = (robotOrigin + bracketTop) * 0.5f;
+                visualMast.up = mastDir.normalized;
+                visualMast.localScale = new Vector3(0.032f, mastLen * 0.5f, 0.032f);
+            }
         }
 
         if (visualArm != null)
         {
             Vector3 armDir = armEnd - bracketTop;
             float armLen = armDir.magnitude;
-            if (armLen > 0.005f)
+            if (showRigModel && armLen > 0.005f)
             {
                 visualArm.gameObject.SetActive(true);
                 visualArm.position = (bracketTop + armEnd) * 0.5f;
@@ -459,46 +505,46 @@ public class FixedRigCamera : MonoBehaviour
 
         if (visualCameraHead != null)
         {
-            visualCameraHead.position = camPos;
-            visualCameraHead.rotation = transform.rotation;
+            visualCameraHead.gameObject.SetActive(showRigModel);
+            if (showRigModel)
+            {
+                visualCameraHead.position = camPos;
+                visualCameraHead.rotation = transform.rotation;
+            }
         }
 
-        bool showFov = showRuntimeFovFrustum && !visualSuppressedByPov;
-        if (fovLinesRenderer != null) fovLinesRenderer.enabled = showFov;
-        if (opticalAxisRenderer != null) opticalAxisRenderer.enabled = showFov;
+        // Ẩn tia chiếu quang học, chỉ hiện khung vùng camera trên mặt bàn
+        if (opticalAxisRenderer != null) opticalAxisRenderer.enabled = false;
 
-        if (showFov && fovLinesRenderer != null && opticalAxisRenderer != null)
+        if (cachedPlyLoader == null) cachedPlyLoader = FindAnyObjectByType<PLYDirectLoader>();
+
+        bool hasFootprint = false;
+        Vector3 cTL = Vector3.zero, cTR = Vector3.zero, cBR = Vector3.zero, cBL = Vector3.zero;
+        if (showFootprint && fovLinesRenderer != null)
         {
-            if (cam == null) cam = GetComponent<Camera>();
-            float fovDeg = cam != null ? cam.fieldOfView : cameraFovDeg;
-            float aspect = (cam != null && cam.aspect > 0.1f) ? cam.aspect : (4f / 3f);
-
-            // Tính khoảng chiếu tia quang học chạm mặt phẳng sàn y = 0
-            Vector3 fwd = transform.forward;
-            float hitDist = (fwd.y < -0.05f) ? Mathf.Clamp(camPos.y / (-fwd.y), 0.25f, 4.0f) : Mathf.Max(0.5f, camPos.y);
-            Vector3 centerOnFloor = camPos + fwd * hitDist;
-
-            opticalAxisRenderer.SetPosition(0, camPos);
-            opticalAxisRenderer.SetPosition(1, centerOnFloor);
-
-            float halfH = hitDist * Mathf.Tan(fovDeg * 0.5f * Mathf.Deg2Rad);
-            float halfW = halfH * aspect;
-
-            Vector3 r = transform.right * halfW;
-            Vector3 u = transform.up * halfH;
-
-            Vector3 cTL = centerOnFloor - r + u;
-            Vector3 cTR = centerOnFloor + r + u;
-            Vector3 cBR = centerOnFloor + r - u;
-            Vector3 cBL = centerOnFloor - r - u;
-
-            // Vẽ 4 cạnh chóp từ camera xuống sàn + hình chữ nhật vùng nhìn trên sàn (polyline liên tục)
-            Vector3[] pts = new Vector3[]
+            if (cachedPlyLoader != null && cachedPlyLoader.TryGetActualCameraCaptureFootprintWorld(out cTL, out cTR, out cBR, out cBL))
             {
-                camPos, cTL, cTR, camPos, cBR, cTR, cBR, cBL, camPos, cBL, cTL
-            };
-            fovLinesRenderer.positionCount = pts.Length;
-            fovLinesRenderer.SetPositions(pts);
+                hasFootprint = true;
+            }
+            else if (TryComputeGeometricCameraFootprintWorld(out cTL, out cTR, out cBR, out cBL))
+            {
+                hasFootprint = true;
+            }
+        }
+
+        if (hasFootprint && fovLinesRenderer != null)
+        {
+            fovLinesRenderer.enabled = true;
+            fovLinesRenderer.loop = true;
+            fovLinesRenderer.positionCount = 4;
+            fovLinesRenderer.SetPosition(0, cTL);
+            fovLinesRenderer.SetPosition(1, cTR);
+            fovLinesRenderer.SetPosition(2, cBR);
+            fovLinesRenderer.SetPosition(3, cBL);
+        }
+        else if (fovLinesRenderer != null)
+        {
+            fovLinesRenderer.enabled = false;
         }
     }
 
@@ -541,20 +587,16 @@ public class FixedRigCamera : MonoBehaviour
         Gizmos.color = Color.red;
         Gizmos.DrawWireSphere(camPos, 0.04f);
 
-        // Vẽ tia camera nhìn vuông góc xuống mặt đất
-        Gizmos.color = Color.green;
-        Gizmos.DrawLine(camPos, groundUnderCam);
-        Gizmos.DrawWireSphere(groundUnderCam, 0.05f);
-
-        // Vẽ nón vùng nhìn FOV của camera xuống sàn
-        if (cam == null) cam = GetComponent<Camera>();
-        if (cam != null && lookPerpendicularToGround)
+        // Chỉ vẽ khung vùng thu nhận thực tế trên mặt bàn khớp với ảnh từ PLY (ẩn tia chiếu cam)
+        if (cachedPlyLoader == null) cachedPlyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (showRuntimeFovFrustum && cachedPlyLoader != null &&
+            cachedPlyLoader.TryGetActualCameraCaptureFootprintWorld(out Vector3 gTL, out Vector3 gTR, out Vector3 gBR, out Vector3 gBL))
         {
-            Gizmos.color = fovColor;
-            float fovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float frustumHeight = 2.0f * height_m * Mathf.Tan(fovRad * 0.5f);
-            float frustumWidth = frustumHeight * cam.aspect;
-            Gizmos.DrawWireCube(groundUnderCam, new Vector3(frustumWidth, 0.01f, frustumHeight));
+            Gizmos.color = new Color(0.15f, 0.90f, 1.0f, 0.92f);
+            Gizmos.DrawLine(gTL, gTR);
+            Gizmos.DrawLine(gTR, gBR);
+            Gizmos.DrawLine(gBR, gBL);
+            Gizmos.DrawLine(gBL, gTL);
         }
     }
 }

@@ -71,7 +71,7 @@ public static class TrajectoryEvaluationEngine
         public P1ScanDirectionMode scanDirection = P1ScanDirectionMode.PcaMajorAxis;
         public float customScanAngleDeg = 0f;           // góc quét tùy chỉnh (độ)
         public bool useBoustrophedonSplit = true;       // phân tách vùng lõm thành ô lồi (Boustrophedon)
-        public P1ZHeightMode zHeightMode = P1ZHeightMode.Surface25DVertical;
+        public P1ZHeightMode zHeightMode = P1ZHeightMode.Flat2DPlane; // Theo tài liệu: P1 mặc định 2D phẳng + súng thẳng đứng (không tính pháp tuyến lân cận nhỏ)
         public float testCircleRadiusMm = 55f;          // R0 khi kiểm chứng hình tròn (mm)
         public float testRectWidthMm = 110f;            // Chiều rộng HCN kiểm chứng (mm)
         public float testRectLengthMm = 260f;           // Chiều dài HCN kiểm chứng (mm)
@@ -141,7 +141,7 @@ public static class TrajectoryEvaluationEngine
         public float sprayDistanceDMm = 20f;            // d – khoảng cách súng đến bề mặt (mm)
         public float minPassLengthMm = 35f;             // loại bỏ đoạn quá ngắn khi ống thu hẹp (mm)
         public P2PassOrderingMode passOrdering = P2PassOrderingMode.MinimumTravelGreedy;
-        public P2GunOrientationMode gunOrientation = P2GunOrientationMode.SmoothSurfaceNormal25D;
+        public P2GunOrientationMode gunOrientation = P2GunOrientationMode.FlatPlane2D; // Theo tài liệu: P2 mặc định 2D phẳng + súng thẳng đứng (không tính pháp tuyến lân cận nhỏ)
 
         public float EffectiveSpacingSMm => autoSpacingFromWidthOverlap
             ? Mathf.Clamp(sprayWidthWMm * (1f - Mathf.Clamp(overlapRatioR, 0.05f, 0.80f)), 6f, 110f)
@@ -3040,6 +3040,7 @@ public static class TrajectoryEvaluationEngine
         return wps;
     }
 
+
     /// <summary>
     /// P2 — Đường phun theo hình dạng ống quần (Song song trục giữa Skeleton hoặc Offset đồng tâm từ biên, Chuẩn 8 bước trang 7):
     /// Bước 1: Nhận mask & tách 2 vùng ống trái / phải riêng biệt (loại bỏ vùng cạp & đáy quần), trích xuất đa giác "Chỗ cần phun".
@@ -3523,6 +3524,18 @@ public static class TrajectoryEvaluationEngine
         var targetPolysXZ = new List<List<Vector2>>();
         bool flat2DMode = (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D);
         float flatY = (plyLoader != null) ? (plyLoader.estimatedTableY + 0.025f) : 0.025f;
+        if (has12Landmarks)
+        {
+            float sumY = 0f;
+            for (int i = 0; i < 12; i++) sumY += ctrl.landmarksWorldPos[i].y;
+            flatY = sumY / 12f;
+        }
+        else if (ctrl.garmentContourWorld != null && ctrl.garmentContourWorld.Count >= 3)
+        {
+            float sumY = 0f;
+            for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) sumY += ctrl.garmentContourWorld[i].y;
+            flatY = sumY / ctrl.garmentContourWorld.Count;
+        }
 
         if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
         {
@@ -3796,6 +3809,7 @@ public static class TrajectoryEvaluationEngine
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
     }
+
 
     private static bool IsPointInAnyPolygonXZ(Vector2 ptXZ, List<List<Vector2>> polys)
     {
@@ -4342,26 +4356,34 @@ public static class TrajectoryEvaluationEngine
 
         if (ctrl.HasCustomDrawnRegions2D)
         {
-            var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
-            float fillStepMm = (tech != null) ? Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 60f) : 25f;
-            for (int r = 0; r < directRegionsXZ.Count; r++)
+            // P3 chuẩn: lấy tọa độ tương đối (canonical UV) của từng hình Tròn/Vuông/Đa giác và biến đổi
+            // qua đúng lưới 32 tam giác Barycentric sang quần mới (tự dịch/xoay/co giãn khi đổi phôi!)
+            var canonRegionPolysUV = ctrl.GetCustomDrawnRegionCanonicalPolygonsUV();
+            float fillStepMm = ctrl.ComputeEffectiveRegionFillSpacingMm();
+            for (int r = 0; r < canonRegionPolysUV.Count; r++)
             {
-                var polyXZ = directRegionsXZ[r];
-                if (polyXZ == null || polyXZ.Count < 3) continue;
-                regionPolysForOverlay.Add(polyXZ);
+                var canonPoly = canonRegionPolysUV[r];
+                if (canonPoly == null || canonPoly.Count < 3) continue;
 
-                // Chuyển vùng hình vẽ (Tròn/Vuông/Đa giác) thành quỹ đạo mẫu trên quần chuẩn để biến đổi Barycentric chuẩn P3
-                var outline = new List<Vector3>(polyXZ.Count + 1);
-                for (int i = 0; i <= polyXZ.Count; i++)
+                var warpedPolyXZ = new List<Vector2>(canonPoly.Count);
+                for (int i = 0; i < canonPoly.Count; i++)
                 {
-                    Vector2 p2 = polyXZ[i % polyXZ.Count];
+                    warpedPolyXZ.Add(WarpPointBarycentric12(canonPoly[i], src12, dst12XZ));
+                }
+                if (warpedPolyXZ.Count < 3) continue;
+                regionPolysForOverlay.Add(warpedPolyXZ);
+
+                var outline = new List<Vector3>(warpedPolyXZ.Count + 1);
+                for (int i = 0; i <= warpedPolyXZ.Count; i++)
+                {
+                    Vector2 p2 = warpedPolyXZ[i % warpedPolyXZ.Count];
                     outline.Add(new Vector3(p2.x, 0.02f, p2.y));
                 }
                 strokesWorld.Add(outline);
 
                 if (p3Cfg.fillClosedDrawnRegions)
                 {
-                    var fillPasses = BuildSimpleFillPassesInsidePolygon2D(polyXZ, fillStepMm * 0.001f);
+                    var fillPasses = BuildSimpleFillPassesInsidePolygon2D(warpedPolyXZ, fillStepMm * 0.001f);
                     for (int f = 0; f < fillPasses.Count; f++) strokesWorld.Add(fillPasses[f]);
                 }
             }
@@ -4453,6 +4475,7 @@ public static class TrajectoryEvaluationEngine
         return wps;
     }
 
+
     private static List<List<Vector3>> BuildSimpleFillPassesInsidePolygon2D(List<Vector2> polyXZ, float spacingM)
     {
         var passes = new List<List<Vector3>>();
@@ -4469,16 +4492,38 @@ public static class TrajectoryEvaluationEngine
             if (v < minV) minV = v;
             if (v > maxV) maxV = v;
         }
-        int numLines = Mathf.Clamp(Mathf.FloorToInt((maxV - minV) / spacingM), 0, 40);
+
+        float spanV = Mathf.Max(0f, maxV - minV);
+        if (spanV < 0.002f) return passes;
+
+        int numLines;
+        float vFirst, vLast;
+        if (spanV <= spacingM * 0.90f)
+        {
+            numLines = 1;
+            vFirst = vLast = 0.5f * (minV + maxV);
+        }
+        else
+        {
+            float edgeInset = Mathf.Min(spacingM * 0.30f, spanV * 0.12f);
+            vFirst = minV + edgeInset;
+            vLast = maxV - edgeInset;
+            float innerSpan = Mathf.Max(0f, vLast - vFirst);
+            numLines = Mathf.Clamp(Mathf.CeilToInt(innerSpan / spacingM) + 1, 2, 120);
+        }
+
+        float alongStepM = Mathf.Clamp(spacingM * 0.75f, 0.005f, 0.014f);
         for (int li = 0; li < numLines; li++)
         {
-            float vLine = Mathf.Lerp(minV + spacingM * 0.5f, maxV - spacingM * 0.5f, numLines == 1 ? 0.5f : (float)li / (numLines - 1));
+            float vLine = (numLines == 1)
+                ? vFirst
+                : Mathf.Lerp(vFirst, vLast, (float)li / (numLines - 1));
             var ivs = IntersectPolygonWithScanlineUV(polyUV, vLine);
             for (int k = 0; k < ivs.Count; k++)
             {
                 float u0 = (li % 2 == 0) ? ivs[k].x : ivs[k].y;
                 float u1 = (li % 2 == 0) ? ivs[k].y : ivs[k].x;
-                int sub = Mathf.Clamp(Mathf.CeilToInt(Mathf.Abs(u1 - u0) / 0.014f), 2, 40);
+                int sub = Mathf.Clamp(Mathf.CeilToInt(Mathf.Abs(u1 - u0) / alongStepM), 2, 60);
                 var seg = new List<Vector3>(sub + 1);
                 for (int p = 0; p <= sub; p++)
                 {
@@ -5025,41 +5070,58 @@ public static class TrajectoryEvaluationEngine
         int M = Y.Count;
         int N = X.Count;
         float beta = Mathf.Clamp(cpdBetaM, 0.04f, 0.80f);
-        float twoBetaSq = 2f * beta * beta;
         float lambda = Mathf.Clamp(cpdLambda, 0.2f, 20f);
         const double outlierW = 0.12;
 
-        // Ma trận kernel tương quan mượt G[i, j] = exp(-||Y_i - Y_j||^2 / (2 * beta^2))
+        // Chuẩn hóa tọa độ về tâm 0 & bán kính RMS = 1.0 (đúng chuẩn Myronenko & Song 2010)
+        // để tham số điều chuẩn lambda * sigma^2 giữ đúng tỷ lệ vật lý, không bị quá nhỏ khi dùng đơn vị mét!
+        Vector3 meanC = Vector3.zero;
+        for (int i = 0; i < M; i++) meanC += Y[i];
+        meanC /= M;
+        double sumR2 = 0.0;
+        for (int i = 0; i < M; i++) sumR2 += (Y[i] - meanC).sqrMagnitude;
+        float normScale = Mathf.Max(0.05f, (float)Math.Sqrt(sumR2 / M));
+        float invNorm = 1f / normScale;
+
+        Vector3[] Yn = new Vector3[M];
+        Vector3[] Xn = new Vector3[N];
+        for (int i = 0; i < M; i++) Yn[i] = (Y[i] - meanC) * invNorm;
+        for (int i = 0; i < N; i++) Xn[i] = (X[i] - meanC) * invNorm;
+
+        float betaNorm = Mathf.Clamp(beta * invNorm, 0.15f, 3.0f);
+        float twoBetaNormSq = 2f * betaNorm * betaNorm;
+
+        // Xây dựng ma trận nhân Gaussian G_ij = exp(-||Yn_i - Yn_j||^2 / (2*beta_norm^2))
         double[,] G = new double[M, M];
         for (int i = 0; i < M; i++)
         {
             G[i, i] = 1.0;
             for (int j = i + 1; j < M; j++)
             {
-                double d2 = (Y[i] - Y[j]).sqrMagnitude;
-                double val = Math.Exp(-d2 / twoBetaSq);
-                G[i, j] = val;
-                G[j, i] = val;
+                float d2 = (Yn[i] - Yn[j]).sqrMagnitude;
+                double g = Math.Exp(-d2 / twoBetaNormSq);
+                G[i, j] = g;
+                G[j, i] = g;
             }
         }
 
         Vector3[] T = new Vector3[M];
         Vector3[] W = new Vector3[M];
-        for (int i = 0; i < M; i++) T[i] = Y[i];
+        for (int i = 0; i < M; i++) T[i] = Yn[i];
 
-        // Khởi tạo phương sai sigma^2
+        // Khởi tạo phương sai sigma^2 trong không gian chuẩn hóa
         double sigma2 = 0.0;
         for (int m = 0; m < M; m++)
         {
             float minD2 = float.MaxValue;
             for (int n = 0; n < N; n++)
             {
-                float d2 = (X[n] - Y[m]).sqrMagnitude;
+                float d2 = (Xn[n] - Yn[m]).sqrMagnitude;
                 if (d2 < minD2) minD2 = d2;
             }
             sigma2 += minD2;
         }
-        sigma2 = Math.Max(0.0004, (sigma2 / M) * 1.5); // ít nhất (20 mm)^2 để bắt cặp mượt ở vòng đầu
+        sigma2 = Math.Max(0.008, (sigma2 / M) * 1.5);
 
         double[] P1 = new double[M];
         double[] PX_x = new double[M];
@@ -5086,7 +5148,7 @@ public static class TrajectoryEvaluationEngine
             // E-step: tính xác suất tương ứng P(m | n)
             for (int n = 0; n < N; n++)
             {
-                Vector3 xn = X[n];
+                Vector3 xn = Xn[n];
                 double denom = cOutlier;
                 for (int m = 0; m < M; m++)
                 {
@@ -5109,8 +5171,8 @@ public static class TrajectoryEvaluationEngine
             }
             if (npTotal < 1e-6) break;
 
-            // M-step: (diag(P1) * G + lambda * sigma^2 * I) * W = PX - diag(P1) * Y
-            double regDiag = lambda * sigma2;
+            // M-step: (diag(P1) * G + lambda * sigma^2 * I) * W = PX - diag(P1) * Yn
+            double regDiag = Math.Max(0.05, lambda * sigma2 * ((double)N / M));
             for (int i = 0; i < M; i++)
             {
                 double p1i = P1[i];
@@ -5118,10 +5180,10 @@ public static class TrajectoryEvaluationEngine
                 {
                     A[i, j] = p1i * G[i, j];
                 }
-                A[i, i] += regDiag + 1e-7;
-                bx[i] = PX_x[i] - p1i * Y[i].x;
-                by[i] = PX_y[i] - p1i * Y[i].y;
-                bz[i] = PX_z[i] - p1i * Y[i].z;
+                A[i, i] += regDiag + 1e-6;
+                bx[i] = PX_x[i] - p1i * Yn[i].x;
+                by[i] = PX_y[i] - p1i * Yn[i].y;
+                bz[i] = PX_z[i] - p1i * Yn[i].z;
             }
 
             if (!SolveLinearSystem(A, bx, out double[] wx) ||
@@ -5134,30 +5196,33 @@ public static class TrajectoryEvaluationEngine
             for (int i = 0; i < M; i++)
                 W[i] = new Vector3((float)wx[i], (float)wy[i], (float)wz[i]);
 
-            // Cập nhật T = Y + G * W và sigma^2
+            // Cập nhật T = Yn + G * W và sigma^2
             double newSigma2Num = 0.0;
             for (int i = 0; i < M; i++)
             {
                 Vector3 gw = Vector3.zero;
                 for (int j = 0; j < M; j++) gw += (float)G[i, j] * W[j];
-                T[i] = Y[i] + gw;
+                T[i] = Yn[i] + gw;
                 float bestD2 = float.MaxValue;
                 for (int n = 0; n < N; n++)
                 {
-                    float d2 = (X[n] - T[i]).sqrMagnitude;
+                    float d2 = (Xn[n] - T[i]).sqrMagnitude;
                     if (d2 < bestD2) bestD2 = d2;
                 }
                 if (bestD2 < float.MaxValue) newSigma2Num += bestD2;
             }
-            sigma2 = Math.Max(0.00004, newSigma2Num / (3.0 * M));
+            sigma2 = Math.Max(0.0015, newSigma2Num / (3.0 * M));
         }
+
+        // Quy đổi trọng số W từ không gian chuẩn hóa về lại đơn vị mét
+        for (int i = 0; i < M; i++) W[i] *= normScale;
 
         model = new NonRigidCpd3DModel
         {
             isValid = true,
             ctrlY = Y,
             weightsW = W,
-            twoBetaSq = twoBetaSq
+            twoBetaSq = 2f * (betaNorm * normScale) * (betaNorm * normScale)
         };
         return true;
     }
@@ -5271,7 +5336,7 @@ public static class TrajectoryEvaluationEngine
             (string.IsNullOrEmpty(ctrl.templateReferenceSampleName) || ctrl.templateReferenceSampleName == ctrl.GetActiveCloudSampleName()))
         {
             var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
-            float fillStepM = ((tech != null) ? Mathf.Clamp(tech.sprayWidthMm * (1f - tech.overlapRatio), 10f, 60f) : 25f) * 0.001f;
+            float fillStepM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
             var built = new List<List<Vector3>>();
             for (int r = 0; r < directRegionsXZ.Count; r++)
             {
@@ -5356,10 +5421,17 @@ public static class TrajectoryEvaluationEngine
                 p4Exec.initMethodUsed = "PCA 3D";
             }
 
+            // Chuẩn bị đám mây 3D dày (~4 mm, giữ trọn vách dốc đứng từ CloudChunk_*) để đo sai số dư chính xác & snap 3D + PCA 3D
+            List<Vector3> denseSnapCloud3D = (plyLoader != null && !flat2D)
+                ? plyLoader.ExtractGarmentSurfaceCloudVoxelized(Mathf.Min(voxelM, 0.004f), ctrl.garmentContourWorld, 4500)
+                : targetCloud3D;
+            if (denseSnapCloud3D == null || denseSnapCloud3D.Count < 20) denseSnapCloud3D = targetCloud3D;
+            var snapHash3D = BuildSpatialHash3D(denseSnapCloud3D, 0.025f);
+
             var initCloud3D = new List<Vector3>(srcCloud.Count);
             for (int i = 0; i < srcCloud.Count; i++)
                 initCloud3D.Add(initRot * ((srcCloud[i] - initCSrc) * initScale) + initCDst);
-            p4Exec.residualAfterInitMm = ComputeCloudToCloudRmsMm(initCloud3D, targetCloud3D);
+            p4Exec.residualAfterInitMm = ComputeCloudToDenseTrimmedRmsMm(initCloud3D, snapHash3D, denseSnapCloud3D);
 
             // Bước 4: ICP cứng 3D (Kabsch/Horn SO(3))
             RunRigidKabschIcp3D(
@@ -5371,7 +5443,15 @@ public static class TrajectoryEvaluationEngine
             var icpCloud3D = new List<Vector3>(initCloud3D.Count);
             for (int i = 0; i < initCloud3D.Count; i++)
                 icpCloud3D.Add(icpRot * initCloud3D[i] + icpTrans);
-            p4Exec.residualAfterIcpMm = ComputeCloudToCloudRmsMm(icpCloud3D, targetCloud3D);
+            p4Exec.residualAfterIcpMm = ComputeCloudToDenseTrimmedRmsMm(icpCloud3D, snapHash3D, denseSnapCloud3D);
+            // Bảo toàn đơn điệu: không bao giờ để ICP làm tăng sai số so với Init!
+            if (p4Exec.residualAfterIcpMm > p4Exec.residualAfterInitMm + 0.15f)
+            {
+                icpRot = Quaternion.identity;
+                icpTrans = Vector3.zero;
+                icpCloud3D = initCloud3D;
+                p4Exec.residualAfterIcpMm = p4Exec.residualAfterInitMm;
+            }
 
             // Bước 5: Đăng ký phi cứng (Non-Rigid CPD / TPS RBF / Rigid ICP Only)
             bool okCpd = false;
@@ -5424,7 +5504,7 @@ public static class TrajectoryEvaluationEngine
                 p4Exec.nonRigidMethodUsed = "Chỉ ICP cứng 3D";
             }
 
-            // Tính đám mây đã đăng ký (registeredCloudWorld) & sai số dư sau đăng ký phi cứng (Bước 8)
+            // Tính đám mây đã đăng ký (registeredCloudWorld) & sai số dư sau đăng ký phi cứng (đo trên đám mây dày 4 mm!)
             var regCloud = new List<Vector3>(icpCloud3D.Count);
             for (int i = 0; i < icpCloud3D.Count; i++)
             {
@@ -5434,7 +5514,16 @@ public static class TrajectoryEvaluationEngine
                 regCloud.Add(q);
             }
             p4Exec.registeredCloudWorld = regCloud;
-            p4Exec.residualAfterNonRigidMm = ComputeCloudToCloudRmsMm(regCloud, targetCloud3D);
+            p4Exec.residualAfterNonRigidMm = ComputeCloudToDenseTrimmedRmsMm(regCloud, snapHash3D, denseSnapCloud3D);
+            // Bảo toàn đơn điệu: nếu bước phi cứng làm lệch nặng hơn ICP cứng thì giữ kết quả ICP cứng tốt hơn
+            if ((okCpd || okTps) && p4Exec.residualAfterNonRigidMm > p4Exec.residualAfterIcpMm + 0.25f)
+            {
+                okCpd = false;
+                okTps = false;
+                p4Exec.registeredCloudWorld = icpCloud3D;
+                p4Exec.residualAfterNonRigidMm = p4Exec.residualAfterIcpMm;
+                p4Exec.nonRigidMethodUsed += " -> giữ ICP (tốt hơn)";
+            }
             registrationResidualMm = p4Exec.residualAfterNonRigidMm;
 
             float resGateMm = Mathf.Max(1f, p4Cfg.residualThresholdMm);
@@ -5444,17 +5533,24 @@ public static class TrajectoryEvaluationEngine
                 p4Exec.warningMessage = $"[CHẶN P4] Sai số dư đăng ký = {registrationResidualMm:F2} mm > ngưỡng {resGateMm:F1} mm. Dừng xuất & báo kỹ sư!";
             }
 
-            // Bước 6 & 7: Áp biến dạng lên quỹ đạo mẫu -> chiếu về điểm bề mặt gần nhất trên quần mới
+            // Bước 6 & 7: Áp biến dạng lên quỹ đạo mẫu -> BÁM MẶT 3D THẬT (Nearest 3D + Chia mịn cung 3D + Pháp tuyến PCA 3D)
+            Vector3 outwardCamPos = new Vector3(0f, 1.8f, 0.4f);
+            if (Camera.main != null) outwardCamPos = Camera.main.transform.position;
+
+            var p4SurfaceStrokes3D = new List<List<Vector3>>();
+            var p4NormalStrokes3D = new List<List<Vector3>>();
             double sumSnapShiftMm = 0.0;
             int snapCount = 0;
-            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+
+            for (int attempt = 0; attempt < 2 && p4SurfaceStrokes3D.Count == 0; attempt++)
             {
                 for (int s = 0; s < activeRefStrokes3D.Count; s++)
                 {
                     var refStroke = activeRefStrokes3D[s];
                     if (refStroke == null || refStroke.Count < 2) continue;
-                    var worldStroke = new List<Vector3>(refStroke.Count);
 
+                    // 1. Biến đổi 3D toàn bộ điểm gốc qua Init -> ICP -> CPD/TPS
+                    var deformedStroke = new List<Vector3>(refStroke.Count);
                     for (int p = 0; p < refStroke.Count; p++)
                     {
                         Vector3 pInit = initRot * ((refStroke[p] - initCSrc) * initScale) + initCDst;
@@ -5462,74 +5558,68 @@ public static class TrajectoryEvaluationEngine
                         Vector3 pDef = pIcp;
                         if (okCpd) pDef = EvalNonRigidCpd3D(pIcp, cpdModel, 0.045f);
                         else if (okTps) pDef = EvalTps3D(pIcp, tpsModel, 0.045f);
+                        deformedStroke.Add(pDef);
+                    }
 
-                        // Chiếu về điểm bề mặt gần nhất trên đám mây điểm quần mới
-                        Vector3 snapped = pDef;
-                        if (flat2D)
-                        {
-                            snapped.y = flatY;
-                        }
-                        else if (ctrl.SampleCompensatedSurface(pDef.x, pDef.z, out float cy, out _))
-                        {
-                            snapped.y = cy;
-                        }
-                        else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(pDef.x, pDef.z, out float py, out _))
-                        {
-                            snapped.y = py;
-                        }
-                        else
-                        {
-                            float bestD2 = float.MaxValue;
-                            for (int j = 0; j < targetCloud3D.Count; j++)
-                            {
-                                float d2 = (targetCloud3D[j] - pDef).sqrMagnitude;
-                                if (d2 < bestD2) { bestD2 = d2; snapped = targetCloud3D[j]; }
-                            }
-                        }
+                    // 2. Bám mặt 3D + chia mịn theo độ dài cung 3D trên các đoạn dốc đứng (không bị chiếu thẳng đứng theo trục Y!)
+                    var curSurf = new List<Vector3>();
+                    var curNorm = new List<Vector3>();
+                    ResampleStrokeHuggingSurface3D(
+                        deformedStroke, snapHash3D, denseSnapCloud3D,
+                        flat2D, flatY, useFixedVert, outwardCamPos,
+                        maxStep3DM: 0.010f,
+                        out List<Vector3> huggedPts, out List<Vector3> huggedNorms,
+                        ref sumSnapShiftMm, ref snapCount);
 
-                        sumSnapShiftMm += Vector3.Distance(pDef, snapped) * 1000.0;
-                        snapCount++;
-
+                    for (int p = 0; p < huggedPts.Count; p++)
+                    {
+                        Vector3 snapped = huggedPts[p];
+                        Vector3 nrm = huggedNorms[p];
                         bool keep = (!p4Cfg.clipToGarmentContour || attempt == 1)
                             ? true
                             : IsInsideValidSprayZone(snapped.x, snapped.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech != null ? tech.borderMarginMm * 0.5f : 8f, out _);
                         if (keep)
                         {
-                            worldStroke.Add(snapped);
+                            curSurf.Add(snapped);
+                            curNorm.Add(nrm);
                         }
-                        else if (worldStroke.Count >= 2)
+                        else if (curSurf.Count >= 2)
                         {
-                            strokesWorld.Add(worldStroke);
-                            worldStroke = new List<Vector3>();
+                            p4SurfaceStrokes3D.Add(curSurf);
+                            p4NormalStrokes3D.Add(curNorm);
+                            curSurf = new List<Vector3>();
+                            curNorm = new List<Vector3>();
                         }
                         else
                         {
-                            worldStroke.Clear();
+                            curSurf.Clear();
+                            curNorm.Clear();
                         }
                     }
-                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                    if (curSurf.Count >= 2)
+                    {
+                        p4SurfaceStrokes3D.Add(curSurf);
+                        p4NormalStrokes3D.Add(curNorm);
+                    }
                 }
             }
 
-            if (strokesWorld.Count > 0)
+            if (p4SurfaceStrokes3D.Count > 0)
             {
                 string tag = p4Cfg.nonRigidMode == P4NonRigidMode.NonRigidCpd ? "P4_ICP3D_CPD3D"
                     : (p4Cfg.nonRigidMode == P4NonRigidMode.TpsRbf ? "P4_ICP3D_TPS3D" : "P4_ICP3D_RIGID");
-                var wps3D = BuildSprayWaypointsFromWorldStrokes(
-                    strokesWorld, ctrl, plyLoader, tech, tag,
-                    useFixedVerticalNormal: useFixedVert,
-                    useFlatPlaneZ: flat2D,
-                    flatPlaneWorldY: flatY,
+                var wps3D = BuildP4SurfaceHuggingWaypoints3D(
+                    p4SurfaceStrokes3D, p4NormalStrokes3D, ctrl, tech, tag,
                     overrideStandoffMm: p4Cfg.sprayDistanceDMm);
 
                 p4Exec.meanSurfaceSnapShiftMm = snapCount > 0 ? (float)(sumSnapShiftMm / snapCount) : 0f;
                 p4Exec.normalStabilityStdDeg = ComputeNormalTiltStdDeg(wps3D);
-                p4Exec.strokeCount = strokesWorld.Count;
+                p4Exec.strokeCount = p4SurfaceStrokes3D.Count;
                 ComputeSprayAndTravelLengths(wps3D, out p4Exec.totalSprayLengthMm, out p4Exec.totalTravelLengthMm);
                 p4Exec.summaryText =
-                    $"{p4Exec.initMethodUsed} -> ICP3D -> {p4Exec.nonRigidMethodUsed} | " +
+                    $"{p4Exec.initMethodUsed} -> ICP3D -> {p4Exec.nonRigidMethodUsed} (Bám mặt 3D PCA) | " +
                     $"Dư: Init {p4Exec.residualAfterInitMm:F1} -> ICP {p4Exec.residualAfterIcpMm:F1} -> Final {p4Exec.residualAfterNonRigidMm:F2} mm | " +
-                    $"Chiếu mặt: {p4Exec.meanSurfaceSnapShiftMm:F1} mm";
+                    $"Chiếu mặt 3D: {p4Exec.meanSurfaceSnapShiftMm:F1} mm";
 
                 genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
                 return wps3D;
@@ -5711,56 +5801,148 @@ public static class TrajectoryEvaluationEngine
         double rmsM = Math.Sqrt((sumSqErr + 0.02 * boundaryErrSumSq) / Math.Max(1, n));
         registrationResidualMm = (float)(rmsM * 1000.0);
 
-        // Bước 4: Áp chuỗi biến đổi (P3 Barycentric 32 tam giác -> ICP cứng theo ống -> TPS phi cứng) lên quỹ đạo mẫu & chiếu lên bề mặt 3D thật
-        for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+        // Bước 4: Áp chuỗi biến đổi (P3 Barycentric 32 tam giác -> ICP cứng theo ống -> TPS phi cứng) lên vùng vẽ (có fill!) hoặc quỹ đạo mẫu
+        if (ctrl.HasCustomDrawnRegions2D)
         {
-            for (int s = 0; s < templateStrokesUV.Count; s++)
+            var canonRegionPolysUV = ctrl.GetCustomDrawnRegionCanonicalPolygonsUV();
+            float fillStepM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
+            for (int r = 0; r < canonRegionPolysUV.Count; r++)
             {
-                var raw = templateStrokesUV[s];
-                if (raw == null || raw.Count < 2) continue;
-                var resampled = ResampleUV(raw, 0.018f);
-                List<Vector3> worldStroke = new List<Vector3>();
+                var canonPoly = canonRegionPolysUV[r];
+                if (canonPoly == null || canonPoly.Count < 3) continue;
 
-                for (int p = 0; p < resampled.Count; p++)
+                var warpedPolyXZ = new List<Vector2>(canonPoly.Count);
+                for (int i = 0; i < canonPoly.Count; i++)
                 {
-                    Vector2 uvPt = resampled[p];
+                    Vector2 uvPt = canonPoly[i];
                     Vector2 qP3 = WarpPointBarycentric12(uvPt, src12, dst12XZ);
                     Vector2 qIcp = (uvPt.x <= 0.50f)
                         ? ApplyRigid2D(qP3, icpCosL, icpSinL, icpCenterL, icpTransL)
                         : ApplyRigid2D(qP3, icpCosR, icpSinR, icpCenterR, icpTransR);
                     Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
                     if (Vector2.Distance(qWarped, qP3) > 0.032f)
-                    {
                         qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
-                    }
-
-                    bool keep = (attempt == 0)
-                        ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
-                        : true;
-                    if (keep)
-                    {
-                        worldStroke.Add(new Vector3(qWarped.x, 0.02f, qWarped.y));
-                    }
-                    else if (worldStroke.Count >= 2)
-                    {
-                        strokesWorld.Add(worldStroke);
-                        worldStroke = new List<Vector3>();
-                    }
-                    else
-                    {
-                        worldStroke.Clear();
-                    }
+                    warpedPolyXZ.Add(qWarped);
                 }
-                if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                if (warpedPolyXZ.Count < 3) continue;
+                p4Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(warpedPolyXZ, ctrl, plyLoader, flat2D, flatY));
+
+                var outline = new List<Vector3>(warpedPolyXZ.Count + 1);
+                for (int i = 0; i <= warpedPolyXZ.Count; i++)
+                {
+                    Vector2 p2 = warpedPolyXZ[i % warpedPolyXZ.Count];
+                    outline.Add(new Vector3(p2.x, 0.02f, p2.y));
+                }
+                strokesWorld.Add(outline);
+
+                if (p4Cfg.fillClosedDrawnRegions)
+                {
+                    var fills = BuildSimpleFillPassesInsidePolygon2D(warpedPolyXZ, fillStepM);
+                    for (int f = 0; f < fills.Count; f++) strokesWorld.Add(fills[f]);
+                }
             }
         }
 
-        var wps = BuildSprayWaypointsFromWorldStrokes(
-            strokesWorld, ctrl, plyLoader, tech, "P4_ICP_TPS",
-            useFixedVerticalNormal: useFixedVert,
-            useFlatPlaneZ: flat2D,
-            flatPlaneWorldY: flatY,
-            overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+        if (strokesWorld.Count == 0 && templateStrokesUV != null)
+        {
+            for (int attempt = 0; attempt < 2 && strokesWorld.Count == 0; attempt++)
+            {
+                for (int s = 0; s < templateStrokesUV.Count; s++)
+                {
+                    var raw = templateStrokesUV[s];
+                    if (raw == null || raw.Count < 2) continue;
+                    var resampled = ResampleUV(raw, 0.018f);
+                    List<Vector3> worldStroke = new List<Vector3>();
+
+                    for (int p = 0; p < resampled.Count; p++)
+                    {
+                        Vector2 uvPt = resampled[p];
+                        Vector2 qP3 = WarpPointBarycentric12(uvPt, src12, dst12XZ);
+                        Vector2 qIcp = (uvPt.x <= 0.50f)
+                            ? ApplyRigid2D(qP3, icpCosL, icpSinL, icpCenterL, icpTransL)
+                            : ApplyRigid2D(qP3, icpCosR, icpSinR, icpCenterR, icpTransR);
+                        Vector2 qWarped = (okX && okZ) ? EvalTps2D(qIcp, tpsCtrl, wX, wZ) : qP3;
+                        if (Vector2.Distance(qWarped, qP3) > 0.032f)
+                        {
+                            qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
+                        }
+
+                        bool keep = (attempt == 0)
+                            ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
+                            : true;
+                        if (keep)
+                        {
+                            worldStroke.Add(new Vector3(qWarped.x, 0.02f, qWarped.y));
+                        }
+                        else if (worldStroke.Count >= 2)
+                        {
+                            strokesWorld.Add(worldStroke);
+                            worldStroke = new List<Vector3>();
+                        }
+                        else
+                        {
+                            worldStroke.Clear();
+                        }
+                    }
+                    if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                }
+            }
+        }
+
+        // Nhánh dự phòng vẫn sử dụng BÁM MẶT 3D THẬT (Nearest 3D + Chia mịn cung 3D + Pháp tuyến PCA 3D) để không bị chiếu thẳng đứng!
+        List<Vector3> denseFallbackCloud3D = (plyLoader != null && !flat2D)
+            ? plyLoader.ExtractGarmentSurfaceCloudVoxelized(Mathf.Min(voxelM, 0.004f), ctrl.garmentContourWorld, 4500)
+            : targetCloud3D;
+        if (denseFallbackCloud3D == null || denseFallbackCloud3D.Count < 20) denseFallbackCloud3D = targetCloud3D;
+
+        List<DobotCR10AIKController.WaypointData> wps;
+        if (!flat2D && denseFallbackCloud3D != null && denseFallbackCloud3D.Count >= 20)
+        {
+            var fbHash3D = BuildSpatialHash3D(denseFallbackCloud3D, 0.025f);
+            Vector3 fbCamPos = Camera.main != null ? Camera.main.transform.position : new Vector3(0f, 1.8f, 0.4f);
+            var fbSurfStrokes = new List<List<Vector3>>(strokesWorld.Count);
+            var fbNormStrokes = new List<List<Vector3>>(strokesWorld.Count);
+            double fbSnapSum = 0.0;
+            int fbSnapCnt = 0;
+
+            for (int s = 0; s < strokesWorld.Count; s++)
+            {
+                var st = strokesWorld[s];
+                if (st == null || st.Count < 2) continue;
+                // Khởi tạo sơ bộ Y từ bề mặt trước khi snap 3D + chia mịn cung 3D trên sườn dốc
+                for (int p = 0; p < st.Count; p++)
+                {
+                    Vector3 pt = st[p];
+                    pt.y = SampleSurfaceHeightOnly(ctrl, plyLoader, pt.x, pt.z);
+                    st[p] = pt;
+                }
+                ResampleStrokeHuggingSurface3D(
+                    st, fbHash3D, denseFallbackCloud3D,
+                    false, flatY, useFixedVert, fbCamPos,
+                    maxStep3DM: 0.010f,
+                    out List<Vector3> hPts, out List<Vector3> hNrms,
+                    ref fbSnapSum, ref fbSnapCnt);
+                if (hPts.Count >= 2)
+                {
+                    fbSurfStrokes.Add(hPts);
+                    fbNormStrokes.Add(hNrms);
+                }
+            }
+
+            wps = BuildP4SurfaceHuggingWaypoints3D(
+                fbSurfStrokes, fbNormStrokes, ctrl, tech, "P4_ICP_TPS_3D",
+                overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+            p4Exec.meanSurfaceSnapShiftMm = fbSnapCnt > 0 ? (float)(fbSnapSum / fbSnapCnt) : 0f;
+        }
+        else
+        {
+            wps = BuildSprayWaypointsFromWorldStrokes(
+                strokesWorld, ctrl, plyLoader, tech, "P4_ICP_TPS",
+                useFixedVerticalNormal: useFixedVert,
+                useFlatPlaneZ: flat2D,
+                flatPlaneWorldY: flatY,
+                overrideStandoffMm: p4Cfg.sprayDistanceDMm);
+        }
 
         p4Exec.residualAfterNonRigidMm = registrationResidualMm;
         p4Exec.rejectedByResidualGate = (registrationResidualMm > Mathf.Max(1f, p4Cfg.residualThresholdMm));
@@ -5773,6 +5955,453 @@ public static class TrajectoryEvaluationEngine
 
         genTimeSec = Mathf.Max(0.001f, Time.realtimeSinceStartup - t0);
         return wps;
+    }
+
+    private struct SpatialHash3D
+    {
+        public float invCell;
+        public Dictionary<Vector3Int, List<int>> cells;
+    }
+
+    private static SpatialHash3D BuildSpatialHash3D(List<Vector3> cloud, float cellSizeM)
+    {
+        float inv = 1f / Mathf.Max(0.005f, cellSizeM);
+        var dict = new Dictionary<Vector3Int, List<int>>(cloud != null ? cloud.Count / 2 + 16 : 16);
+        if (cloud != null)
+        {
+            for (int i = 0; i < cloud.Count; i++)
+            {
+                Vector3 p = cloud[i];
+                var key = new Vector3Int(Mathf.FloorToInt(p.x * inv), Mathf.FloorToInt(p.y * inv), Mathf.FloorToInt(p.z * inv));
+                if (!dict.TryGetValue(key, out var bucket))
+                {
+                    bucket = new List<int>(6);
+                    dict[key] = bucket;
+                }
+                bucket.Add(i);
+            }
+        }
+        return new SpatialHash3D { invCell = inv, cells = dict };
+    }
+
+    /// <summary>
+    /// Đo sai số dư đăng ký 3D thực tế (RMS cắt bỏ 10% ngoại lai biên, đơn vị mm)
+    /// so với đám mây đích dày (~4 mm) qua SpatialHash3D — loại bỏ sai số giả do khoảng thưa điểm của đám mây giảm mẫu!
+    /// </summary>
+    private static float ComputeCloudToDenseTrimmedRmsMm(List<Vector3> src, SpatialHash3D dstHash, List<Vector3> dstDense)
+    {
+        if (src == null || dstDense == null || src.Count == 0 || dstDense.Count == 0) return 0f;
+        var d2List = new List<float>(src.Count);
+        for (int i = 0; i < src.Count; i++)
+        {
+            Vector3 q = src[i];
+            Vector3Int ck = new Vector3Int(
+                Mathf.FloorToInt(q.x * dstHash.invCell),
+                Mathf.FloorToInt(q.y * dstHash.invCell),
+                Mathf.FloorToInt(q.z * dstHash.invCell));
+            float bestD2 = float.MaxValue;
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                if (!dstHash.cells.TryGetValue(new Vector3Int(ck.x + dx, ck.y + dy, ck.z + dz), out var bucket)) continue;
+                for (int k = 0; k < bucket.Count; k++)
+                {
+                    float d2 = (dstDense[bucket[k]] - q).sqrMagnitude;
+                    if (d2 < bestD2) bestD2 = d2;
+                }
+            }
+            if (bestD2 == float.MaxValue)
+            {
+                int step = Mathf.Max(1, dstDense.Count / 300);
+                for (int j = 0; j < dstDense.Count; j += step)
+                {
+                    float d2 = (dstDense[j] - q).sqrMagnitude;
+                    if (d2 < bestD2) bestD2 = d2;
+                }
+            }
+            if (bestD2 < float.MaxValue) d2List.Add(bestD2);
+        }
+        if (d2List.Count == 0) return 0f;
+        d2List.Sort();
+        int keepCount = Mathf.Max(1, Mathf.FloorToInt(d2List.Count * 0.90f));
+        double sum = 0.0;
+        for (int i = 0; i < keepCount; i++) sum += d2List[i];
+        return (float)(Math.Sqrt(sum / keepCount) * 1000.0);
+    }
+
+    /// <summary>
+    /// Tìm điểm gần nhất theo khoảng cách Euclid 3D thực sự trên đám mây điểm (không chiếu thẳng đứng theo trục Y)
+    /// và tính vector pháp tuyến bề mặt 3D thật bằng PCA cục bộ (vector riêng nhỏ nhất của ma trận hiệp phương sai 3x3).
+    /// Hoạt động chính xác trên cả các đoạn dốc đứng / thành bên ống quần / nếp gấp dựng đứng.
+    /// </summary>
+    private static bool TrySnapNearestPoint3DWithPcaNormal(
+        Vector3 query,
+        SpatialHash3D hash,
+        List<Vector3> cloud,
+        Vector3 outwardCamPos,
+        out Vector3 nearest3D,
+        out Vector3 pcaNormal3D)
+    {
+        nearest3D = query;
+        pcaNormal3D = Vector3.up;
+        if (cloud == null || cloud.Count == 0) return false;
+
+        Vector3Int centerKey = new Vector3Int(
+            Mathf.FloorToInt(query.x * hash.invCell),
+            Mathf.FloorToInt(query.y * hash.invCell),
+            Mathf.FloorToInt(query.z * hash.invCell));
+
+        int bestIdx = -1;
+        float bestD2 = float.MaxValue;
+
+        // Tìm trong lân cận 3x3x3 ô (bán kính ~25-50 mm)
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (!hash.cells.TryGetValue(new Vector3Int(centerKey.x + dx, centerKey.y + dy, centerKey.z + dz), out var bucket)) continue;
+            for (int k = 0; k < bucket.Count; k++)
+            {
+                int idx = bucket[k];
+                float d2 = (cloud[idx] - query).sqrMagnitude;
+                if (d2 < bestD2) { bestD2 = d2; bestIdx = idx; }
+            }
+        }
+
+        // Dự phòng mở rộng nếu query nằm xa > 25 mm
+        if (bestIdx < 0)
+        {
+            for (int i = 0; i < cloud.Count; i++)
+            {
+                float d2 = (cloud[i] - query).sqrMagnitude;
+                if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+            }
+        }
+        if (bestIdx < 0) return false;
+
+        nearest3D = cloud[bestIdx];
+
+        // Gom các điểm lân cận 3D trong hình cầu bán kính r = 24 mm quanh nearest3D để tính PCA 3D
+        const float pcaR = 0.024f;
+        const float pcaR2 = pcaR * pcaR;
+        Vector3Int nKey = new Vector3Int(
+            Mathf.FloorToInt(nearest3D.x * hash.invCell),
+            Mathf.FloorToInt(nearest3D.y * hash.invCell),
+            Mathf.FloorToInt(nearest3D.z * hash.invCell));
+
+        var nbrs = new List<Vector3>(32);
+        Vector3 mean = Vector3.zero;
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (!hash.cells.TryGetValue(new Vector3Int(nKey.x + dx, nKey.y + dy, nKey.z + dz), out var bucket)) continue;
+            for (int k = 0; k < bucket.Count; k++)
+            {
+                Vector3 pt = cloud[bucket[k]];
+                if ((pt - nearest3D).sqrMagnitude <= pcaR2)
+                {
+                    nbrs.Add(pt);
+                    mean += pt;
+                }
+            }
+        }
+
+        if (nbrs.Count >= 5)
+        {
+            mean /= nbrs.Count;
+            double[,] cov = new double[3, 3];
+            for (int i = 0; i < nbrs.Count; i++)
+            {
+                Vector3 d = nbrs[i] - mean;
+                cov[0, 0] += d.x * d.x; cov[0, 1] += d.x * d.y; cov[0, 2] += d.x * d.z;
+                cov[1, 1] += d.y * d.y; cov[1, 2] += d.y * d.z;
+                cov[2, 2] += d.z * d.z;
+            }
+            cov[1, 0] = cov[0, 1];
+            cov[2, 0] = cov[0, 2];
+            cov[2, 1] = cov[1, 2];
+
+            // Jacobi 3x3 tìm vector riêng ứng với trị riêng NHỎ NHẤT -> pháp tuyến bề mặt 3D thật
+            double[,] V = new double[3, 3] { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+            for (int iter = 0; iter < 14; iter++)
+            {
+                int p = 0, q = 1;
+                double maxOff = Math.Abs(cov[0, 1]);
+                if (Math.Abs(cov[0, 2]) > maxOff) { maxOff = Math.Abs(cov[0, 2]); p = 0; q = 2; }
+                if (Math.Abs(cov[1, 2]) > maxOff) { maxOff = Math.Abs(cov[1, 2]); p = 1; q = 2; }
+                if (maxOff < 1e-12) break;
+                double tau = (cov[q, q] - cov[p, p]) / (2.0 * cov[p, q]);
+                double t = (tau >= 0.0) ? (1.0 / (tau + Math.Sqrt(1.0 + tau * tau))) : (-1.0 / (-tau + Math.Sqrt(1.0 + tau * tau)));
+                double c = 1.0 / Math.Sqrt(1.0 + t * t);
+                double s = t * c;
+                double app = cov[p, p], aqq = cov[q, q], apq = cov[p, q];
+                cov[p, p] = app - t * apq;
+                cov[q, q] = aqq + t * apq;
+                cov[p, q] = cov[q, p] = 0.0;
+                for (int r = 0; r < 3; r++)
+                {
+                    if (r != p && r != q)
+                    {
+                        double arp = cov[r, p], arq = cov[r, q];
+                        cov[r, p] = cov[p, r] = c * arp - s * arq;
+                        cov[r, q] = cov[q, r] = s * arp + c * arq;
+                    }
+                    double vrp = V[r, p], vrq = V[r, q];
+                    V[r, p] = c * vrp - s * vrq;
+                    V[r, q] = s * vrp + c * vrq;
+                }
+            }
+
+            int minCol = 0;
+            if (cov[1, 1] < cov[minCol, minCol]) minCol = 1;
+            if (cov[2, 2] < cov[minCol, minCol]) minCol = 2;
+
+            Vector3 n3D = new Vector3((float)V[0, minCol], (float)V[1, minCol], (float)V[2, minCol]);
+            if (n3D.sqrMagnitude > 1e-6f)
+            {
+                n3D.Normalize();
+                // Định hướng nhất quán về phía camera / phía ngoài bề mặt
+                Vector3 toCam = (outwardCamPos - nearest3D);
+                if (toCam.sqrMagnitude < 1e-4f) toCam = Vector3.up;
+                if (Vector3.Dot(n3D, toCam.normalized) < 0f) n3D = -n3D;
+                // Nếu vẫn hơi chúi xuống dưới bàn thì lật lên trên
+                if (n3D.y < -0.25f) n3D = -n3D;
+                pcaNormal3D = n3D.normalized;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Chia mịn đường quỹ đạo theo ĐỘ DÀI CUNG 3D (bao gồm cả chênh lệch độ cao ΔY trên vách dốc đứng)
+    /// và hút từng điểm trung gian lên trực tiếp bề mặt Point Cloud 3D + tính pháp tuyến PCA 3D.
+    /// </summary>
+    private static void ResampleStrokeHuggingSurface3D(
+        List<Vector3> deformedStroke,
+        SpatialHash3D hash,
+        List<Vector3> cloud,
+        bool flat2D,
+        float flatY,
+        bool useFixedVert,
+        Vector3 outwardCamPos,
+        float maxStep3DM,
+        out List<Vector3> outPts,
+        out List<Vector3> outNorms,
+        ref double sumSnapShiftMm,
+        ref int snapCount)
+    {
+        outPts = new List<Vector3>(deformedStroke.Count * 2);
+        outNorms = new List<Vector3>(deformedStroke.Count * 2);
+        if (deformedStroke == null || deformedStroke.Count < 2) return;
+
+        float stepM = Mathf.Clamp(maxStep3DM, 0.004f, 0.025f);
+        for (int i = 0; i < deformedStroke.Count; i++)
+        {
+            Vector3 pA = deformedStroke[i];
+            if (i == 0)
+            {
+                Vector3 snA = pA;
+                Vector3 nA = Vector3.up;
+                if (flat2D) snA.y = flatY;
+                else if (TrySnapNearestPoint3DWithPcaNormal(pA, hash, cloud, outwardCamPos, out Vector3 s3, out Vector3 n3))
+                {
+                    snA = s3;
+                    nA = useFixedVert ? Vector3.up : n3;
+                }
+                sumSnapShiftMm += Vector3.Distance(pA, snA) * 1000.0;
+                snapCount++;
+                outPts.Add(snA);
+                outNorms.Add(nA);
+                continue;
+            }
+
+            Vector3 pPrevDef = deformedStroke[i - 1];
+            Vector3 prevSnapped = outPts[outPts.Count - 1];
+
+            Vector3 snEnd = pA;
+            Vector3 nEnd = Vector3.up;
+            if (flat2D) snEnd.y = flatY;
+            else if (TrySnapNearestPoint3DWithPcaNormal(pA, hash, cloud, outwardCamPos, out Vector3 s3End, out Vector3 n3End))
+            {
+                snEnd = s3End;
+                nEnd = useFixedVert ? Vector3.up : n3End;
+            }
+
+            // Đo khoảng cách 3D THỰC (kể cả độ chênh ΔY lớn ở vách dốc đứng!) để chèn thêm điểm bò sát sườn dốc
+            float dist3D = Vector3.Distance(prevSnapped, snEnd);
+            int subSteps = Mathf.Clamp(Mathf.CeilToInt(dist3D / stepM), 1, 24);
+            for (int k = 1; k < subSteps; k++)
+            {
+                float t = (float)k / subSteps;
+                Vector3 midQuery = Vector3.Lerp(prevSnapped, snEnd, t);
+                Vector3 midSnapped = midQuery;
+                Vector3 midNorm = Vector3.Slerp(outNorms[outNorms.Count - 1], nEnd, t).normalized;
+                if (flat2D)
+                {
+                    midSnapped.y = flatY;
+                    midNorm = Vector3.up;
+                }
+                else if (TrySnapNearestPoint3DWithPcaNormal(midQuery, hash, cloud, outwardCamPos, out Vector3 sMid, out Vector3 nMid))
+                {
+                    midSnapped = sMid;
+                    midNorm = useFixedVert ? Vector3.up : nMid;
+                }
+                if (Vector3.Distance(outPts[outPts.Count - 1], midSnapped) >= 0.002f)
+                {
+                    outPts.Add(midSnapped);
+                    outNorms.Add(midNorm);
+                }
+            }
+
+            sumSnapShiftMm += Vector3.Distance(pA, snEnd) * 1000.0;
+            snapCount++;
+            if (Vector3.Distance(outPts[outPts.Count - 1], snEnd) >= 0.0015f)
+            {
+                outPts.Add(snEnd);
+                outNorms.Add(nEnd);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Xây dựng chuỗi Waypoint 6-DOF chuẩn 3D cho P4 trực tiếp từ các điểm bề mặt 3D đã snap + pháp tuyến PCA 3D:
+    /// GIỮ NGUYÊN tọa độ 3D thật trên các đoạn dốc đứng (không ghi đè lại bằng lưới chiều cao 2.5D!),
+    /// lùi đầu súng dọc theo pháp tuyến 3D thật p_TCP = p_surface + d * n_3D và giải IK 6-DOF.
+    /// </summary>
+    private static List<DobotCR10AIKController.WaypointData> BuildP4SurfaceHuggingWaypoints3D(
+        List<List<Vector3>> surfaceStrokes3D,
+        List<List<Vector3>> normalStrokes3D,
+        DobotCR10AIKController ctrl,
+        SprayTechParams tech,
+        string methodTag,
+        float overrideStandoffMm)
+    {
+        var result = new List<DobotCR10AIKController.WaypointData>();
+        if (surfaceStrokes3D == null || surfaceStrokes3D.Count == 0 || ctrl == null) return result;
+
+        float effectiveStandoffMm = (overrideStandoffMm >= 0f) ? overrideStandoffMm : GetEffectiveSprayHeightMm(ctrl, tech);
+        float standoffM = effectiveStandoffMm * 0.001f;
+        float maxTilt = tech != null ? tech.maxTiltDeg : 28f;
+        Transform gRef = ctrl.globalReference;
+
+        float cumDistMm = 0f;
+        Vector3 prevTcpRobotMm = Vector3.zero;
+        float[] prevJoints = null;
+        int wpIndex = 0;
+
+        for (int s = 0; s < surfaceStrokes3D.Count; s++)
+        {
+            var pts = surfaceStrokes3D[s];
+            var nrms = (s < normalStrokes3D.Count) ? normalStrokes3D[s] : null;
+            if (pts == null || pts.Count < 2) continue;
+            int m = pts.Count;
+
+            // Làm mượt chuỗi pháp tuyến 3D dọc theo nét để góc súng chuyển mượt qua sườn dốc
+            Vector3[] smoothNorms = new Vector3[m];
+            for (int p = 0; p < m; p++)
+            {
+                Vector3 nCur = (nrms != null && p < nrms.Count && nrms[p].sqrMagnitude > 1e-4f) ? nrms[p].normalized : Vector3.up;
+                Vector3 sum = nCur * 2f;
+                if (p > 0 && nrms != null && p - 1 < nrms.Count) sum += nrms[p - 1].normalized;
+                if (p < m - 1 && nrms != null && p + 1 < nrms.Count) sum += nrms[p + 1].normalized;
+                smoothNorms[p] = sum.sqrMagnitude > 1e-6f ? sum.normalized : Vector3.up;
+            }
+
+            for (int p = 0; p < m; p++)
+            {
+                Vector3 surfW = pts[p];
+                Vector3 normW = smoothNorms[p];
+
+                // Lùi súng dọc theo pháp tuyến bề mặt 3D thật (vuông góc cả với vách dốc!)
+                Vector3 tcpW = surfW + normW * standoffM;
+
+                // Giới hạn góc nghiêng trục súng theo ràng buộc công nghệ maxTiltDeg khi giải hướng RPY
+                Vector3 gunNormalW = normW;
+                float tiltDeg = Vector3.Angle(gunNormalW, Vector3.up);
+                if (tiltDeg > maxTilt && maxTilt > 0.1f)
+                {
+                    Vector3 axis = Vector3.Cross(Vector3.up, gunNormalW);
+                    if (axis.sqrMagnitude > 1e-6f)
+                        gunNormalW = (Quaternion.AngleAxis(maxTilt, axis.normalized) * Vector3.up).normalized;
+                }
+
+                Vector3 tcpRobotMm = gRef != null
+                    ? gRef.InverseTransformPoint(tcpW) * 1000f
+                    : new Vector3((1.100f - tcpW.z) * 1000f, -tcpW.x * 1000f, tcpW.y * 1000f);
+                tcpRobotMm.z = Mathf.Clamp(tcpRobotMm.z, 18f, 550f);
+                if (tcpRobotMm.magnitude > 1145f)
+                {
+                    float rScale = 1140f / tcpRobotMm.magnitude;
+                    tcpRobotMm.x *= rScale;
+                    tcpRobotMm.y *= rScale;
+                    tcpW = gRef != null
+                        ? gRef.TransformPoint(tcpRobotMm * 0.001f)
+                        : new Vector3(-tcpRobotMm.y * 0.001f, tcpRobotMm.z * 0.001f, 1.100f - tcpRobotMm.x * 0.001f);
+                }
+
+                Vector3 normRobot = gRef != null
+                    ? gRef.InverseTransformDirection(gunNormalW).normalized
+                    : new Vector3(-gunNormalW.z, -gunNormalW.x, gunNormalW.y).normalized;
+                Vector3 tanW = (p < m - 1) ? (pts[p + 1] - pts[p]) : (pts[p] - pts[p - 1]);
+                if (tanW.sqrMagnitude < 1e-7f) tanW = Vector3.forward;
+                Vector3 tanRobot = gRef != null
+                    ? gRef.InverseTransformDirection(tanW).normalized
+                    : new Vector3(-tanW.z, -tanW.x, tanW.y).normalized;
+
+                Vector3 rpyDeg = DobotCR10AKinematics.SurfaceNormalToRobotRpyDeg(normRobot, tanRobot, maxTilt);
+
+                if (wpIndex > 0) cumDistMm += Vector3.Distance(prevTcpRobotMm, tcpRobotMm);
+                prevTcpRobotMm = tcpRobotMm;
+
+                var wp = new DobotCR10AIKController.WaypointData
+                {
+                    index = wpIndex,
+                    distance_mm = cumDistMm,
+                    targetPosGlobal_mm = tcpRobotMm,
+                    targetPosWorld_m = tcpW,
+                    microNormal = normW,
+                    roll_deg = rpyDeg.x,
+                    pitch_deg = rpyDeg.y,
+                    yaw_deg = rpyDeg.z,
+                    sprayOn = (p > 0),
+                    segmentName = $"{methodTag}_S{s + 1}"
+                };
+
+                Quaternion qRot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+                var sols = DobotCR10AKinematics.SolveTcpPose(
+                    wp.targetPosGlobal_mm, qRot, prevJoints,
+                    ctrl.toolLength, useAdaptiveTilt: true, maxTiltDeg: maxTilt,
+                    toolOffsetX: ctrl.toolOffsetX, toolOffsetY: ctrl.toolOffsetY);
+                if (sols == null || sols.Count == 0)
+                {
+                    wp.roll_deg = 180f; wp.pitch_deg = 0f; wp.yaw_deg = 0f;
+                    qRot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
+                    sols = DobotCR10AKinematics.SolveTcpPose(
+                        wp.targetPosGlobal_mm, qRot, prevJoints,
+                        ctrl.toolLength, useAdaptiveTilt: true, maxTiltDeg: maxTilt,
+                        toolOffsetX: ctrl.toolOffsetX, toolOffsetY: ctrl.toolOffsetY);
+                }
+                if (sols != null && sols.Count > 0)
+                {
+                    var best = sols[0];
+                    for (int j = 0; j < 6; j++)
+                    {
+                        wp.jointAngles_rad[j] = (float)best.jointsRad[j];
+                        wp.jointAngles_deg[j] = (float)best.jointsDeg[j];
+                    }
+                    wp.isSolved = true;
+                    wp.posError_mm = (float)best.positionErrorMm;
+                    wp.selectedSolutionIndex = 0;
+                    wp.selectedBranchName = best.branchName;
+                    prevJoints = wp.jointAngles_rad;
+                }
+                result.Add(wp);
+                wpIndex++;
+            }
+        }
+        return result;
     }
 
     private static float ComputeNormalTiltStdDeg(List<DobotCR10AIKController.WaypointData> wps)

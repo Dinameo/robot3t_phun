@@ -46,3 +46,19 @@ venv*/
 *.booproj
 Assets/_Recovery/
 **/Assets/_Recovery/
+
+# Active-learning feedback samples, retrain runs & weight backups
+ai_src/step2_train_yolo/active_learning_feedback/
+ai_src/step2_train_yolo/weights/backups/
+*.pt.new
+
+# Runtime live camera captures, batch outputs & temporary trajectory revisions
+dobot_cr10a/output_drawing/applied_batch_samples/
+dobot_cr10a/output_drawing/taught_batch/
+dobot_cr10a/output_drawing/frames/
+dobot_cr10a/output_drawing/*zivid_live_*
+dobot_cr10a/output_drawing/*pcl_live_*
+dobot_cr10a/output_drawing/*_????????????.csv
+dobot_cr10a/output_drawing/*_????????????_landmarks_seg.json
+ai_src/step3_3d_trajectory/outputs/*zivid_live_*
+ai_src/step3_3d_trajectory/outputs/*pcl_live_*
