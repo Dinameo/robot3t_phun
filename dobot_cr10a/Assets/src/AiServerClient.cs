@@ -21,6 +21,16 @@ using UnityEngine.Networking;
 public class AiServerClient : MonoBehaviour
 {
     public enum ProtocolType { UDP, HTTP }
+    public enum PipelineStep { Hidden, Waiting, Working, Applying, Done, Failed }
+    public PipelineStep CaptureStep { get; private set; }
+    public PipelineStep DetectionStep { get; private set; }
+    public int CapturePercent => StepPercent(CaptureStep, capturePercentBeforeFailure);
+    public int DetectionPercent => StepPercent(DetectionStep, detectionPercentBeforeFailure);
+    public bool ShowPipelineProgress => Time.realtimeSinceStartup < pipelineProgressVisibleUntil;
+    private int capturePercentBeforeFailure;
+    private int detectionPercentBeforeFailure;
+    private float pipelineProgressVisibleUntil;
+    private string activeCaptureProgressId;
 
     [Header("1. Cấu hình máy chủ AI")]
     [Tooltip("Chọn giao thức kết nối: UDP (Nhanh < 1ms) hoặc HTTP (REST)")]
@@ -454,10 +464,12 @@ public class AiServerClient : MonoBehaviour
 
     private IEnumerator CaptureAndDetectRoutine(bool previewOnly)
     {
-        isProcessing = true;
+        BeginPipelineProgress(capture: true, detect: !previewOnly);
         lastStatusMessage = "Đang chụp Zivid và xử lý RGB / XYZ...";
-        string payload = previewOnly ? "{\"command\":\"CAPTURE_PREVIEW\"}" :
-            "{\"command\":\"CAPTURE_DETECT\",\"preview_nominal_rig\":true}";
+        string progressId = Guid.NewGuid().ToString("N");
+        string command = previewOnly ? "CAPTURE_PREVIEW" : "CAPTURE_DETECT";
+        string payload = $"{{\"command\":\"{command}\",\"progress_id\":\"{progressId}\",\"preview_nominal_rig\":true}}";
+        activeCaptureProgressId = previewOnly ? null : progressId;
         // Camera capture uses HTTP for clear errors and the longer acquisition timeout.
         string url = $"http://{serverIp.Trim()}:5000/api/capture";
         using (UnityWebRequest request = new UnityWebRequest(url, "POST"))
@@ -466,18 +478,139 @@ public class AiServerClient : MonoBehaviour
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
             request.timeout = 180;
-            yield return request.SendWebRequest();
-            isProcessing = false;
+            var operation = request.SendWebRequest();
+            if (!previewOnly) StartCoroutine(PollCapturePhase(url, progressId));
+            yield return operation;
+            activeCaptureProgressId = null;
             if (request.result != UnityWebRequest.Result.Success)
             {
                 lastStatusMessage = "Không kết nối được camera server: " + request.error;
+                FinishPipelineProgress(false);
                 yield break;
             }
             AiDetectionResult result = null;
             try { result = JsonUtility.FromJson<AiDetectionResult>(request.downloadHandler.text); }
             catch (Exception ex) { lastStatusMessage = "Phản hồi camera không hợp lệ: " + ex.Message; }
-            if (result != null) ProcessAiResult(result, null);
+            if (result == null)
+            {
+                FinishPipelineProgress(false);
+                yield break;
+            }
+            yield return ApplyPipelineResult(result, null);
         }
+    }
+
+    [Serializable]
+    private class CaptureProgressResponse
+    {
+        public string phase = "";
+    }
+
+    private IEnumerator PollCapturePhase(string url, string progressId)
+    {
+        while (activeCaptureProgressId == progressId)
+        {
+            using (var request = UnityWebRequest.Get($"{url}/progress/{progressId}"))
+            {
+                request.timeout = 2;
+                yield return request.SendWebRequest();
+                if (activeCaptureProgressId != progressId || request.responseCode == 404) yield break;
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    var progress = JsonUtility.FromJson<CaptureProgressResponse>(request.downloadHandler.text);
+                    if (progress?.phase == "detect")
+                    {
+                        CaptureStep = PipelineStep.Done;
+                        DetectionStep = PipelineStep.Working;
+                        yield break;
+                    }
+                }
+            }
+            yield return new WaitForSecondsRealtime(0.35f);
+        }
+    }
+
+    private void BeginPipelineProgress(bool capture, bool detect)
+    {
+        isProcessing = true;
+        CaptureStep = capture ? PipelineStep.Working : PipelineStep.Hidden;
+        DetectionStep = detect
+            ? (capture ? PipelineStep.Waiting : PipelineStep.Working)
+            : PipelineStep.Hidden;
+        pipelineProgressVisibleUntil = float.PositiveInfinity;
+    }
+
+    private static int StepPercent(PipelineStep step, int percentBeforeFailure)
+    {
+        // Milestones are based on request, response, and local load. Execution time is unknown.
+        switch (step)
+        {
+            case PipelineStep.Working: return 20;
+            case PipelineStep.Applying: return 80;
+            case PipelineStep.Done: return 100;
+            case PipelineStep.Failed: return percentBeforeFailure;
+            default: return 0;
+        }
+    }
+
+    private void FinishPipelineProgress(bool success)
+    {
+        capturePercentBeforeFailure = CapturePercent;
+        detectionPercentBeforeFailure = DetectionPercent;
+        PipelineStep outcome = success ? PipelineStep.Done : PipelineStep.Failed;
+        if (DetectionStep == PipelineStep.Working || DetectionStep == PipelineStep.Applying)
+            DetectionStep = outcome;
+        else if (CaptureStep == PipelineStep.Working || CaptureStep == PipelineStep.Applying)
+            CaptureStep = outcome;
+        if (!success && DetectionStep == PipelineStep.Waiting)
+            DetectionStep = PipelineStep.Hidden;
+        isProcessing = false;
+        pipelineProgressVisibleUntil = Time.realtimeSinceStartup + (success ? 4f : 8f);
+    }
+
+    private IEnumerator ApplyPipelineResult(AiDetectionResult result, Action<AiDetectionResult> onComplete)
+    {
+        if (result != null && result.IsSuccess && CaptureStep != PipelineStep.Hidden &&
+            (string.IsNullOrEmpty(result.pointcloud_ply) || !File.Exists(result.pointcloud_ply)))
+        {
+            lastStatusMessage = "Zivid đã trả kết quả nhưng Unity không tìm thấy file PLY để nạp.";
+            CaptureStep = PipelineStep.Applying;
+            FinishPipelineProgress(false);
+            CaptureStep = PipelineStep.Failed;
+            onComplete?.Invoke(null);
+            yield break;
+        }
+
+        if (result != null && result.IsSuccess)
+        {
+            if (DetectionStep != PipelineStep.Hidden)
+            {
+                if (CaptureStep != PipelineStep.Hidden) CaptureStep = PipelineStep.Done;
+                DetectionStep = PipelineStep.Applying;
+            }
+            else
+            {
+                CaptureStep = PipelineStep.Applying;
+            }
+            yield return null;
+        }
+
+        bool success = result != null && result.IsSuccess;
+        try
+        {
+            ProcessAiResult(result, null);
+        }
+        catch (Exception ex)
+        {
+            success = false;
+            lastStatusMessage = $"Không nạp được kết quả: {ex.Message}";
+            Debug.LogException(ex);
+        }
+        finally
+        {
+            FinishPipelineProgress(success);
+        }
+        onComplete?.Invoke(success ? result : null);
     }
 
     public void TriggerDetection(string size = "S", Action<AiDetectionResult> onComplete = null)
@@ -611,7 +744,7 @@ public class AiServerClient : MonoBehaviour
 
     private IEnumerator TriggerUdpRoutine(string size, string sample, Action<AiDetectionResult> onComplete)
     {
-        isProcessing = true;
+        BeginPipelineProgress(capture: false, detect: true);
         lastStatusMessage = $"[UDP] Đang nhận diện {sample} (Size {size})...";
 
         string host = serverIp.Trim();
@@ -649,7 +782,6 @@ public class AiServerClient : MonoBehaviour
             yield return null;
         }
 
-        isProcessing = false;
         string resultText = udpTask.Result;
 
         if (!resultText.StartsWith("ERROR:"))
@@ -665,19 +797,20 @@ public class AiServerClient : MonoBehaviour
                 lastStatusMessage = $"Lỗi đọc JSON từ UDP: {ex.Message}";
             }
 
-            ProcessAiResult(result, onComplete);
+            yield return ApplyPipelineResult(result, onComplete);
         }
         else
         {
             isServerOnline = false;
             lastStatusMessage = $"Lỗi UDP: {resultText.Substring(6)}";
+            FinishPipelineProgress(false);
             onComplete?.Invoke(null);
         }
     }
 
     private IEnumerator TriggerHttpRoutine(string size, string sample, Action<AiDetectionResult> onComplete)
     {
-        isProcessing = true;
+        BeginPipelineProgress(capture: false, detect: true);
         lastStatusMessage = $"[HTTP] Đang nhận diện {sample} (Size {size})...";
 
         string url = $"http://{serverIp.Trim()}:{serverPort}/api/detect";
@@ -695,7 +828,6 @@ public class AiServerClient : MonoBehaviour
             req.timeout = 180;
 
             yield return req.SendWebRequest();
-            isProcessing = false;
 
             if (req.result == UnityWebRequest.Result.Success)
             {
@@ -709,12 +841,13 @@ public class AiServerClient : MonoBehaviour
                 {
                     lastStatusMessage = $"Lỗi đọc JSON từ HTTP: {ex.Message}";
                 }
-                ProcessAiResult(result, onComplete);
+                yield return ApplyPipelineResult(result, onComplete);
             }
             else
             {
                 isServerOnline = false;
                 lastStatusMessage = $"Lỗi HTTP: {req.error}";
+                FinishPipelineProgress(false);
                 onComplete?.Invoke(null);
             }
         }

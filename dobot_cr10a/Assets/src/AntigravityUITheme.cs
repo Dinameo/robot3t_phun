@@ -64,6 +64,9 @@ public static class AntigravityUITheme
     public static GUIStyle StylePrimaryButton;
     public static GUIStyle StyleCloseButton;
     public static GUIStyle StyleCardHeader;
+    public static GUIStyle StyleProgressLabel;
+    public static GUIStyle StyleSprayColorButton;
+    public static GUIStyle StyleSelectedSprayColorButton;
     public static GUIStyle StyleSectionLabel;
     public static GUIStyle StyleBadgeGreen;
     public static GUIStyle StyleBadgeBlue;
@@ -182,6 +185,17 @@ public static class AntigravityUITheme
             padding = new RectOffset(8, 8, 4, 4)
         };
 
+        StyleSprayColorButton = new GUIStyle(StyleButton)
+        {
+            margin = new RectOffset(2, 2, 3, 3),
+            padding = new RectOffset(11, 11, 5, 8)
+        };
+        StyleSelectedSprayColorButton = new GUIStyle(StylePrimaryButton)
+        {
+            margin = new RectOffset(2, 2, 3, 3),
+            padding = new RectOffset(11, 11, 5, 8)
+        };
+
         StyleCloseButton = new GUIStyle(GUI.skin.button)
         {
             fontSize = 12,
@@ -201,6 +215,14 @@ public static class AntigravityUITheme
             wordWrap = true,
             normal = { textColor = ColorTextCyan },
             margin = new RectOffset(2, 2, 2, 4)
+        };
+
+        StyleProgressLabel = new GUIStyle(StyleCardHeader)
+        {
+            wordWrap = false,
+            clipping = TextClipping.Clip,
+            alignment = TextAnchor.MiddleLeft,
+            padding = new RectOffset()
         };
 
         StyleSectionLabel = new GUIStyle(GUI.skin.label)

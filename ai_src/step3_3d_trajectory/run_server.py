@@ -30,6 +30,7 @@ class Service:
         for folder in ('_2D','_3D'): (self.dataset/folder).mkdir(parents=True,exist_ok=True)
         self.backend=None; self.loading=True; self.model_error=''
         self.lock=threading.Lock()
+        self.capture_progress=None
         self.calibration=None
         if calibration_file:
             from calibration import load_calibration
@@ -158,6 +159,9 @@ class Service:
                 return {'status':'ERROR','message':'Server dang xu ly yeu cau truoc. Cho hoan tat roi thu lai.','error_code':409}
             try:
                 if command in ('CAPTURE_DETECT','CAPTURE_ONLY','CAPTURE_PREVIEW'):
+                    progress_id=req.get('progress_id')
+                    if isinstance(progress_id,str) and re.fullmatch(r'[0-9a-f]{32}',progress_id):
+                        self.capture_progress=(progress_id,'capture')
                     sample,ply=self.capture.capture()
                     cam_img=self.dataset/'_2D'/(sample+'.png')
                     cam_img_str=str(cam_img) if cam_img.is_file() else ''
@@ -165,6 +169,8 @@ class Service:
                         return {'status':'SUCCESS','sample':sample,'pointcloud_ply':str(ply),'camera_image':cam_img_str,'preview_image':cam_img_str,'trajectory_csv':'','frame_only':True,'message':'Da chup camera that; hinh hoc dang hien trong he quy chieu mo phong.','simulation_only':True}
                     if self.calibration is None and not req.get('preview_nominal_rig',False):
                         raise ValueError(f'Da luu anh {sample}. Can hieu chuan camera-robot truoc khi sinh quy dao tu camera that. File: {ply}')
+                    if self.capture_progress is not None:
+                        self.capture_progress=(self.capture_progress[0],'detect')
                 else: sample=self.register_sample(req)
                 if command=='CUSTOM_DRAW_3D':
                     strokes=req.get('strokes',[])
@@ -200,7 +206,9 @@ class Service:
                     result['pointcloud_ply']=str(view)
                 LOG.info('Published %s: %s waypoints revision=%s',sample,len(rows),revision)
                 return result
-            finally: self.lock.release()
+            finally:
+                self.capture_progress=None
+                self.lock.release()
         except Exception as ex:
             LOG.warning('Request rejected (%s): %s',command,ex)
             return {'status':'ERROR','message':str(ex),'error_code':422,'simulation_only':True}
@@ -236,6 +244,10 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
         def do_GET(self):
             if self.path=='/api/status': self.reply(service.status())
             elif self.path=='/api/camera/status': self.reply(service.handle({'command':'CAMERA_STATUS'}))
+            elif self.path.startswith('/api/capture/progress/'):
+                request_id=self.path.rsplit('/',1)[-1]
+                progress=service.capture_progress
+                self.reply({'phase':progress[1] if progress and progress[0]==request_id else ''})
             elif self.path.startswith('/api/feedback/status'): self.reply(service.handle({'command':'FEEDBACK_STATUS'}))
             else: self.reply({'status':'ERROR','message':'Unknown endpoint'},404)
         def do_POST(self):

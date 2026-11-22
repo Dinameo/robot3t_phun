@@ -7,7 +7,7 @@ using UnityEngine;
 
 /// <summary>
 /// BỘ CÔNG CỤ ĐÁNH GIÁ, SO SÁNH THUẬT TOÁN (P1 / P3 / P4), MÔ PHỎNG VỆT PHUN GAUSS 3D,
-/// VÙNG CẤM PHUN, KHUÔN ĐỨNG 3D & XUẤT LỆNH DOBOT / ROS 2
+/// VÙNG CẤM PHUN & XUẤT LỆNH DOBOT / ROS 2
 /// Đáp ứng trực tiếp các yêu cầu còn thiếu trong `Gop-y-Bao-cao-lan-1-Tu-dong-sinh-chuong-trinh-phun.pdf`.
 /// </summary>
 public static class TrajectoryEvaluationEngine
@@ -261,6 +261,7 @@ public static class TrajectoryEvaluationEngine
         public List<List<Vector3>> targetRegionPolygonsWorld = new List<List<Vector3>>(); // Vùng mục tiêu sau đăng ký
         public string initMethodUsed = "";
         public string nonRigidMethodUsed = "";
+        public string sourceSampleName = "";
         public int sourceVoxelCount;
         public int targetVoxelCount;
         public float residualAfterInitMm;
@@ -1918,7 +1919,7 @@ public static class TrajectoryEvaluationEngine
         public float u1;
     }
 
-    private static List<Vector3> LiftPolygon2DToWorldSurface(List<Vector2> poly2D, DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, bool useFlatPlane, float flatY)
+    private static List<Vector3> LiftPolygon2DToWorldSurface(List<Vector2> poly2D, DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, bool useFlatPlane, float flatY, float overlayLiftM = 0.002f)
     {
         var res = new List<Vector3>(poly2D.Count);
         for (int i = 0; i < poly2D.Count; i++)
@@ -1929,21 +1930,24 @@ public static class TrajectoryEvaluationEngine
                 if (ctrl.SampleCompensatedSurface(poly2D[i].x, poly2D[i].y, out float cy, out _)) y = cy;
                 else if (plyLoader != null && plyLoader.SampleSurfaceWorldHeightAndNormal(poly2D[i].x, poly2D[i].y, out float py, out _)) y = py;
             }
-            res.Add(new Vector3(poly2D[i].x, y + 0.002f, poly2D[i].y));
+            res.Add(new Vector3(poly2D[i].x, y + overlayLiftM, poly2D[i].y));
         }
         return res;
     }
 
-    /// <summary>Returns the highest sampled garment surface height for a flat 2D path plane.</summary>
+    /// <summary>Returns the highest measured garment surface height for a flat 2D path plane.</summary>
     private static float GetHighestGarmentSurfaceY(DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, float fallbackY)
     {
         float maxY = float.NegativeInfinity;
-        if (plyLoader != null)
+        if (plyLoader != null && ctrl != null)
         {
-            List<Vector3> surface = plyLoader.ExtractGarmentSurfaceCloudVoxelized(
-                0.004f, ctrl != null ? ctrl.garmentContourWorld : null, 12000);
-            if (surface != null)
-                for (int i = 0; i < surface.Count; i++) maxY = Mathf.Max(maxY, surface[i].y);
+            if (plyLoader.TryGetHighestGarmentSurfaceY(ctrl.garmentContourWorld, out maxY))
+                return maxY;
+
+            if (plyLoader.TryGetHighestGarmentSurfaceY(ctrl.sprayZoneLeftWorld, out float leftY))
+                maxY = leftY;
+            if (plyLoader.TryGetHighestGarmentSurfaceY(ctrl.sprayZoneRightWorld, out float rightY))
+                maxY = Mathf.Max(maxY, rightY);
         }
         if (float.IsNegativeInfinity(maxY) && ctrl != null)
         {
@@ -1960,6 +1964,45 @@ public static class TrajectoryEvaluationEngine
         public Vector3 worldPos;
         public bool sprayOnToHere;
         public string segName;
+    }
+
+    private static List<List<Vector2>> GetHandDrawnStrokesXZ(
+        DobotCR10AIKController ctrl, PLYDirectLoader plyLoader, List<List<Vector2>> canonicalStrokes,
+        Func<Vector2, Vector2> projectCanonical)
+    {
+        var strokes = ctrl.GetCustomDrawnStrokesWorldXZ(plyLoader);
+        if (strokes.Count > 0 || canonicalStrokes == null || projectCanonical == null) return strokes;
+
+        foreach (var stroke in canonicalStrokes)
+        {
+            if (stroke == null || stroke.Count < 2) continue;
+            var projected = new List<Vector2>(stroke.Count);
+            foreach (Vector2 point in stroke)
+                projected.Add(projectCanonical(point));
+            strokes.Add(projected);
+        }
+        return strokes;
+    }
+
+    private static bool IsClosedHandDrawnStroke(List<Vector2> stroke)
+    {
+        if (stroke.Count < 6) return false;
+        float length = 0f;
+        for (int i = 1; i < stroke.Count; i++)
+            length += Vector2.Distance(stroke[i - 1], stroke[i]);
+        float closeTolerance = Mathf.Clamp(length * 0.05f, 0.004f, 0.012f);
+        return Vector2.Distance(stroke[0], stroke[stroke.Count - 1]) <= closeTolerance &&
+            ComputePolygonAreaSqM(stroke) >= 0.00020f;
+    }
+
+    private static List<Vector3> BuildWorldStroke(List<Vector2> pointsXZ, bool close = false)
+    {
+        var stroke = new List<Vector3>(pointsXZ.Count + (close ? 1 : 0));
+        foreach (Vector2 p in pointsXZ)
+            stroke.Add(new Vector3(p.x, 0.02f, p.y));
+        if (close && stroke.Count > 0 && stroke[0] != stroke[stroke.Count - 1])
+            stroke.Add(stroke[0]);
+        return stroke;
     }
 
     /// <summary>
@@ -2642,9 +2685,9 @@ public static class TrajectoryEvaluationEngine
         // Lưu đa giác 3D của CHỖ CẦN PHUN (R gốc & R_safe sau co biên e) để hiển thị độc lập trong View 2D & 3D
         bool flatPlane = (p1Cfg.zHeightMode == P1ZHeightMode.Flat2DPlane);
         for (int i = 0; i < rawRegions2D.Count; i++)
-            p1Result.rawTargetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(rawRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY));
+            p1Result.rawTargetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(rawRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY, overlayLiftM: flatPlane ? 0f : 0.002f));
         for (int i = 0; i < safeRegions2D.Count; i++)
-            p1Result.safeErodedRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(safeRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY));
+            p1Result.safeErodedRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(safeRegions2D[i], ctrl, plyLoader, flatPlane, avgClothY, overlayLiftM: flatPlane ? 0f : 0.002f));
 
         p1Result.areaRawCm2 = totalRawSqM * 10000f;
         p1Result.areaSafeCm2 = totalSafeSqM * 10000f;
@@ -3153,7 +3196,7 @@ public static class TrajectoryEvaluationEngine
     /// Khi `preferFullGarmentSplit = true` (dùng cho P2): ưu tiên tách toàn bộ 2 ống quần đầy đủ từ đùi xuống gấu dựa trên `garmentContourWorld`,
     /// tự nhận diện chính xác đầu cạp (đặc ở trục giữa v=0) vs đầu gấu (tách 2 ống trống ở v=0) — KHÔNG cần 12 mốc AI!
     /// </summary>
-    private static List<List<Vector2>> ExtractLegMaskPolygonsFromMask2D(DobotCR10AIKController ctrl, float dpEpsM, bool preferFullGarmentSplit = false)
+    internal static List<List<Vector2>> ExtractLegMaskPolygonsFromMask2D(DobotCR10AIKController ctrl, float dpEpsM, bool preferFullGarmentSplit = false)
     {
         var legs = new List<List<Vector2>>();
         if (ctrl == null) return legs;
@@ -3558,6 +3601,9 @@ public static class TrajectoryEvaluationEngine
 
         // Bước 1: Tách đầy đủ 2 vùng Mask ống quần trái/phải từ toàn bộ `garmentContourWorld` (đùi -> gấu, KHÔNG bị bó vào ô đùi nhỏ!)
         var legMaskPolys = ExtractLegMaskPolygonsFromMask2D(ctrl, 0.004f, preferFullGarmentSplit: true);
+        var drawnRegionPolys = p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion && ctrl.HasCustomDrawnRegions2D
+            ? ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader)
+            : null;
         if (legMaskPolys.Count == 0 && has12Landmarks)
         {
             AnatomicalLegChain chL = BuildLegChain(dst12XZ, true);
@@ -3569,6 +3615,12 @@ public static class TrajectoryEvaluationEngine
         }
         if (legMaskPolys.Count == 0)
         {
+            if (drawnRegionPolys != null)
+                legMaskPolys.AddRange(drawnRegionPolys);
+        }
+        if (legMaskPolys.Count == 0)
+        {
+            p2Exec.summaryText = "P2 chưa có mask ống quần hoặc vùng vẽ kín ánh xạ được lên phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
@@ -3586,6 +3638,7 @@ public static class TrajectoryEvaluationEngine
         }
         if (legSpines.Count == 0)
         {
+            p2Exec.summaryText = "P2 không tìm được trục giữa. Kiểm tra vùng vẽ có đủ bề rộng và nằm trên phôi.";
             genTimeSec = Time.realtimeSinceStartup - t0;
             return new List<DobotCR10AIKController.WaypointData>();
         }
@@ -3606,18 +3659,17 @@ public static class TrajectoryEvaluationEngine
             for (int i = 0; i < ctrl.garmentContourWorld.Count; i++) sumY += ctrl.garmentContourWorld[i].y;
             flatY = sumY / ctrl.garmentContourWorld.Count;
         }
-        if (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D)
+        if (flat2DMode)
             flatY = GetHighestGarmentSurfaceY(ctrl, plyLoader, flatY);
 
         if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
         {
-            if (ctrl.HasCustomDrawnRegions2D)
+            if (drawnRegionPolys != null)
             {
-                var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
-                for (int i = 0; i < directRegionsXZ.Count; i++)
+                for (int i = 0; i < drawnRegionPolys.Count; i++)
                 {
-                    if (directRegionsXZ[i] != null && directRegionsXZ[i].Count >= 3)
-                        targetPolysXZ.Add(directRegionsXZ[i]);
+                    if (drawnRegionPolys[i] != null && drawnRegionPolys[i].Count >= 3)
+                        targetPolysXZ.Add(drawnRegionPolys[i]);
                 }
             }
             else if (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0)
@@ -3681,7 +3733,7 @@ public static class TrajectoryEvaluationEngine
         // Lưu đa giác 3D "Chỗ cần phun" và Trục giữa (Skeleton) thật của 2 ống quần trên bề mặt vải
         for (int i = 0; i < targetPolysXZ.Count; i++)
         {
-            p2Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(targetPolysXZ[i], ctrl, plyLoader, flat2DMode, flatY));
+            p2Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(targetPolysXZ[i], ctrl, plyLoader, flat2DMode, flatY, overlayLiftM: flat2DMode ? 0f : 0.002f));
         }
         for (int li = 0; li < legSpines.Count; li++)
         {
@@ -3690,8 +3742,8 @@ public static class TrajectoryEvaluationEngine
             for (int k = 0; k < sp.C.Count; k++)
             {
                 Vector2 cPt = sp.C[k];
-                float yC = flat2DMode ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, cPt.x, cPt.y);
-                skelPts.Add(new Vector3(cPt.x, yC + 0.003f, cPt.y));
+                float yC = flat2DMode ? flatY : SampleSurfaceHeightOnly(ctrl, plyLoader, cPt.x, cPt.y) + 0.003f;
+                skelPts.Add(new Vector3(cPt.x, yC, cPt.y));
             }
             p2Exec.skeletonAxesWorld.Add(skelPts);
         }
@@ -3864,13 +3916,12 @@ public static class TrajectoryEvaluationEngine
 
         // Bước 7 & 8: Gán tọa độ Z, hướng súng, bật/tắt súng theo từng đoạn và kiểm tra quỹ đạo
         bool useFixedVert = (p2Cfg.gunOrientation != P2GunOrientationMode.SmoothSurfaceNormal25D);
-        bool useFlat2D = (p2Cfg.gunOrientation == P2GunOrientationMode.FlatPlane2D);
 
         var wps = BuildSprayWaypointsFromWorldStrokes(
             strokesWorld, ctrl, plyLoader, tech,
             p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel ? "P2_SKELETON" : "P2_OFFSET",
             useFixedVerticalNormal: useFixedVert,
-            useFlatPlaneZ: useFlat2D,
+            useFlatPlaneZ: flat2DMode,
             flatPlaneWorldY: flatY,
             overrideStandoffMm: p2Cfg.sprayDistanceDMm,
             perPointSprayOn: perPassSprayFlags);
@@ -5422,10 +5473,15 @@ public static class TrajectoryEvaluationEngine
             : new List<Vector3>();
         p4Exec.targetVoxelCount = targetCloud3D.Count;
 
+        string targetSampleName = ctrl.GetActiveCloudSampleName();
+        bool hasSavedReference = ctrl.templateReferenceCloud3DWorld != null &&
+            ctrl.templateReferenceCloud3DWorld.Count >= 30 &&
+            ctrl.templateReferenceStrokes3DWorld != null && ctrl.templateReferenceStrokes3DWorld.Count > 0;
+
         // Chuẩn bị quỹ đạo mẫu 3D (nếu người dùng vừa vẽ hình Tròn/Vuông/Đa giác trực tiếp trên phôi hiện tại, trích luôn thành đường mẫu 3D!)
         List<List<Vector3>> activeRefStrokes3D = null;
         if (ctrl.HasCustomDrawnRegions2D &&
-            (string.IsNullOrEmpty(ctrl.templateReferenceSampleName) || ctrl.templateReferenceSampleName == ctrl.GetActiveCloudSampleName()))
+            (!hasSavedReference || ctrl.templateReferenceSampleName == targetSampleName))
         {
             var directRegionsXZ = ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
             float fillStepM = ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f;
@@ -5461,32 +5517,27 @@ public static class TrajectoryEvaluationEngine
             if (built.Count > 0)
             {
                 activeRefStrokes3D = built;
-                if (ctrl.templateReferenceCloud3DWorld.Count < 30 && targetCloud3D.Count >= 30)
-                {
-                    ctrl.templateReferenceCloud3DWorld = new List<Vector3>(targetCloud3D);
-                    ctrl.templateReferenceStrokes3DWorld = built;
-                    ctrl.templateReferenceSampleName = ctrl.GetActiveCloudSampleName();
-                    if (ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12)
-                        ctrl.templateReferenceLandmarks3D = new List<Vector3>(ctrl.landmarksWorldPos);
-                }
             }
         }
-        if (activeRefStrokes3D == null && ctrl.templateReferenceStrokes3DWorld != null && ctrl.templateReferenceStrokes3DWorld.Count > 0)
+        if (activeRefStrokes3D == null && hasSavedReference)
         {
             activeRefStrokes3D = ctrl.templateReferenceStrokes3DWorld;
         }
 
+        // A preview built from the current phôi must not become the 3D reference for another phôi.
+        var srcCloud = hasSavedReference ? ctrl.templateReferenceCloud3DWorld : targetCloud3D;
+        var srcLandmarks = hasSavedReference ? ctrl.templateReferenceLandmarks3D : ctrl.landmarksWorldPos;
+
         // NHÁNH CHÍNH CHUẨN P4 (9 BƯỚC TRANG 8): ĐĂNG KÝ ĐÁM MÂY ĐIỂM 3D THẬT (SOURCE CLOUD -> TARGET CLOUD)
-        bool hasRefCloud3D = (ctrl.templateReferenceCloud3DWorld != null && ctrl.templateReferenceCloud3DWorld.Count >= 30
-            && activeRefStrokes3D != null && activeRefStrokes3D.Count > 0
-            && targetCloud3D.Count >= 30);
+        bool hasRefCloud3D = srcCloud.Count >= 30 && targetCloud3D.Count >= 30 &&
+            activeRefStrokes3D != null && activeRefStrokes3D.Count > 0;
 
         if (hasRefCloud3D)
         {
-            var srcCloud = ctrl.templateReferenceCloud3DWorld;
             p4Exec.sourceVoxelCount = srcCloud.Count;
+            p4Exec.sourceSampleName = hasSavedReference ? ctrl.templateReferenceSampleName : targetSampleName;
 
-            bool hasBoth12Lm = (ctrl.templateReferenceLandmarks3D != null && ctrl.templateReferenceLandmarks3D.Count >= 12
+            bool hasBoth12Lm = (srcLandmarks != null && srcLandmarks.Count >= 12
                 && ctrl.landmarksWorldPos != null && ctrl.landmarksWorldPos.Count >= 12);
             bool useLandmarksInit = (p4Cfg.initMode == P4InitMode.LandmarksP3Only && hasBoth12Lm)
                 || (p4Cfg.initMode == P4InitMode.AutoLandmarksOrPca && hasBoth12Lm);
@@ -5497,11 +5548,11 @@ public static class TrajectoryEvaluationEngine
             float initScale = 1f;
             if (useLandmarksInit)
             {
-                SolveKabschRigid3D(ctrl.templateReferenceLandmarks3D, ctrl.landmarksWorldPos, out initRot, out initCSrc, out initCDst);
+                SolveKabschRigid3D(srcLandmarks, ctrl.landmarksWorldPos, out initRot, out initCSrc, out initCDst);
                 float rS = 0f, rD = 0f;
                 for (int i = 0; i < 12; i++)
                 {
-                    rS += (ctrl.templateReferenceLandmarks3D[i] - initCSrc).magnitude;
+                    rS += (srcLandmarks[i] - initCSrc).magnitude;
                     rD += (ctrl.landmarksWorldPos[i] - initCDst).magnitude;
                 }
                 if (rS > 1e-4f) initScale = Mathf.Clamp(rD / rS, 0.72f, 1.38f);
@@ -5564,7 +5615,7 @@ public static class TrajectoryEvaluationEngine
                 {
                     for (int i = 0; i < 12; i++)
                     {
-                        Vector3 lmInit = initRot * ((ctrl.templateReferenceLandmarks3D[i] - initCSrc) * initScale) + initCDst;
+                        Vector3 lmInit = initRot * ((srcLandmarks[i] - initCSrc) * initScale) + initCDst;
                         Vector3 lmIcp = icpRot * lmInit + icpTrans;
                         tpsSrc3D.Add(lmIcp);
                         tpsDst3D.Add(ctrl.landmarksWorldPos[i]);
@@ -5709,6 +5760,7 @@ public static class TrajectoryEvaluationEngine
                 p4Exec.strokeCount = p4SurfaceStrokes3D.Count;
                 ComputeSprayAndTravelLengths(wps3D, out p4Exec.totalSprayLengthMm, out p4Exec.totalTravelLengthMm);
                 p4Exec.summaryText =
+                    (hasSavedReference ? $"Mẫu 3D [{p4Exec.sourceSampleName}] | " : "Vùng vẽ trên phôi hiện tại | ") +
                     $"{p4Exec.initMethodUsed} -> ICP3D -> {p4Exec.nonRigidMethodUsed} (Bám mặt 3D PCA) | " +
                     $"Dư: Init {p4Exec.residualAfterInitMm:F1} -> ICP {p4Exec.residualAfterIcpMm:F1} -> Final {p4Exec.residualAfterNonRigidMm:F2} mm | " +
                     $"Chiếu mặt 3D: {p4Exec.meanSurfaceSnapShiftMm:F1} mm";
@@ -7448,7 +7500,7 @@ public static class TrajectoryEvaluationEngine
     }
 
     // =========================================================================
-    // 7. MÔ HÌNH BÀN THAO TÁC CÓ COLLIDER & KHUÔN CHÂN ĐỨNG 3D (ĐỢT 3 - PHẢN BIỆN #8)
+    // 7. MÔ HÌNH BÀN THAO TÁC CÓ COLLIDER
     // =========================================================================
 
     public static GameObject EnsurePhysicalWorktable(Transform parent, float tableTopYWorld = 0.0f, GameObject existingTable = null)
@@ -7473,120 +7525,5 @@ public static class TrajectoryEvaluationEngine
         tbl.transform.localScale = new Vector3(1.50f, 0.05f, 1.25f);
         tbl.SetActive(true);
         return tbl;
-    }
-
-    /// <summary>
-    /// Tạo / Bật mô hình Khuôn Chân Đứng 3D (Standing Leg Mannequin Mold) và chạy kiểm chứng
-    /// tầm với 6-DOF + hướng súng pháp tuyến quanh mặt cong 180° (trả lời Phản biện #8).
-    /// </summary>
-    public static List<DobotCR10AIKController.WaypointData> GenerateStandingMold3DReachTest(
-        DobotCR10AIKController ctrl,
-        SprayTechParams tech,
-        ref GameObject standingMoldObj,
-        out string reachSummary)
-    {
-        if (standingMoldObj == null)
-        {
-            standingMoldObj = new GameObject("StandingLegMold_3D");
-            // 2 ống chân đứng dạng trụ côn (mô phỏng khuôn ma-nơ-canh denim)
-            for (int leg = 0; leg < 2; leg++)
-            {
-                GameObject cyl = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                cyl.name = leg == 0 ? "MoldLeg_Left" : "MoldLeg_Right";
-                cyl.transform.SetParent(standingMoldObj.transform, false);
-                cyl.transform.localPosition = new Vector3(leg == 0 ? -0.14f : 0.14f, 0.45f, 0f);
-                cyl.transform.localScale = new Vector3(0.16f, 0.45f, 0.16f);
-                var mr = cyl.GetComponent<MeshRenderer>();
-                if (mr != null)
-                {
-                    Shader sh = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
-                    Material mat = new Material(sh);
-                    mat.color = new Color(0.20f, 0.34f, 0.56f, 1f);
-                    mr.sharedMaterial = mat;
-                }
-            }
-        }
-        standingMoldObj.SetActive(true);
-        // Đặt khuôn đứng phía trước robot cách đế ~0.78m (Z_world = 0.32m khi Global Z = 1.1m)
-        standingMoldObj.transform.position = new Vector3(0f, 0.0f, 0.32f);
-
-        var wps = new List<DobotCR10AIKController.WaypointData>();
-        Transform gRef = ctrl.globalReference;
-        float standoffM = Mathf.Clamp(tech.standoffMm, 60f, 180f) * 0.001f;
-        float legRadiusM = 0.08f;
-        int wpIdx = 0;
-        int solved = 0;
-        float[] prevQ = null;
-
-        // Quét cắt lát bề mặt cong 3D theo góc cung -75°..+75° (mặt trước hướng về robot) & cao độ Y = 0.25m..0.78m
-        float[] legXs = { -0.14f, 0.14f };
-        int rings = 6;
-        int arcSteps = 7;
-
-        for (int leg = 0; leg < 2; leg++)
-        {
-            for (int r = 0; r < rings; r++)
-            {
-                float wy = Mathf.Lerp(0.25f, 0.78f, (float)r / (rings - 1));
-                bool rev = (r % 2 == 1);
-                for (int a = 0; a < arcSteps; a++)
-                {
-                    float frac = rev ? (1f - (float)a / (arcSteps - 1)) : ((float)a / (arcSteps - 1));
-                    float angDeg = Mathf.Lerp(-70f, 70f, frac);
-                    float rad = angDeg * Mathf.Deg2Rad;
-
-                    // Pháp tuyến hướng ra ngoài từ tâm ống chân về phía robot (+Z world)
-                    Vector3 normW = new Vector3(Mathf.Sin(rad), 0f, Mathf.Cos(rad)).normalized;
-                    Vector3 surfW = new Vector3(legXs[leg], wy, 0.32f) + normW * legRadiusM;
-                    Vector3 tcpW = surfW + normW * standoffM;
-
-                    Vector3 tcpRobotMm = gRef != null
-                        ? gRef.InverseTransformPoint(tcpW) * 1000f
-                        : new Vector3((1.100f - tcpW.z) * 1000f, -tcpW.x * 1000f, tcpW.y * 1000f);
-                    Vector3 normRobot = gRef != null
-                        ? gRef.InverseTransformDirection(normW).normalized
-                        : new Vector3(-normW.z, -normW.x, normW.y).normalized;
-
-                    Vector3 rpy = DobotCR10AKinematics.SurfaceNormalToRobotRpyDeg(
-                        normRobot, new Vector3(0f, 0f, 1f), maxTiltDeg: 85f, referenceUpRobot: normRobot);
-
-                    var wp = new DobotCR10AIKController.WaypointData
-                    {
-                        index = wpIdx++,
-                        targetPosGlobal_mm = tcpRobotMm,
-                        targetPosWorld_m = tcpW,
-                        microNormal = normW,
-                        roll_deg = rpy.x,
-                        pitch_deg = rpy.y,
-                        yaw_deg = rpy.z,
-                        sprayOn = (a > 0),
-                        segmentName = $"MOLD3D_L{leg + 1}_R{r + 1}"
-                    };
-
-                    Quaternion qRot = DobotCR10AKinematics.RpyToUnityRotation(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
-                    var sols = DobotCR10AKinematics.SolveTcpPose(
-                        wp.targetPosGlobal_mm, qRot, prevQ, ctrl.toolLength,
-                        useAdaptiveTilt: false, toolOffsetX: ctrl.toolOffsetX, toolOffsetY: ctrl.toolOffsetY);
-                    if (sols != null && sols.Count > 0)
-                    {
-                        for (int j = 0; j < 6; j++)
-                        {
-                            wp.jointAngles_rad[j] = (float)sols[0].jointsRad[j];
-                            wp.jointAngles_deg[j] = (float)sols[0].jointsDeg[j];
-                        }
-                        wp.isSolved = true;
-                        wp.posError_mm = (float)sols[0].positionErrorMm;
-                        wp.selectedBranchName = sols[0].branchName;
-                        prevQ = wp.jointAngles_rad;
-                        solved++;
-                    }
-                    wps.Add(wp);
-                }
-            }
-        }
-
-        float pct = wps.Count > 0 ? (float)solved / wps.Count * 100f : 0f;
-        reachSummary = $"Khuôn đứng 3D (cung 140°, cao 250–780 mm): Khả thi 6-DOF = {solved}/{wps.Count} ({pct:F1}%) với Dobot CR10A!";
-        return wps;
     }
 }
