@@ -438,6 +438,7 @@ public class DobotCR10AIKController : MonoBehaviour
         public Rect rectUV = Rect.zero;
         public List<Vector2> verticesUV = new List<Vector2>();
         public List<Vector2> canonicalVerticesUV = new List<Vector2>(); // Tọa độ UV tương đối trong không gian quần chuẩn (cho P3 Barycentric khi đổi phôi)
+        [NonSerialized] public bool projectedFromTemplate;
     }
 
     private CanvasDrawTool activeDrawTool = CanvasDrawTool.Freehand;
@@ -3042,6 +3043,7 @@ public class DobotCR10AIKController : MonoBehaviour
             var dst = new DrawnRegion2D
             {
                 shapeType = src.shapeType,
+                projectedFromTemplate = true,
                 brushWidthMm = src.brushWidthMm > 0.4f ? src.brushWidthMm : sprayWidthMm,
                 verticesUV = new List<Vector2>(src.verticesUV.Count),
                 // Bảo toàn chính xác tọa độ canonical gốc (tránh biến dạng lặp 2 lần khi chạy P3/P4!)
@@ -7104,8 +7106,12 @@ public class DobotCR10AIKController : MonoBehaviour
         return 1.62f;
     }
 
+    private bool canvasStrokesProjectedFromTemplate;
+
     private void CaptureCurrentStrokesToCanonical()
     {
+        canvasStrokesProjectedFromTemplate = false;
+        ClearP4ReferenceTemplate();
         canonicalPatternStrokes.Clear();
         if (customDrawnStrokes == null || customDrawnStrokes.Count == 0) return;
 
@@ -7153,38 +7159,14 @@ public class DobotCR10AIKController : MonoBehaviour
             strokesProjectedSampleName = GetActiveCloudSampleName();
         }
 
-        // Xóa cache mẫu 3D cũ của P4 để không bao giờ phát lại nét vẽ cũ sau khi người dùng sửa/vẽ nét mới!
+    }
+
+    private void ClearP4ReferenceTemplate()
+    {
+        templateReferenceCloud3DWorld.Clear();
+        templateReferenceLandmarks3D.Clear();
         templateReferenceStrokes3DWorld.Clear();
-        if (plyLoader != null && customDrawnStrokes.Count > 0)
-        {
-            var refCloud = plyLoader.ExtractGarmentSurfaceCloudVoxelized(0.005f, garmentContourWorld, 520);
-            if (refCloud != null && refCloud.Count >= 30)
-            {
-                var liftedStrokes = new List<List<Vector3>>();
-                for (int s = 0; s < customDrawnStrokes.Count; s++)
-                {
-                    var st = customDrawnStrokes[s];
-                    if (st == null || st.Count < 2) continue;
-                    var resamp = ResampleStroke2D(st, 0.018f);
-                    var st3D = new List<Vector3>(resamp.Count);
-                    for (int p = 0; p < resamp.Count; p++)
-                    {
-                        if (plyLoader.TrySampleCameraUVToWorld(resamp[p], out Vector3 surfW, out _))
-                            st3D.Add(surfW);
-                    }
-                    if (st3D.Count >= 2) liftedStrokes.Add(st3D);
-                }
-                if (liftedStrokes.Count > 0)
-                {
-                    templateReferenceCloud3DWorld = refCloud;
-                    templateReferenceStrokes3DWorld = liftedStrokes;
-                    templateReferenceSampleName = GetActiveCloudSampleName();
-                    templateReferenceLandmarks3D = (landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
-                        ? new List<Vector3>(landmarksWorldPos)
-                        : new List<Vector3>();
-                }
-            }
-        }
+        templateReferenceSampleName = "";
     }
 
     private bool ReprojectCanonicalPatternOntoCurrentCameraImage()
@@ -7239,6 +7221,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
             customDrawnStrokes.Add(dst);
         }
+        canvasStrokesProjectedFromTemplate = true;
 
         if (canvasUsingRealCamera && camLmUV != null)
         {
@@ -7733,6 +7716,7 @@ public class DobotCR10AIKController : MonoBehaviour
     private void DeleteSelectedRegion2D()
     {
         if (selectedRegionIndex < 0 || selectedRegionIndex >= customDrawnRegions.Count) return;
+        ClearP4ReferenceTemplate();
         customDrawnRegions.RemoveAt(selectedRegionIndex);
         selectedRegionIndex = Mathf.Clamp(selectedRegionIndex, -1, customDrawnRegions.Count - 1);
         activeRegionEditMode = RegionEditMode.None;
@@ -8236,6 +8220,8 @@ public class DobotCR10AIKController : MonoBehaviour
                 ApplyActiveRegionEditDrag(normUV, canvasRect, ev.shift);
                 if (selectedRegionIndex >= 0 && selectedRegionIndex < customDrawnRegions.Count)
                 {
+                    ClearP4ReferenceTemplate();
+                    customDrawnRegions[selectedRegionIndex].projectedFromTemplate = false;
                     CaptureRegionCanonicalVertices(customDrawnRegions[selectedRegionIndex], hasRealLandmarks, curLandmarksUV);
                 }
                 activeRegionEditMode = RegionEditMode.None;
@@ -8493,6 +8479,7 @@ public class DobotCR10AIKController : MonoBehaviour
             verticesUV = BuildCirclePolygonFromCenterRadiusUV(centerUV, radiusUV, 48)
         };
         CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
+        ClearP4ReferenceTemplate();
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
@@ -8524,6 +8511,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         };
         CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
+        ClearP4ReferenceTemplate();
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
@@ -8559,6 +8547,7 @@ public class DobotCR10AIKController : MonoBehaviour
             verticesUV = new List<Vector2>(polyUV)
         };
         CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
+        ClearP4ReferenceTemplate();
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
@@ -8620,7 +8609,7 @@ public class DobotCR10AIKController : MonoBehaviour
         }
     }
 
-    public List<List<Vector2>> GetCustomDrawnRegionCanonicalPolygonsUV()
+    public List<List<Vector2>> GetCustomDrawnRegionCanonicalPolygonsUV(bool onlyProjectedRegions = false)
     {
         var list = new List<List<Vector2>>();
         if (customDrawnRegions == null || customDrawnRegions.Count == 0) return list;
@@ -8631,7 +8620,7 @@ public class DobotCR10AIKController : MonoBehaviour
         for (int r = 0; r < customDrawnRegions.Count; r++)
         {
             var reg = customDrawnRegions[r];
-            if (reg == null) continue;
+            if (reg == null || (onlyProjectedRegions && !reg.projectedFromTemplate)) continue;
             if (reg.canonicalVerticesUV == null || reg.canonicalVerticesUV.Count < 3)
             {
                 CaptureRegionCanonicalVertices(reg, hasRealLm, camLmUV);
@@ -8665,6 +8654,18 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private delegate bool TryProjectCanvasPoint(Vector2 uv, out Vector2 pointXZ);
 
+    private bool CanvasHasMatchingDepth(PLYDirectLoader plyLoader)
+    {
+        if (plyLoader == null) return false;
+        if (realCameraFileTex == null)
+            return plyLoader.hasOrganizedCameraFrame || plyLoader.hasTopDownCameraTexture;
+
+        return plyLoader.hasOrganizedCameraFrame &&
+            realCameraLoadedSample == plyLoader.currentLoadedSampleName &&
+            realCameraFileTex.width == plyLoader.cameraImageWidth &&
+            realCameraFileTex.height == plyLoader.cameraImageHeight;
+    }
+
     private TryProjectCanvasPoint CreateCanvasToWorldXZProjection(PLYDirectLoader plyLoader)
     {
         Texture2D activeCamTex = GetActiveRealCameraTexture(out PLYDirectLoader foundPly, out int nativeW, out int nativeH, out _);
@@ -8681,8 +8682,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
         // Xây dựng phép ánh xạ tuyến tính toàn cục (Affine 2D) từ UV camera -> World XZ để bù các pixel thiếu chiều sâu
         // mà vẫn bảo toàn 100% độ thẳng cạnh hình vuông và độ tròn đều của hình tròn!
-        bool hasDirectCameraGrid = (realCameraFileTex == null && plyLoader != null &&
-                                    (plyLoader.hasOrganizedCameraFrame || plyLoader.hasTopDownCameraTexture));
+        bool hasDirectCameraGrid = CanvasHasMatchingDepth(plyLoader);
         bool hasAffineCamToWorld = false;
         double[] affX = null, affZ = null;
 
@@ -8743,13 +8743,16 @@ public class DobotCR10AIKController : MonoBehaviour
         return TryMapUvExact;
     }
 
-    public List<List<Vector2>> GetCustomDrawnRegionPolygonsWorldXZ(PLYDirectLoader plyLoader)
+    public List<List<Vector2>> GetCustomDrawnRegionPolygonsWorldXZ(PLYDirectLoader plyLoader, bool onlyLocalRegions = false)
     {
-        return ProjectCanvasGeometry(customDrawnRegions, region => region?.verticesUV, 3, plyLoader);
+        return ProjectCanvasGeometry(customDrawnRegions,
+            region => region == null || (onlyLocalRegions && region.projectedFromTemplate) ? null : region.verticesUV,
+            3, plyLoader);
     }
 
-    internal List<List<Vector2>> GetCustomDrawnStrokesWorldXZ(PLYDirectLoader plyLoader)
+    internal List<List<Vector2>> GetCustomDrawnStrokesWorldXZ(PLYDirectLoader plyLoader, bool onlyLocalStrokes = false)
     {
+        if (onlyLocalStrokes && canvasStrokesProjectedFromTemplate) return new List<List<Vector2>>();
         return ProjectCanvasGeometry(customDrawnStrokes, stroke => stroke, 2, plyLoader);
     }
 
@@ -9112,6 +9115,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
         if (undoRegion && customDrawnRegions.Count > 0)
         {
+            ClearP4ReferenceTemplate();
             customDrawnRegions.RemoveAt(customDrawnRegions.Count - 1);
             selectedRegionIndex = Mathf.Clamp(selectedRegionIndex, -1, customDrawnRegions.Count - 1);
             activeRegionEditMode = RegionEditMode.None;
@@ -10719,10 +10723,7 @@ public class DobotCR10AIKController : MonoBehaviour
         lastP2Result = null;
         lastP3Result = null;
         lastP4Result = null;
-        templateReferenceCloud3DWorld.Clear();
-        templateReferenceLandmarks3D.Clear();
-        templateReferenceStrokes3DWorld.Clear();
-        templateReferenceSampleName = "";
+        ClearP4ReferenceTemplate();
         customDrawnStrokes.Clear();
         canonicalPatternStrokes.Clear();
         projectedTargetRegionR2D.Clear();
@@ -14592,7 +14593,7 @@ public class DobotCR10AIKController : MonoBehaviour
         canvasUsingRealCamera = (activeCamTex != null);
         Vector2[] targetCanvasLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, canvasUsingRealCamera, out bool hasRealLm);
 
-        bool usePlyDirectUv = (realCameraFileTex == null && plyLoader != null && (plyLoader.hasTopDownCameraTexture || plyLoader.hasOrganizedCameraFrame));
+        bool usePlyDirectUv = CanvasHasMatchingDepth(plyLoader);
         bool useAffineWorldToUv = false;
         double[] coefU = null, coefV = null;
 
@@ -14603,7 +14604,17 @@ public class DobotCR10AIKController : MonoBehaviour
             Vector2[] dstUv12 = (canvasUsingRealCamera && hasRealLm && targetCanvasLmUV != null)
                 ? targetCanvasLmUV
                 : GetCanonicalLandmarks12UV(activeSprayTemplateSize);
-            useAffineWorldToUv = FitAffine2D(worldLmXZ, dstUv12, out coefU, out coefV);
+            // Invert the same camera-to-world affine used when reading the drawing.
+            if (FitAffine2D(dstUv12, worldLmXZ, out var x, out var z))
+            {
+                double det = x[1] * z[2] - x[2] * z[1];
+                if (Math.Abs(det) > 1e-12)
+                {
+                    coefU = new[] { (x[2] * z[0] - z[2] * x[0]) / det, z[2] / det, -x[2] / det };
+                    coefV = new[] { (z[1] * x[0] - x[1] * z[0]) / det, -z[1] / det, x[1] / det };
+                    useAffineWorldToUv = true;
+                }
+            }
         }
 
         // Luôn chiếu lớp CHỖ CẦN PHUN (Vùng R & R_safe) dù quỹ đạo có trống hay không (ví dụ e quá lớn)
@@ -14764,24 +14775,29 @@ public class DobotCR10AIKController : MonoBehaviour
             : new List<Vector3>();
 
         templateReferenceStrokes3DWorld.Clear();
-        float standoffM = Mathf.Max(0f, customDrawZOffsetMm) * 0.001f;
-        List<Vector3> cur = null;
-        string curSeg = null;
-        for (int i = 0; i < waypoints.Count; i++)
+        float standoffM = GetActiveTrajectoryStandoffM();
+        Vector3 SurfacePoint(WaypointData waypoint)
+        {
+            Vector3 normal = waypoint.microNormal.sqrMagnitude > 1e-4f ? waypoint.microNormal.normalized : Vector3.up;
+            return waypoint.targetPosWorld_m - normal * (standoffM + waypoint.occlusionExtraStandoffM);
+        }
+
+        List<Vector3> stroke = null;
+        for (int i = 1; i < waypoints.Count; i++)
         {
             var wp = waypoints[i];
-            Vector3 nrm = wp.microNormal.sqrMagnitude > 1e-4f ? wp.microNormal.normalized : Vector3.up;
-            Vector3 surfPt = wp.targetPosWorld_m - nrm * standoffM;
-            bool startNew = (cur == null) || (!wp.sprayOn) || (!string.IsNullOrEmpty(wp.segmentName) && wp.segmentName != curSeg);
-            if (startNew)
+            if (!wp.sprayOn)
             {
-                if (cur != null && cur.Count >= 2) templateReferenceStrokes3DWorld.Add(cur);
-                cur = new List<Vector3>();
-                curSeg = wp.segmentName;
+                stroke = null;
+                continue;
             }
-            cur.Add(surfPt);
+            if (stroke == null)
+            {
+                stroke = new List<Vector3> { SurfacePoint(waypoints[i - 1]) };
+                templateReferenceStrokes3DWorld.Add(stroke);
+            }
+            stroke.Add(SurfacePoint(wp));
         }
-        if (cur != null && cur.Count >= 2) templateReferenceStrokes3DWorld.Add(cur);
     }
 
     public void SetCurrentTrajectoryAsGroundTruth()
@@ -14949,7 +14965,7 @@ public class DobotCR10AIKController : MonoBehaviour
         bool hasMaskData = (garmentContourWorld != null && garmentContourWorld.Count >= 6)
             || (sprayZoneLeftWorld != null && sprayZoneLeftWorld.Count >= 4)
             || (sprayZoneRightWorld != null && sprayZoneRightWorld.Count >= 4)
-            || HasCustomDrawnRegions2D;
+            || HasCustomDrawnRegions2D || HasCustomDrawnStrokes2D;
         bool hasP4Ref3D = (templateReferenceCloud3DWorld != null && templateReferenceCloud3DWorld.Count >= 30
             && templateReferenceStrokes3DWorld != null && templateReferenceStrokes3DWorld.Count > 0);
 
