@@ -54,9 +54,11 @@ class Step3TrajectoryPipeline3D:
         for weight in (seg_weight, pose_weight):
             if not weight.is_file():
                 raise FileNotFoundError(f"Model weight missing: {weight}")
+        self.seg_weight_path = Path(seg_weight)
+        self.pose_weight_path = Path(pose_weight)
         self.core_3d = AutoLabeling3D()
-        self.model_seg = YOLO(str(seg_weight))
-        self.model_pose = YOLO(str(pose_weight))
+        self.model_seg = YOLO(str(self.seg_weight_path))
+        self.model_pose = YOLO(str(self.pose_weight_path))
 
         self.standoff_mm = float(standoff_mm)
         self.sigma_mm = float(spray_cone_sigma_mm)
@@ -65,6 +67,15 @@ class Step3TrajectoryPipeline3D:
 
         self.out_dir = Path(__file__).resolve().parent / "outputs"
         self.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def reload_pose_model(self, pose_weight=None):
+        """Nạp lại trọng số YOLO11-pose sau khi fine-tune bằng các mẫu sửa mốc."""
+        target = Path(pose_weight) if pose_weight else self.pose_weight_path
+        if not target.is_file():
+            raise FileNotFoundError(f"Pose weight missing: {target}")
+        self.pose_weight_path = target
+        self.model_pose = YOLO(str(target))
+        return str(target)
 
     # ------------------------------------------------------------------
     # 1. SUY LUẬN AI (YOLO11-SEG + YOLO11-POSE)

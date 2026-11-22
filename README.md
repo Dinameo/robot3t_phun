@@ -28,11 +28,13 @@ Trong bài toán phun sơn / cào sờn hoa văn lên phôi quần đặt trên 
 
 **Các khối chức năng cốt lõi đã triển khai:**
 
-1. **AI Vision (YOLO11s-Pose & YOLO11s-Seg)**: Phân đoạn biên thân quần và định vị 12 điểm mốc giải phẫu cốt lõi (`waist`, `crotch`, `thigh`, `knee`, `cuff`).
-2. **Chiếu 3D & Sinh Quỹ Đạo (P1 / P3 / P4 + TPS RBF)**: Chiếu 2D → 3D theo đám mây điểm Zivid, tính pháp tuyến vi mô bề mặt vải, tự co giãn mẫu phun theo Size S/M/L.
+1. **AI Vision (YOLO11s-Pose & YOLO11s-Seg) + Học chủ động (Active Learning)**: Phân đoạn biên thân quần, định vị 12 điểm mốc giải phẫu (`waist`, `crotch`, `thigh`, `knee`, `cuff`); cho phép người vận hành **đánh lại/kéo sửa 12 mốc trực tiếp trên ảnh 2D** khi AI dự đoán sai, lưu mẫu sửa và **tự động train lại (fine-tune) YOLO11-pose + hot-reload model mới khi đủ 10 mẫu sai**.
+2. **Sinh Quỹ Đạo Đa Phương Pháp (P1 / P2 / P3 / P4) & Dạy Phun 1 → N**:
+   - **P1 (Zigzag 2D)** & **P2 (Trục giữa Skeleton / Offset biên 2D)**: mặc định phun thẳng góc xuống mặt phẳng 2D từ Mask 2D (vẫn hỗ trợ tùy chọn 2.5D để đối chứng).
+   - **P3 (12 Mốc Barycentric 32 tam giác)** & **P4 (Đăng ký đám mây điểm 3D ICP + CPD/TPS + chốt sai số dư)**: ánh xạ mẫu vẽ hình cơ bản (`Vẽ tay`, `Tròn`, `Vuông`, `Đa giác`, giữ nguyên vùng fill và cỡ cọ `1–50 mm`) từ 1 phôi chuẩn sang nhiều phôi `.ply` chọn qua **File Explorer** với thanh tiến trình xử lý, lưu riêng tại `output_drawing/applied_batch_samples/` để tự nạp lại, xem hoặc đổi sang phun sơn tức thời.
 3. **Bù Đắp Chỗ Khuất & 3D Surface Mesh**: Chuyển Point Cloud thành lưới bề mặt 3D nhẹ (1 Draw Call) kèm 5 phương pháp vá vùng khuất (K-NN MLS/PCA, TPS RBF, Poisson/Laplacian PDE, Adaptive Gun Tilt, đối xứng 2 ống).
-4. **Hiệu Chuẩn Camera – Robot (Eye-to-Hand 4×4)**: Tinh chỉnh trực tiếp tọa độ/góc camera (`Tx, Ty, Tz, Roll, Pitch, Yaw`), giải ma trận cứng 4×4 bằng **Kabsch / Horn Quaternion SVD** từ ≥ 3 cặp điểm chạm mốc, kiểm chứng ngân sách sai số RSS ≤ 5 mm.
-5. **Đánh Giá Phun Gauss 3D & Xuất Lệnh**: So sánh P1/P3/P4 theo bộ chỉ tiêu hình học, độ phủ, tỷ lệ tràn biên, độ đều tốc độ TCP (`CV%`), xuất chương trình **Dobot Python**, **CSV 6-DOF** và **ROS 2**.
+4. **Hiệu Chuẩn Camera – Robot (Eye-to-Hand 4×4)**: Tinh chỉnh trực tiếp tọa độ/góc camera (`Tx, Ty, Tz, Roll, Pitch, Yaw`), hiển thị đúng vùng thu nhận thực khớp với PLY, giải ma trận cứng 4×4 bằng **Kabsch / Horn Quaternion SVD** từ ≥ 3 cặp điểm chạm mốc, kiểm chứng ngân sách sai số RSS ≤ 5 mm.
+5. **Mô Phỏng Robot 6-DOF, Vệt Phun Tùy Biến & Đánh Giá Gauss 3D**: Giải tích IK 8 nhánh có ưu tiên & tự lưu nhánh nghiệm gần nhất, bám mượt chống nháy tư thế, **chạy xong tự động về Home rồi dừng**; hỗ trợ loại tia phun **`Solid`** / **`Tia mờ dần` (Gaussian)**, đổi màu phun & độ đậm; overlay 3D kiểm tra độ sâu **Z-Buffer** (bị cánh tay robot che thật), thanh tiến trình điểm gọn trên khung camera; xuất chương trình **Dobot Python**, **CSV 6-DOF** và **ROS 2**.
 
 ---
 
@@ -86,6 +88,7 @@ Dobot-CR10A/
 │   │   │   ├── yolo11s_pose_jeans/            # Biểu đồ train/val, PR/F1 curve, results.csv
 │   │   │   └── yolo11s_seg_jeans/             # Biểu đồ train/val, PR/F1 curve, results.csv
 │   │   ├── inference_results/                 # 20 ảnh kiểm thử thực tế (Seg + 12 Keypoints)
+│   │   ├── retrain_pose_feedback.py           # Học chủ động: lưu mẫu sửa 12 mốc & tự train lại khi đủ 10 mẫu
 │   │   ├── dobot_cr10a_yolo11_kaggle_notebook.ipynb
 │   │   ├── prepare_kaggle_dataset.py
 │   │   └── test_inference_step2.py
@@ -112,11 +115,12 @@ Dobot-CR10A/
 │   │       ├── PLYDirectLoader.cs             # Nạp PLY Zivid, chuyển 3D Mesh, vá lỗ hình thái
 │   │       ├── FixedRigCamera.cs              # Mô phỏng giá treo chữ L Zivid & vùng nhìn FOV
 │   │       ├── RobotCameraController.cs       # Orbit/Pan/Zoom, góc nhìn Zivid POV & PiP
-│   │       ├── AiServerClient.cs              # Client UDP 5005 / HTTP 5000 / Auto-Push 5006
+│   │       ├── AiServerClient.cs              # Client UDP 5005 / HTTP 5000 / Auto-Push 5006 & Active Learning
+│   │       ├── NativeFileDialog.cs            # Hộp thoại File Explorer Windows (chọn đơn/nhiều file, mở thư mục)
 │   │       ├── DraggableUIPanel.cs            # Khung bảng điều khiển gắn phải có thể kéo giãn
 │   │       ├── AntigravityUITheme.cs          # Theme Obsidian Dark cho Unity IMGUI
 │   │       └── manual.cs                      # Điều khiển thủ công FK/IK từng khớp q1–q6
-│   └── output_drawing/                        # Quỹ đạo xuất (.csv, .py, mẫu phun JSON)
+│   └── output_drawing/                        # Quỹ đạo xuất (.csv, .py, mẫu phun JSON, applied_batch_samples/)
 ├── docs/images/                               # Ảnh chụp giao diện Unity phục vụ tài liệu
 ├── HUONG_DAN_CAMERA.md                        # Hướng dẫn chụp trực tiếp từ camera Zivid thật
 └── README.md
@@ -209,13 +213,13 @@ Phần mềm mô phỏng và vận hành trong Unity (`dobot_cr10a`) sử dụng
 
 | Tab | Chức năng chính |
 | :--- | :--- |
-| **1. Phôi** | Chụp trực tiếp từ camera Zivid (`Chụp Zivid`, `Chụp + AI`), duyệt/nạp file `.ply`, chuyển đổi `3D Mesh` / `Point Cloud`, nhận diện Size S/M/L, bật/tắt 12 mốc AI & vùng phun. |
-| **2. Views** | Góc nhìn nhanh (`3/4`, `Trên`, `Trước`, `Ngang`, `Focus Phôi`, `Focus Robot`), xem trực tiếp từ ống kính **Camera Zivid (POV)** hoặc khung hình nhỏ **PiP Cam**. |
+| **1. Phôi** | Chụp trực tiếp từ camera Zivid (`Chụp Zivid`, `Chụp + AI`), duyệt/nạp file `.ply`, nhận diện 12 mốc & đường bao Segment, mở chế độ **Đánh lại mốc AI** khi nhận diện sai và theo dõi tiến độ lưu mẫu (`x/10`) để tự động train lại YOLO11-pose. |
+| **2. Views** | Góc nhìn nhanh (`3/4`, `Trên`, `Trước`, `Ngang`, `Focus Phôi`, `Focus Robot`), xem trực tiếp từ ống kính **Camera Zivid (POV)** hoặc khung **PiP Cam**, chuyển `3D Mesh` / `Point Cloud`, bật/tắt độc lập từng lớp hiển thị 3D (có kiểm tra độ sâu Z-Buffer sau cánh tay robot). |
 | **3. Vá lỗ** | Quét & khoanh đỏ vùng bị khuất trên phôi 3D, chạy 5 phương pháp vá (K-NN MLS/PCA, TPS RBF, Poisson/Laplacian PDE, Adaptive Gun Tilt, đối xứng 2 ống), dựng 3D Mesh hoàn chỉnh & xuất `.OBJ`. |
-| **4. Quỹ đạo & MP** | Gồm 2 tab con: **Mô phỏng** (giữ tốc độ TCP đều `MovL`, đo `v`, `CV%`, `t_cycle`, thanh kéo từng waypoint) và **Quỹ đạo 2D → 3D** (bảng vẽ 2D trực tiếp, lưu/nạp mẫu JSON, độ cao Z, sinh P1/P3/P4, cấu hình IP/Port AI Server). |
-| **5. Đánh giá** | Chỉnh tham số súng phun (`d`, `w`, chồng lấn `r`, `σ`, góc nghiêng tối đa, biên `e`), chạy so sánh **P1 / P3 / P4**, hiển thị **Heatmap phun Gauss 3D**, bật bàn thao tác (Collider) & bài kiểm chứng **khuôn đứng 3D**. |
-| **6. Xuất** | Xuất chương trình chạy robot thật **Dobot CR10A Python (.py)**, **CSV 6-DOF** và **ROS 2**, nạp lại file CSV bất kỳ để kiểm tra. |
-| **7. Cấu hình** | Gồm 2 tab con: **Robot & Đầu phun** (gia tốc, tốc độ từng khớp J1–J6, chỉnh khớp thủ công q1–q6, offset bích → TCP `X/Y/Z`, vệt phun mô phỏng) và **Hiệu chuẩn Camera** (vị trí/góc camera `Tx/Ty/Tz/Roll/Pitch/Yaw`, FOV & mô hình giá treo 3D, ma trận 4×4 JSON, bù lệch 1 điểm, giải SVD đa điểm ≥ 3 cặp, ngân sách sai số RSS). |
+| **4. Quỹ đạo & MP** | Gồm 2 tab con thống nhất: **Mô phỏng** (giữ tốc độ TCP đều `MovL`, chọn loại tia phun `Solid`/`Tia mờ dần` & màu phun, chạy xong tự về Home dừng, thanh tiến trình nhỏ trên khung camera, đổi nhanh & phun ngay danh sách mẫu đã áp dụng) và **Dạy phun & Quỹ đạo** (vẽ 2D trực tiếp `Vẽ tay`/`Tròn`/`Vuông`/`Đa giác`/`Sửa`, cỡ cọ `1–50 mm`, lưu/nạp mẫu kèm cấu hình JSON, sinh P1/P2/P3/P4, chọn nhiều file `.ply` qua File Explorer áp dụng hàng loạt có thanh tiến trình). |
+| **5. Đánh giá** | Chỉnh tham số súng phun (`d`, `w`, chồng lấn `r`, `σ`, góc nghiêng tối đa, biên `e`), chạy so sánh **P1 / P2 / P3 / P4** (12 chỉ tiêu + ma trận quyết định 2 bước + độ nhạy ±10%), hiển thị **Heatmap phun Gauss 3D**, bật bàn thao tác (Collider) & bài kiểm chứng **khuôn đứng 3D**. |
+| **6. Xuất** | Xuất chương trình chạy robot thật **Dobot CR10A Python (.py)**, **CSV 6-DOF** (kèm `spray_enabled`, `segment_name`) và **ROS 2**, nạp lại file CSV bất kỳ để kiểm tra. |
+| **7. Cấu hình** | Gồm 2 tab con: **Robot & Đầu phun** (gia tốc, tốc độ từng khớp J1–J6, chỉnh khớp thủ công q1–q6, ưu tiên nhánh nghiệm IK, offset bích → TCP `X/Y/Z`, loại tia phun `Solid`/`Tia mờ dần`, màu phun & độ đậm) và **Hiệu chuẩn Camera** (vị trí/góc camera `Tx/Ty/Tz/Roll/Pitch/Yaw`, vùng thu nhận thực khớp PLY, ma trận 4×4 JSON, giải SVD đa điểm ≥ 3 cặp, ngân sách sai số RSS). |
 | **8. An toàn** | Chẩn đoán tự động toàn bộ quỹ đạo: giới hạn góc khớp, lỗi giải IK, chạm bàn (`Z` thấp), vượt góc nghiêng súng và khóa an toàn trước khi mô phỏng/xuất lệnh. |
 
 > **Tự động lưu cấu hình**: Mọi thiết lập trong Unity tự động lưu vào `dobot_cr10a/UserSettings/CR10A_WorkbenchSetup.json`, `CR10A_CalibrationSetup.json` và `PlayerPrefs` (hoặc bấm nút **`Lưu setup`** trên thanh tiêu đề) để giữ nguyên trạng thái qua các lần Stop/Play hoặc mở lại Unity.
@@ -269,11 +273,12 @@ Phần mềm mô phỏng và vận hành trong Unity (`dobot_cr10a`) sử dụng
 
 ### Giao tiếp Unity ↔ AI Server
 
-- **UDP (`127.0.0.1:5005`)**: Gửi `PING` hoặc gói JSON lệnh (`TRIGGER_DETECT`, `CUSTOM_DRAW_3D`, `CAPTURE_PREVIEW`, `CAPTURE_DETECT`, `CAMERA_STATUS`).
+- **UDP (`127.0.0.1:5005`)**: Gửi `PING` hoặc gói JSON lệnh (`TRIGGER_DETECT`, `CUSTOM_DRAW_3D`, `CAPTURE_PREVIEW`, `CAPTURE_DETECT`, `CAMERA_STATUS`, `FEEDBACK_STATUS`, `SAVE_LANDMARK_FEEDBACK`, `RETRAIN_POSE`).
 - **HTTP REST (`http://127.0.0.1:5000`)**:
-  - `GET /api/status` — kiểm tra trạng thái server, model YOLO và camera Zivid.
+  - `GET /api/status` — kiểm tra trạng thái server, model YOLO, camera Zivid và bộ đếm mẫu học chủ động.
   - `GET /api/camera/status` — kiểm tra kết nối Zivid SDK / Python.
   - `POST /api/detect`, `POST /api/custom_draw_3d`, `POST /api/capture` — chạy nhận diện / sinh quỹ đạo.
+  - `GET /api/feedback/status`, `POST /api/feedback/landmarks`, `POST /api/feedback/retrain` — lưu mẫu sửa 12 mốc và kích hoạt train lại + hot-reload YOLO11-pose (tự chạy khi đủ 10 mẫu).
 - **Auto-Push UDP (`5006`)**: Đẩy tự động kết quả mới từ AI Server sang Unity mà không cần bấm nút.
 
 ### Định dạng đầu ra cho Dobot CR10A

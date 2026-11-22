@@ -9,11 +9,16 @@ import os
 import re
 import shutil
 import socket
+import sys
 import threading
 import time
 import uuid
 
 ROOT=Path(__file__).resolve().parents[2]
+STEP2_DIR=ROOT/'ai_src/step2_train_yolo'
+if str(STEP2_DIR) not in sys.path:
+    sys.path.insert(0,str(STEP2_DIR))
+import retrain_pose_feedback as pose_fb
 os.environ.setdefault('YOLO_CONFIG_DIR',str(ROOT/'runtime/ultralytics'))
 (ROOT/'runtime/ultralytics').mkdir(parents=True,exist_ok=True)
 LOG=logging.getLogger('cr10a')
@@ -51,7 +56,40 @@ class Service:
     def status(self):
         return {'status':'ONLINE','service':'CR10A_Windows_AI','version':'3.0',
                 'model_ready':self.backend is not None,'loading':self.loading,'model_error':self.model_error,
-                'project_root':str(self.root),'camera_preview_supported':True,'simulation_only':True,'calibrated':self.calibration is not None,'camera':self.capture.status()}
+                'project_root':str(self.root),'camera_preview_supported':True,'simulation_only':True,'calibrated':self.calibration is not None,'camera':self.capture.status(),
+                'feedback':pose_fb.get_feedback_status()}
+
+    def start_pose_retrain_async(self,force=False,min_samples=10,epochs=25):
+        st=pose_fb.get_feedback_status(threshold=min_samples)
+        if st.get('is_retraining'):
+            return {'status':'BUSY','message':'Đang train lại YOLO11-pose ở nền.','is_retraining':True,
+                    'pending_count':st.get('pending_count',0),'threshold':st.get('threshold',min_samples),
+                    'history_count':st.get('history_count',0),'total_retrains':st.get('total_retrains',0)}
+        if not force and st.get('pending_count',0)<min_samples:
+            return {'status':'SKIPPED','message':f"Chưa đủ {min_samples} mẫu sai ({st.get('pending_count',0)}/{min_samples}).",
+                    'is_retraining':False,'pending_count':st.get('pending_count',0),'threshold':min_samples,
+                    'history_count':st.get('history_count',0),'total_retrains':st.get('total_retrains',0)}
+        if st.get('pending_count',0)==0 and st.get('history_count',0)==0:
+            return {'status':'ERROR','message':'Chưa có mẫu sửa mốc nào để train lại.','is_retraining':False,
+                    'pending_count':0,'threshold':min_samples,'history_count':0,'total_retrains':st.get('total_retrains',0)}
+
+        def _on_retrain_done(ok,msg):
+            if ok and self.backend is not None:
+                try:
+                    with self.lock:
+                        reloaded=self.backend.pipeline.reload_pose_model()
+                    LOG.info('Hot-reloaded YOLO11-pose weights: %s',reloaded)
+                except Exception as ex:
+                    LOG.exception('Failed to hot-reload YOLO11-pose: %s',ex)
+            LOG.info('Pose retraining finished (ok=%s): %s',ok,msg)
+
+        def _worker():
+            pose_fb.run_pose_retraining(min_samples=min_samples,force=force,epochs=epochs,on_complete=_on_retrain_done)
+
+        threading.Thread(target=_worker,daemon=True,name='RetrainYOLO11Pose').start()
+        return {'status':'STARTED','message':f"Đã kích hoạt train lại YOLO11-pose ({st.get('pending_count',0)} mẫu mới, {epochs} epochs)...",
+                'is_retraining':True,'pending_count':st.get('pending_count',0),'threshold':min_samples,
+                'history_count':st.get('history_count',0),'total_retrains':st.get('total_retrains',0)}
 
     def register_sample(self,req):
         sample=str(req.get('sample','pcl_101'))
@@ -77,6 +115,39 @@ class Service:
         command=req.get('command','TRIGGER_DETECT')
         if command in ('PING','STATUS'): return self.status()
         if command=='CAMERA_STATUS': return {'status':'SUCCESS',**self.capture.status()}
+        if command=='FEEDBACK_STATUS': return pose_fb.get_feedback_status(threshold=int(req.get('threshold',10) or 10))
+        if command=='SAVE_LANDMARK_FEEDBACK':
+            try:
+                sample=str(req.get('sample','sample'))
+                lm_uv=req.get('landmarks_uv',[])
+                threshold=int(req.get('threshold',10) or 10)
+                saved=pose_fb.save_corrected_landmark_sample(
+                    sample_name=sample,
+                    landmarks_uv=lm_uv,
+                    image_path=req.get('image_path'),
+                    image_b64=req.get('image_b64'),
+                    bbox_uv=req.get('bbox_uv'),
+                    threshold=threshold,
+                )
+                auto_retrain=bool(req.get('auto_retrain',True))
+                retrain_triggered=False
+                if auto_retrain and saved.get('ready_to_retrain') and not saved.get('is_retraining'):
+                    rt=self.start_pose_retrain_async(force=False,min_samples=threshold,epochs=int(req.get('epochs',25) or 25))
+                    if rt.get('status')=='STARTED':
+                        retrain_triggered=True
+                        saved['is_retraining']=True
+                        saved['status_message']=rt.get('message',saved.get('status_message',''))
+                saved['retrain_triggered']=retrain_triggered
+                return saved
+            except Exception as ex:
+                LOG.warning('SAVE_LANDMARK_FEEDBACK failed: %s',ex)
+                return {'status':'ERROR','message':str(ex),'error_code':422}
+        if command=='RETRAIN_POSE':
+            return self.start_pose_retrain_async(
+                force=bool(req.get('force',True)),
+                min_samples=int(req.get('threshold',10) or 10),
+                epochs=int(req.get('epochs',25) or 25),
+            )
         try:
             if command not in ('TRIGGER_DETECT','CUSTOM_DRAW_3D','CAPTURE_DETECT','CAPTURE_ONLY','CAPTURE_PREVIEW'):
                 raise ValueError('Unknown command: '+str(command))
@@ -152,7 +223,7 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
                     text=raw.decode('utf-8').strip()
                     req={'command':'PING'} if text.upper()=='PING' else json.loads(text)
                     if not isinstance(req,dict): raise ValueError('Object required')
-                    if req.get('command') in ('PING','STATUS','CAMERA_STATUS'): respond(req,addr)
+                    if req.get('command') in ('PING','STATUS','CAMERA_STATUS','FEEDBACK_STATUS'): respond(req,addr)
                     else: executor.submit(respond,req,addr)
                 except (ValueError,UnicodeError):
                     udp.sendto(b'{"status":"ERROR","message":"Invalid JSON request","error_code":400}',addr)
@@ -165,13 +236,20 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
         def do_GET(self):
             if self.path=='/api/status': self.reply(service.status())
             elif self.path=='/api/camera/status': self.reply(service.handle({'command':'CAMERA_STATUS'}))
+            elif self.path.startswith('/api/feedback/status'): self.reply(service.handle({'command':'FEEDBACK_STATUS'}))
             else: self.reply({'status':'ERROR','message':'Unknown endpoint'},404)
         def do_POST(self):
-            commands={'/api/detect':'TRIGGER_DETECT','/api/custom_draw_3d':'CUSTOM_DRAW_3D','/api/capture':'CAPTURE_DETECT'}
+            commands={
+                '/api/detect':'TRIGGER_DETECT',
+                '/api/custom_draw_3d':'CUSTOM_DRAW_3D',
+                '/api/capture':'CAPTURE_DETECT',
+                '/api/feedback/landmarks':'SAVE_LANDMARK_FEEDBACK',
+                '/api/feedback/retrain':'RETRAIN_POSE',
+            }
             if self.path not in commands: self.reply({'status':'ERROR','message':'Unknown endpoint'},404); return
             try:
                 length=int(self.headers.get('Content-Length','0'))
-                if length<=0 or length>2000000: raise ValueError('Invalid request size')
+                if length<=0 or length>15000000: raise ValueError('Invalid request size')
                 req=json.loads(self.rfile.read(length))
                 if not isinstance(req,dict): raise ValueError('JSON object required')
                 req.setdefault('command',commands[self.path]); self.reply(service.handle(req))

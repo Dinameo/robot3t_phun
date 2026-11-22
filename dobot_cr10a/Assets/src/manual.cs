@@ -614,13 +614,16 @@ public class manual : MonoBehaviour
             for (int i = 0; i < ikSolutions.Count; i++)
             {
                 DobotCR10AKinematics.IKSolution sol = ikSolutions[i];
-                string prefTag = i == 0 ? "[TỐI ƯU Q*] " : $"#{i + 1} ";
+                bool isPreferred = !string.IsNullOrEmpty(DobotCR10AKinematics.PreferredBranchName)
+                    ? string.Equals(sol.branchName, DobotCR10AKinematics.PreferredBranchName, StringComparison.Ordinal)
+                    : (i == 0);
+                string prefTag = isPreferred ? "[ƯU TIÊN] " : $"#{i + 1} ";
                 string label = $"{prefTag}{sol.branchName} (Sai số: {sol.positionErrorMm:F4}mm)";
 
-                GUIStyle btnSt = i == 0 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                GUIStyle btnSt = isPreferred ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
                 if (GUILayout.Button(label, btnSt, GUILayout.Height(22)))
                 {
-                    ApplySolution(i);
+                    ApplySolution(i, persistAsPreferred: true);
                 }
             }
             GUILayout.EndScrollView();
@@ -1039,11 +1042,23 @@ public class manual : MonoBehaviour
         }
 
         ikSolutions.AddRange(sols);
-        ApplySolution(0);
+        int chosenIdx = 0;
+        if (!string.IsNullOrEmpty(DobotCR10AKinematics.PreferredBranchName))
+        {
+            for (int i = 0; i < ikSolutions.Count; i++)
+            {
+                if (string.Equals(ikSolutions[i].branchName, DobotCR10AKinematics.PreferredBranchName, StringComparison.Ordinal))
+                {
+                    chosenIdx = i;
+                    break;
+                }
+            }
+        }
+        ApplySolution(chosenIdx);
 
         ikStatus = string.Format(CultureInfo.InvariantCulture,
-            "IK THÀNH CÔNG: {0} nghiệm trong {1:F3} ms. Áp dụng Q* [{2}]. Sai số: {3:E2} mm.",
-            sols.Count, sw.Elapsed.TotalMilliseconds, sols[0].branchName, sols[0].positionErrorMm);
+            "IK THÀNH CÔNG: {0} nghiệm trong {1:F3} ms. Áp dụng [{2}]. Sai số: {3:E2} mm.",
+            sols.Count, sw.Elapsed.TotalMilliseconds, ikSolutions[chosenIdx].branchName, ikSolutions[chosenIdx].positionErrorMm);
     }
 
     public void SetFlangeDownTargetAndApplyIk()
@@ -1056,7 +1071,7 @@ public class manual : MonoBehaviour
         SolveAndApplyIk();
     }
 
-    public void ApplySolution(int index)
+    public void ApplySolution(int index, bool persistAsPreferred = false)
     {
         if (index < 0 || index >= ikSolutions.Count) return;
         DobotCR10AKinematics.IKSolution sol = ikSolutions[index];
@@ -1067,6 +1082,21 @@ public class manual : MonoBehaviour
         }
 
         ApplyRotations();
+
+        if (persistAsPreferred && !string.IsNullOrEmpty(sol.branchName))
+        {
+            DobotCR10AKinematics.PreferredBranchName = sol.branchName;
+            DobotCR10AIKController ikCtrl = FindAnyObjectByType<DobotCR10AIKController>();
+            if (ikCtrl != null)
+            {
+                ikCtrl.SetPreferredIkBranch(sol.branchName, persistImmediately: true);
+            }
+            else
+            {
+                PlayerPrefs.SetString("CR10A_PreferredIkBranch", sol.branchName);
+                PlayerPrefs.Save();
+            }
+        }
 
         ikStatus = string.Format(CultureInfo.InvariantCulture,
             "Đã áp dụng nghiệm #{0} [{1}]. Sai số FK: {2:F4} mm.",

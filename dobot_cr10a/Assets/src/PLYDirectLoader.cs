@@ -217,6 +217,8 @@ public class PLYDirectLoader : MonoBehaviour
         return chunkObjects.Count;
     }
 
+    public bool autoLoadOnStart = false; // Mặc định khi mở app không nạp sẵn phôi nào
+
     private void Start()
     {
         LoadSettings();
@@ -227,10 +229,23 @@ public class PLYDirectLoader : MonoBehaviour
             calibMgr.SyncToSceneCameraAndLoader(reloadPointCloud: false);
         }
         EnsureMaterial();
-        string resolvedPath = ResolvePath(plyFilePath);
-        if (File.Exists(resolvedPath))
+        ClearExistingChunks();
+
+        if (autoLoadOnStart)
         {
-            LoadFullPointCloud(resolvedPath);
+            string resolvedPath = ResolvePath(plyFilePath);
+            if (File.Exists(resolvedPath))
+            {
+                LoadFullPointCloud(resolvedPath);
+            }
+        }
+        else
+        {
+            plyFilePath = "";
+            currentLoadedSampleName = "";
+            hasOrganizedCameraFrame = false;
+            hasTopDownCameraTexture = false;
+            ReleaseCameraRgbTexture();
         }
     }
 
@@ -269,6 +284,8 @@ public class PLYDirectLoader : MonoBehaviour
     private float topDownCropMaxX = 0.75f;
     private float topDownCropMinZ = -0.35f;
     private float topDownCropMaxZ = 0.95f;
+    private readonly Vector3[] actualCaptureFootprintWorld = new Vector3[4];
+    private bool hasActualCaptureFootprint = false;
 
     [Serializable]
     private class FrameMetaJson
@@ -548,6 +565,7 @@ public class PLYDirectLoader : MonoBehaviour
 
                 hasOrganizedCameraFrame = false;
                 hasTopDownCameraTexture = false;
+                hasActualCaptureFootprint = false;
                 camGridW = 0;
                 camGridH = 0;
                 camGridWorldPos = null;
@@ -706,6 +724,7 @@ public class PLYDirectLoader : MonoBehaviour
                 {
                     BuildTopDownCameraTextureFromElevationGrid();
                 }
+                RebuildActualCameraCaptureFootprint();
                 ConvertPointCloudToSurfaceMesh();
                 ApplyRenderMode();
                 Debug.Log($"[PLY Loader] HOÀN TẤT: Đã tải {totalLoaded:N0} điểm ảnh 3D từ mẫu [{currentLoadedSampleName}] và tạo 3D Surface Mesh siêu nhẹ!");
@@ -819,6 +838,146 @@ public class PLYDirectLoader : MonoBehaviour
         hasOrganizedCameraFrame = false;
         hasTopDownCameraTexture = true;
         loadedCameraSampleName = currentLoadedSampleName;
+        RebuildActualCameraCaptureFootprint();
+    }
+
+    private static bool Solve3x3Linear(double[,] m, double[] rhs, out double[] sol)
+    {
+        sol = new double[3];
+        double[,] a = new double[3, 4];
+        for (int r = 0; r < 3; r++)
+        {
+            for (int c = 0; c < 3; c++) a[r, c] = m[r, c];
+            a[r, 3] = rhs[r];
+        }
+        for (int col = 0; col < 3; col++)
+        {
+            int piv = col;
+            double maxAbs = Math.Abs(a[col, col]);
+            for (int r = col + 1; r < 3; r++)
+            {
+                double v = Math.Abs(a[r, col]);
+                if (v > maxAbs) { maxAbs = v; piv = r; }
+            }
+            if (maxAbs < 1e-11) return false;
+            if (piv != col)
+            {
+                for (int c = col; c < 4; c++)
+                {
+                    double tmp = a[col, c];
+                    a[col, c] = a[piv, c];
+                    a[piv, c] = tmp;
+                }
+            }
+            double diag = a[col, col];
+            for (int r = col + 1; r < 3; r++)
+            {
+                double f = a[r, col] / diag;
+                for (int c = col; c < 4; c++) a[r, c] -= f * a[col, c];
+            }
+        }
+        for (int r = 2; r >= 0; r--)
+        {
+            double s = a[r, 3];
+            for (int c = r + 1; c < 3; c++) s -= a[r, c] * sol[c];
+            sol[r] = s / a[r, r];
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Tính đúng 4 góc vùng thu nhận thực tế trên mặt bàn (TL, TR, BR, BL) khớp 1:1 với ảnh RGB từ file .PLY.
+    /// </summary>
+    public void RebuildActualCameraCaptureFootprint()
+    {
+        hasActualCaptureFootprint = false;
+        float planeY = estimatedTableY + 0.005f;
+
+        if (hasOrganizedCameraFrame && camGridWorldPos != null && camGridWorldValid != null && camGridW > 1 && camGridH > 1)
+        {
+            int strideX = Mathf.Max(1, camGridW / 28);
+            int strideY = Mathf.Max(1, camGridH / 28);
+
+            double[,] ata = new double[3, 3];
+            double[] atx = new double[3];
+            double[] atz = new double[3];
+            int count = 0;
+            float minX = float.MaxValue, maxX = float.MinValue;
+            float minZ = float.MaxValue, maxZ = float.MinValue;
+
+            for (int ty = 0; ty < camGridH; ty += strideY)
+            {
+                double v = ty / (double)(camGridH - 1);
+                for (int tx = 0; tx < camGridW; tx += strideX)
+                {
+                    int idx = ty * camGridW + tx;
+                    if (!camGridWorldValid[idx]) continue;
+                    Vector3 wp = camGridWorldPos[idx];
+                    if (wp.x < minX) minX = wp.x; if (wp.x > maxX) maxX = wp.x;
+                    if (wp.z < minZ) minZ = wp.z; if (wp.z > maxZ) maxZ = wp.z;
+
+                    double u = tx / (double)(camGridW - 1);
+                    double[] row = { u, v, 1.0 };
+                    for (int r = 0; r < 3; r++)
+                    {
+                        for (int c = 0; c < 3; c++) ata[r, c] += row[r] * row[c];
+                        atx[r] += row[r] * wp.x;
+                        atz[r] += row[r] * wp.z;
+                    }
+                    count++;
+                }
+            }
+
+            if (count >= 6 && Solve3x3Linear(ata, atx, out double[] cx) && Solve3x3Linear(ata, atz, out double[] cz))
+            {
+                Vector2[] cornerUV = { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(0f, 1f) };
+                for (int i = 0; i < 4; i++)
+                {
+                    float wx = (float)(cx[0] * cornerUV[i].x + cx[1] * cornerUV[i].y + cx[2]);
+                    float wz = (float)(cz[0] * cornerUV[i].x + cz[1] * cornerUV[i].y + cz[2]);
+                    actualCaptureFootprintWorld[i] = new Vector3(wx, planeY, wz);
+                }
+                hasActualCaptureFootprint = true;
+                return;
+            }
+
+            if (count > 0 && maxX > minX && maxZ > minZ)
+            {
+                actualCaptureFootprintWorld[0] = new Vector3(minX, planeY, maxZ);
+                actualCaptureFootprintWorld[1] = new Vector3(maxX, planeY, maxZ);
+                actualCaptureFootprintWorld[2] = new Vector3(maxX, planeY, minZ);
+                actualCaptureFootprintWorld[3] = new Vector3(minX, planeY, minZ);
+                hasActualCaptureFootprint = true;
+                return;
+            }
+        }
+
+        if (hasTopDownCameraTexture && topDownCropMaxX > topDownCropMinX && topDownCropMaxZ > topDownCropMinZ)
+        {
+            actualCaptureFootprintWorld[0] = new Vector3(topDownCropMinX, planeY, topDownCropMaxZ);
+            actualCaptureFootprintWorld[1] = new Vector3(topDownCropMaxX, planeY, topDownCropMaxZ);
+            actualCaptureFootprintWorld[2] = new Vector3(topDownCropMaxX, planeY, topDownCropMinZ);
+            actualCaptureFootprintWorld[3] = new Vector3(topDownCropMinX, planeY, topDownCropMinZ);
+            hasActualCaptureFootprint = true;
+        }
+    }
+
+    public bool TryGetActualCameraCaptureFootprintWorld(out Vector3 cTL, out Vector3 cTR, out Vector3 cBR, out Vector3 cBL)
+    {
+        if (!hasActualCaptureFootprint && (hasOrganizedCameraFrame || hasTopDownCameraTexture))
+        {
+            RebuildActualCameraCaptureFootprint();
+        }
+        if (hasActualCaptureFootprint)
+        {
+            cTL = actualCaptureFootprintWorld[0];
+            cTR = actualCaptureFootprintWorld[1];
+            cBR = actualCaptureFootprintWorld[2];
+            cBL = actualCaptureFootprintWorld[3];
+            return true;
+        }
+        cTL = cTR = cBR = cBL = Vector3.zero;
+        return false;
     }
 
     public bool TrySampleCameraUVToWorld(Vector2 uv, out Vector3 worldPos, out Vector3 normalWorld)
@@ -997,8 +1156,9 @@ public class PLYDirectLoader : MonoBehaviour
     }
 
     /// <summary>
-    /// Trích xuất đám mây điểm 3D bề mặt phôi (tách mặt bàn theo chiều cao Z > estimatedTableY + heightThresholdM)
-    /// và giảm mẫu lưới voxel (~5 mm theo đúng Mục P4 trang 8 file góp ý) để phục vụ đăng ký 3D ICP + TPS.
+    /// Trích xuất đám mây điểm 3D bề mặt phôi THỰC SỰ theo lưới voxel 3D (vx, vy, vz) trực tiếp từ toàn bộ
+    /// các đỉnh 3D trong CloudChunk_* (giữ nguyên đầy đủ các điểm trên vách dốc đứng / thành ống / nếp gấp 3D,
+    /// không bị mất điểm như lưới chiều cao 2.5D!). Tự động dự phòng sang elevationGridY nếu chưa có CloudChunk.
     /// </summary>
     public List<Vector3> ExtractGarmentSurfaceCloudVoxelized(
         float voxelSizeM = 0.005f,
@@ -1007,11 +1167,8 @@ public class PLYDirectLoader : MonoBehaviour
         float heightAboveTableM = 0.006f)
     {
         var pts = new List<Vector3>();
-        if (elevationGridY == null || elevationGridValid == null) return pts;
-
-        GetCellWorldSize(out float cellW, out float cellD);
-        float avgCell = Mathf.Max(0.001f, 0.5f * (cellW + cellD));
-        int stride = Mathf.Max(1, Mathf.RoundToInt(voxelSizeM / avgCell));
+        float vox = Mathf.Clamp(voxelSizeM, 0.002f, 0.030f);
+        float invVox = 1f / vox;
 
         bool hasClip = (contourClipWorld != null && contourClipWorld.Count >= 3);
         float cMinX = float.MaxValue, cMaxX = float.MinValue, cMinZ = float.MaxValue, cMaxZ = float.MinValue;
@@ -1026,24 +1183,83 @@ public class PLYDirectLoader : MonoBehaviour
         }
 
         float yMinCut = estimatedTableY + Mathf.Max(0.002f, heightAboveTableM);
-        var raw = new List<Vector3>(1500);
-        for (int gx = 0; gx < GRID_RES; gx += stride)
-        {
-            float wx = gridMin.x + ((float)gx / (GRID_RES - 1)) * (gridMax.x - gridMin.x);
-            if (hasClip && (wx < cMinX - 0.01f || wx > cMaxX + 0.01f)) continue;
-            for (int gz = 0; gz < GRID_RES; gz += stride)
-            {
-                if (!elevationGridValid[gx, gz]) continue;
-                float wy = elevationGridY[gx, gz];
-                if (!hasClip && wy < yMinCut) continue;
 
-                float wz = gridMin.z + ((float)gz / (GRID_RES - 1)) * (gridMax.z - gridMin.z);
+        // Ưu tiên 1: Voxel hóa 3D thật (vx, vy, vz) trực tiếp từ CloudChunk_* để giữ trọn vách dốc đứng & nếp gấp 3D
+        var voxelSum = new Dictionary<Vector3Int, Vector3>(2048);
+        var voxelCnt = new Dictionary<Vector3Int, int>(2048);
+        int childCount = transform.childCount;
+        for (int c = 0; c < childCount; c++)
+        {
+            Transform child = transform.GetChild(c);
+            if (child == null || !child.gameObject.activeSelf || !child.name.StartsWith("CloudChunk_")) continue;
+            MeshFilter mf = child.GetComponent<MeshFilter>();
+            if (mf == null || mf.sharedMesh == null) continue;
+            Vector3[] verts = mf.sharedMesh.vertices;
+            if (verts == null || verts.Length == 0) continue;
+
+            Matrix4x4 l2w = child.localToWorldMatrix;
+            int step = Mathf.Max(1, verts.Length / 45000);
+            for (int i = 0; i < verts.Length; i += step)
+            {
+                Vector3 w = l2w.MultiplyPoint3x4(verts[i]);
+                if (float.IsNaN(w.x) || float.IsNaN(w.y) || float.IsNaN(w.z)) continue;
+                if (!hasClip && w.y < yMinCut) continue;
                 if (hasClip)
                 {
-                    if (wz < cMinZ - 0.01f || wz > cMaxZ + 0.01f) continue;
-                    if (!IsPointInPolygonXZStatic(wx, wz, contourClipWorld)) continue;
+                    if (w.x < cMinX - 0.015f || w.x > cMaxX + 0.015f || w.z < cMinZ - 0.015f || w.z > cMaxZ + 0.015f) continue;
+                    if (!IsPointInPolygonXZStatic(w.x, w.z, contourClipWorld)) continue;
                 }
-                raw.Add(new Vector3(wx, wy, wz));
+
+                Vector3Int key = new Vector3Int(
+                    Mathf.FloorToInt(w.x * invVox),
+                    Mathf.FloorToInt(w.y * invVox),
+                    Mathf.FloorToInt(w.z * invVox));
+                if (voxelSum.TryGetValue(key, out Vector3 acc))
+                {
+                    voxelSum[key] = acc + w;
+                    voxelCnt[key] = voxelCnt[key] + 1;
+                }
+                else
+                {
+                    voxelSum[key] = w;
+                    voxelCnt[key] = 1;
+                }
+            }
+        }
+
+        var raw = new List<Vector3>(voxelSum.Count > 0 ? voxelSum.Count : 1500);
+        if (voxelSum.Count >= 30)
+        {
+            foreach (var kv in voxelSum)
+            {
+                int cnt = voxelCnt[kv.Key];
+                raw.Add(kv.Value / Mathf.Max(1, cnt));
+            }
+        }
+        else if (elevationGridY != null && elevationGridValid != null)
+        {
+            // Dự phòng: lấy từ lưới chiều cao nếu chưa có CloudChunk
+            GetCellWorldSize(out float cellW, out float cellD);
+            float avgCell = Mathf.Max(0.001f, 0.5f * (cellW + cellD));
+            int stride = Mathf.Max(1, Mathf.RoundToInt(vox / avgCell));
+            for (int gx = 0; gx < GRID_RES; gx += stride)
+            {
+                float wx = gridMin.x + ((float)gx / (GRID_RES - 1)) * (gridMax.x - gridMin.x);
+                if (hasClip && (wx < cMinX - 0.01f || wx > cMaxX + 0.01f)) continue;
+                for (int gz = 0; gz < GRID_RES; gz += stride)
+                {
+                    if (!elevationGridValid[gx, gz]) continue;
+                    float wy = elevationGridY[gx, gz];
+                    if (!hasClip && wy < yMinCut) continue;
+
+                    float wz = gridMin.z + ((float)gz / (GRID_RES - 1)) * (gridMax.z - gridMin.z);
+                    if (hasClip)
+                    {
+                        if (wz < cMinZ - 0.01f || wz > cMaxZ + 0.01f) continue;
+                        if (!IsPointInPolygonXZStatic(wx, wz, contourClipWorld)) continue;
+                    }
+                    raw.Add(new Vector3(wx, wy, wz));
+                }
             }
         }
 

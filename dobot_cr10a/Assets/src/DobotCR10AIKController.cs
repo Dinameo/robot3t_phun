@@ -75,12 +75,24 @@ public class DobotCR10AIKController : MonoBehaviour
     [Tooltip("Giới hạn tốc độ riêng cho J1-J6, đơn vị độ/giây")]
     public float[] jointSpeedDegPerSecond = { 10f, 10f, 10f, 10f, 10f, 10f };
 
+    public enum SprayBeamType
+    {
+        Solid = 0,        // Phun đặc (viền sắc nét)
+        SoftFeathered = 1 // Tia mờ dần (Gaussian mềm từ tâm ra biên)
+    }
+
     [Header("5. Phun sơn & Vệt màu")]
     [FormerlySerializedAs("drawInkTrail")]
     public bool sprayPaintEnabled = true;
+    public SprayBeamType sprayBeamType = SprayBeamType.Solid;
+    [Range(0.15f, 1.0f)]
+    public float sprayBeamOpacity = 0.92f;
     public Color inkColor = Color.red;
     [Range(1f, 20f)]
     public float sprayWidthMm = 4.0f; // Cỡ đường phun (mm)
+    [Tooltip("Nhánh nghiệm IK ưu tiên mà người dùng đã chọn gần nhất (tự lưu setup)")]
+    public string preferredIkBranchName = "";
+    private bool showCustomSprayColorSliders = false;
     [Tooltip("Chỉ phun khi TCP nằm trong dung sai này so với đoạn quỹ đạo đang chạy (mm)")]
     [Range(2f, 60f)]
     public float sprayPathToleranceMm = 20f;
@@ -185,6 +197,26 @@ public class DobotCR10AIKController : MonoBehaviour
     private readonly Dictionary<int, int> customWaypointConfigurations = new Dictionary<int, int>();
     private Vector2 waypointSolsScroll = Vector2.zero;
 
+    // Trạng thái bản nháp (Draft) khi chỉnh sửa gộp Roll/Pitch/Yaw & Nghiệm IK
+    private int rpyEditWpIndex = -1;
+    private WaypointData rpyEditWaypointRef = null;
+    private float rpyDraftRoll = 180f;
+    private float rpyDraftPitch = 0f;
+    private float rpyDraftYaw = 0f;
+    private int rpyDraftSolIndex = 0;
+    private string rpyDraftBranchName = "";
+    private bool rpyDraftDirty = false;
+    private string rpyDraftStatusMsg = "";
+    private bool rpyDraftStatusIsError = false;
+    private List<DobotCR10AKinematics.IKSolution> rpyDraftSolutions = new List<DobotCR10AKinematics.IKSolution>();
+    private Vector3 rpyCachePosMm = new Vector3(float.NaN, float.NaN, float.NaN);
+    private float rpyCacheRoll = float.NaN;
+    private float rpyCachePitch = float.NaN;
+    private float rpyCacheYaw = float.NaN;
+    private float rpyCacheToolLen = float.NaN;
+    private float rpyCacheToolOffX = float.NaN;
+    private float rpyCacheToolOffY = float.NaN;
+
     // =========================================================================
     // DỮ LIỆU 12 ĐIỂM MỐC GIẢI PHẪU 3D (LANDMARKS), SEGMENTATION CONTOUR 3D
     // VÀ BẢNG VẼ QUẦN JEAN 2D TIÊU CHUẨN -> ÁNH XẠ LÊN BỀ MẶT 3D
@@ -243,6 +275,42 @@ public class DobotCR10AIKController : MonoBehaviour
     }
 
     [Serializable]
+    public class TeachingConfigJson
+    {
+        public bool hasConfig = false;
+        public string taughtSampleName = "";
+        public string taughtMethod = "P3";
+        public bool autoApplyOnSampleChange = false;
+        public float sprayWidthMm = 4.0f;
+        public float zOffsetMm = 20.0f;
+        public float playbackSpeed = 1.0f;
+        public float targetTcpSpeedMmPerSec = 220.0f;
+        public TrajectoryEvaluationEngine.SprayTechParams techParams = new TrajectoryEvaluationEngine.SprayTechParams();
+        public TrajectoryEvaluationEngine.P1ZigzagConfig p1 = new TrajectoryEvaluationEngine.P1ZigzagConfig();
+        public TrajectoryEvaluationEngine.P2SkeletonConfig p2 = new TrajectoryEvaluationEngine.P2SkeletonConfig();
+        public TrajectoryEvaluationEngine.P3LandmarkConfig p3 = new TrajectoryEvaluationEngine.P3LandmarkConfig();
+        public TrajectoryEvaluationEngine.P4RegistrationConfig p4 = new TrajectoryEvaluationEngine.P4RegistrationConfig();
+    }
+
+    [Serializable]
+    public class BatchTeachResultItem
+    {
+        public string sampleName = "";
+        public string plyPath = "";
+        public string detectedSize = "";
+        public string methodUsed = "";
+        public string templateName = "";
+        public string appliedDate = "";
+        public string csvPath = "";
+        public string metaJsonPath = "";
+        public string status = "";
+        public int waypointCount = 0;
+        public int solvedCount = 0;
+        public float totalLengthMm = 0f;
+        public bool success = false;
+    }
+
+    [Serializable]
     public class SprayPatternTemplate
     {
         public string templateName = "mau_phun_custom";
@@ -252,6 +320,8 @@ public class DobotCR10AIKController : MonoBehaviour
         public float sprayWidthMm = 4.0f;
         public List<Stroke2D> strokes = new List<Stroke2D>();
         public List<Region2DJson> regions = new List<Region2DJson>();
+        public List<Region2DJson> canonicalRegions = new List<Region2DJson>();
+        public TeachingConfigJson teachingConfig = new TeachingConfigJson();
     }
 
     [Serializable]
@@ -319,6 +389,7 @@ public class DobotCR10AIKController : MonoBehaviour
     public List<Vector3> sprayZoneLeftWorld = new List<Vector3>();
     public List<Vector3> sprayZoneRightWorld = new List<Vector3>();
     public string loadedLandmarksSampleName = "";
+    private string lastMissingLandmarksSampleName = "";
 
     // Kết quả nhận diện Size quần (K-Means 3 cụm: S, M, L) & Mẫu cần phun (mặc định là Size S)
     public string activeSprayTemplateSize = "S"; // Mặc định ban đầu là Size S
@@ -385,6 +456,7 @@ public class DobotCR10AIKController : MonoBehaviour
         public Vector2 radiusUV = Vector2.zero;
         public Rect rectUV = Rect.zero;
         public List<Vector2> verticesUV = new List<Vector2>();
+        public List<Vector2> canonicalVerticesUV = new List<Vector2>(); // Tọa độ UV tương đối trong không gian quần chuẩn (cho P3 Barycentric khi đổi phôi)
     }
 
     private CanvasDrawTool activeDrawTool = CanvasDrawTool.Freehand;
@@ -411,11 +483,61 @@ public class DobotCR10AIKController : MonoBehaviour
     private bool layoutShowPolygonBar = false;
     private bool layoutShowSelectedRegionBar = false;
 
-    [Header("8. Lưu / Import & Bảo Lưu Mẫu Phun Tùy Biến Cho Mọi Phôi")]
+    // Chế độ Đánh lại / Sửa 12 mốc AI (Active Learning - lưu mẫu sai, đủ 10 mẫu tự train lại YOLO11-pose)
+    private bool isEditingLandmarksMode = false;
+    private bool layoutShowLandmarkEditPanel = false;
+    private bool isSequentialLandmarkClickMode = false;
+    private int selectedEditLandmarkIndex = 0;
+    private int draggingLandmarkIndex = -1;
+    private bool draggingLandmarkOnFullscreen = false;
+    private Vector2[] editableLandmarksUV = null;
+    private Vector2[] originalAiLandmarksUV = null;
+    private string landmarkEditSampleName = "";
+    private bool hasUnsavedLandmarkEdits = false;
+    private string landmarkEditStatusMsg = "";
+
+    private static readonly string[] LandmarkCanonicalNames = new string[]
+    {
+        "waist_left", "waist_center", "waist_right", "crotch",
+        "thigh_left", "thigh_right", "knee_left", "knee_right",
+        "cuff_left_outer", "cuff_left_inner", "cuff_right_inner", "cuff_right_outer"
+    };
+
+    private static readonly string[] LandmarkVietnameseLabels = new string[]
+    {
+        "Eo trái", "Giữa eo", "Eo phải", "Đáy đũng",
+        "Đùi trái", "Đùi phải", "Gối trái", "Gối phải",
+        "Gấu trái ngoài", "Gấu trái trong", "Gấu phải trong", "Gấu phải ngoài"
+    };
+
+    [Header("8. Lưu / Import & Dạy Phun 1 Mẫu -> Áp Dụng Nhiều Mẫu")]
     public bool preserveCustomDrawingAcrossSamples = true;
     public string sprayTemplateDirectory = "output_drawing/spray_templates";
     public string saveTemplateFileName = "mau_phun_1";
     private readonly List<string> availableSprayTemplateFiles = new List<string>();
+    public string taughtMethod = "P3"; // P1 / P2 / P3 / P4
+    public string taughtSourceSampleName = "";
+    public bool autoApplyTaughtOnNewSample = false;
+    private bool hasRecordedTeachingRecipe = false;
+    private bool showBatchTeachSection = false;
+    private bool showWaypointManualEditSection = false;
+    private string teachingStatusMsg = "Vẽ mẫu trên 1 phôi chuẩn, chọn P1/P2/P3/P4 rồi bấm Ghi mẫu dạy.";
+    private readonly List<DrawnRegion2D> taughtCanonicalRegions = new List<DrawnRegion2D>();
+    public string appliedBatchSamplesDirectory = "output_drawing/applied_batch_samples";
+    private readonly List<string> batchSelectedPlyPaths = new List<string>();
+    private Vector2 batchSampleListScroll = Vector2.zero;
+    private Vector2 batchAppliedResultsScroll = Vector2.zero;
+    private Vector2 simAppliedResultsScroll = Vector2.zero;
+    private readonly List<BatchTeachResultItem> batchTeachResults = new List<BatchTeachResultItem>();
+    private bool isRunningBatchApply = false;
+    private bool cancelBatchApplyRequested = false;
+    private int batchApplyCurrentIndex = 0;
+    private int batchApplyTotalCount = 0;
+    private int batchApplySuccessCount = 0;
+    private string batchApplyCurrentSample = "";
+    private string activeAppliedBatchSampleName = "";
+    private bool layoutShowBatchSelectedList = false;
+    private bool layoutShowBatchProgress = false;
 
     [Header("9. Thuật Toán Bù Đắp Chỗ Khuất (Occlusion & Blind Spot Compensation)")]
     public int selectedOcclusionAlgorithm = 0; // 0: MLS K-NN, 1: TPS RBF, 2: Poisson/Laplace, 3: Adaptive Gun Tilt, 4: Bilateral Symmetry
@@ -527,6 +649,7 @@ public class DobotCR10AIKController : MonoBehaviour
         public int trajSimSubTab = 0;
         public int configSubTab = 0;
         public bool showGizmos = true;
+        public bool showCameraAxesInCalibration = false;
         public bool showJointSpeedControls = false;
         public bool showJointsSubPanel = false;
         public bool showCanonicalDrawPanel = true;
@@ -539,9 +662,16 @@ public class DobotCR10AIKController : MonoBehaviour
         public float[] jointSpeedDegPerSecond = new float[] { 10f, 10f, 10f, 10f, 10f, 10f };
 
         public bool sprayPaintEnabled = true;
+        public int sprayBeamType = 0;
+        public float sprayBeamOpacity = 0.92f;
+        public float inkColorR = 1.0f;
+        public float inkColorG = 0.0f;
+        public float inkColorB = 0.0f;
+        public bool hasCustomInkColor = false;
         public float sprayWidthMm = 4.0f;
         public float sprayPathToleranceMm = 20f;
         public float sprayJumpThresholdMm = 45f;
+        public string preferredIkBranchName = "";
 
         public float toolLength = 100.0f;
         public float toolOffsetX = 0.0f;
@@ -648,6 +778,7 @@ public class DobotCR10AIKController : MonoBehaviour
         EnsureComponents();
         LoadAllSettings();
         ScanAvailableSamples();
+        LoadSavedAppliedBatchSamplesFromDisk();
     }
 
     private void OnEnable()
@@ -678,8 +809,18 @@ public class DobotCR10AIKController : MonoBehaviour
         RefreshAvailableSprayTemplates();
         if (string.IsNullOrEmpty(activeSprayTemplateSize)) activeSprayTemplateSize = "S";
         hasTriggeredSizeAutoSwitch = false;
-        LoadTrajectoryFile();
-        LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: false);
+
+        // Mở app mặc định trống (không nạp sẵn phôi, không nạp sẵn mốc/quỹ đạo cũ)
+        selectedSampleName = "";
+        customPlyPath = "";
+        loadedLandmarksSampleName = "";
+        landmarks3D.Clear();
+        landmarksWorldPos.Clear();
+        garmentContourWorld.Clear();
+        sprayZoneLeftWorld.Clear();
+        sprayZoneRightWorld.Clear();
+        if (waypoints != null) waypoints.Clear();
+        ClearInkTrail();
         EnsureCanonicalJeansCanvasInitialized();
         EnsureCameraController();
 
@@ -700,7 +841,7 @@ public class DobotCR10AIKController : MonoBehaviour
             if (robotManual != null)
             {
                 robotManual.ResetAllSlidersImmediate();
-                robotManual.ikStatus = "Robot ở cấu hình Home (0°). Nhấn CHẠY để bắt đầu.";
+                robotManual.ikStatus = "Chưa nạp phôi. Chọn file .PLY hoặc bấm Chụp + AI để bắt đầu.";
                 robotManual.InitializeTargetFromCurrentPose();
             }
         }
@@ -726,6 +867,36 @@ public class DobotCR10AIKController : MonoBehaviour
             if (Application.isPlaying) Destroy(inkTrailMaterial);
             else DestroyImmediate(inkTrailMaterial);
             inkTrailMaterial = null;
+        }
+        if (spraySolidTex != null)
+        {
+            if (Application.isPlaying) Destroy(spraySolidTex);
+            else DestroyImmediate(spraySolidTex);
+            spraySolidTex = null;
+        }
+        if (sprayFeatheredTex != null)
+        {
+            if (Application.isPlaying) Destroy(sprayFeatheredTex);
+            else DestroyImmediate(sprayFeatheredTex);
+            sprayFeatheredTex = null;
+        }
+        if (depthOverlayObj != null)
+        {
+            if (Application.isPlaying) Destroy(depthOverlayObj);
+            else DestroyImmediate(depthOverlayObj);
+            depthOverlayObj = null;
+        }
+        if (depthOverlayMesh != null)
+        {
+            if (Application.isPlaying) Destroy(depthOverlayMesh);
+            else DestroyImmediate(depthOverlayMesh);
+            depthOverlayMesh = null;
+        }
+        if (depthOverlayMaterial != null)
+        {
+            if (Application.isPlaying) Destroy(depthOverlayMaterial);
+            else DestroyImmediate(depthOverlayMaterial);
+            depthOverlayMaterial = null;
         }
     }
 
@@ -755,12 +926,19 @@ public class DobotCR10AIKController : MonoBehaviour
         PlayerPrefs.SetInt("CR10A_TrajSimSubTab", trajSimSubTab);
         PlayerPrefs.SetInt("CR10A_ConfigSubTab", configSubTab);
         PlayerPrefs.SetInt("CR10A_ShowGizmos", showGizmos ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_ShowCameraAxes", showCameraAxesInCalibration ? 1 : 0);
 
         PlayerPrefs.SetFloat("CR10A_PlaybackSpeed", playbackSpeed);
         PlayerPrefs.SetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
         PlayerPrefs.SetFloat("CR10A_MaxJointAcc", maxJointAccelerationDegPerSecond2);
         PlayerPrefs.SetInt("CR10A_SprayPaint", sprayPaintEnabled ? 1 : 0);
+        PlayerPrefs.SetInt("CR10A_SprayBeamType", (int)sprayBeamType);
+        PlayerPrefs.SetFloat("CR10A_SprayBeamOpacity", sprayBeamOpacity);
+        PlayerPrefs.SetFloat("CR10A_InkColorR", inkColor.r);
+        PlayerPrefs.SetFloat("CR10A_InkColorG", inkColor.g);
+        PlayerPrefs.SetFloat("CR10A_InkColorB", inkColor.b);
         PlayerPrefs.SetFloat("CR10A_SprayWidth", sprayWidthMm);
+        PlayerPrefs.SetString("CR10A_PreferredIkBranch", preferredIkBranchName ?? "");
         PlayerPrefs.SetString("CR10A_TrajectoryCsv", trajectoryCsvPath ?? "");
 
         PlayerPrefs.SetFloat("CR10A_ToolOffsetZ", toolLength);
@@ -792,6 +970,7 @@ public class DobotCR10AIKController : MonoBehaviour
                 trajSimSubTab = trajSimSubTab,
                 configSubTab = configSubTab,
                 showGizmos = showGizmos,
+                showCameraAxesInCalibration = showCameraAxesInCalibration,
                 showJointSpeedControls = showJointSpeedControls,
                 showJointsSubPanel = showJointsSubPanel,
                 showCanonicalDrawPanel = showCanonicalDrawPanel,
@@ -806,9 +985,16 @@ public class DobotCR10AIKController : MonoBehaviour
                     : new float[] { 10f, 10f, 10f, 10f, 10f, 10f },
 
                 sprayPaintEnabled = sprayPaintEnabled,
+                sprayBeamType = (int)sprayBeamType,
+                sprayBeamOpacity = sprayBeamOpacity,
+                inkColorR = inkColor.r,
+                inkColorG = inkColor.g,
+                inkColorB = inkColor.b,
+                hasCustomInkColor = true,
                 sprayWidthMm = sprayWidthMm,
                 sprayPathToleranceMm = sprayPathToleranceMm,
                 sprayJumpThresholdMm = sprayJumpThresholdMm,
+                preferredIkBranchName = preferredIkBranchName ?? "",
 
                 toolLength = toolLength,
                 toolOffsetX = toolOffsetX,
@@ -900,6 +1086,7 @@ public class DobotCR10AIKController : MonoBehaviour
                     trajSimSubTab = data.trajSimSubTab;
                     configSubTab = data.configSubTab;
                     showGizmos = data.showGizmos;
+                    showCameraAxesInCalibration = data.showCameraAxesInCalibration;
                     showJointSpeedControls = data.showJointSpeedControls;
                     showJointsSubPanel = data.showJointsSubPanel;
                     showCanonicalDrawPanel = data.showCanonicalDrawPanel;
@@ -919,9 +1106,23 @@ public class DobotCR10AIKController : MonoBehaviour
                     }
 
                     sprayPaintEnabled = data.sprayPaintEnabled;
+                    sprayBeamType = (SprayBeamType)Mathf.Clamp(data.sprayBeamType, 0, 1);
+                    sprayBeamOpacity = Mathf.Clamp(data.sprayBeamOpacity > 0.05f ? data.sprayBeamOpacity : 0.92f, 0.15f, 1.0f);
+                    if (data.hasCustomInkColor)
+                    {
+                        inkColor = new Color(
+                            Mathf.Clamp01(data.inkColorR),
+                            Mathf.Clamp01(data.inkColorG),
+                            Mathf.Clamp01(data.inkColorB),
+                            1f);
+                    }
                     sprayWidthMm = Mathf.Clamp(data.sprayWidthMm, 0.5f, 50f);
                     sprayPathToleranceMm = Mathf.Clamp(data.sprayPathToleranceMm, 2f, 60f);
                     sprayJumpThresholdMm = Mathf.Clamp(data.sprayJumpThresholdMm, 10f, 200f);
+                    if (!string.IsNullOrEmpty(data.preferredIkBranchName))
+                    {
+                        preferredIkBranchName = data.preferredIkBranchName;
+                    }
 
                     toolLength = Mathf.Max(0f, data.toolLength);
                     toolOffsetX = data.toolOffsetX;
@@ -1012,12 +1213,24 @@ public class DobotCR10AIKController : MonoBehaviour
             trajSimSubTab = PlayerPrefs.GetInt("CR10A_TrajSimSubTab", 0);
             configSubTab = PlayerPrefs.GetInt("CR10A_ConfigSubTab", 0);
             showGizmos = PlayerPrefs.GetInt("CR10A_ShowGizmos", 1) == 1;
+            showCameraAxesInCalibration = PlayerPrefs.GetInt("CR10A_ShowCameraAxes", 0) == 1;
 
             playbackSpeed = PlayerPrefs.GetFloat("CR10A_PlaybackSpeed", 1.0f);
             maxJointSpeedDegPerSecond = PlayerPrefs.GetFloat("CR10A_MaxJointSpeed", maxJointSpeedDegPerSecond);
             maxJointAccelerationDegPerSecond2 = PlayerPrefs.GetFloat("CR10A_MaxJointAcc", maxJointAccelerationDegPerSecond2);
             sprayPaintEnabled = PlayerPrefs.GetInt("CR10A_SprayPaint", sprayPaintEnabled ? 1 : 0) == 1;
+            sprayBeamType = (SprayBeamType)Mathf.Clamp(PlayerPrefs.GetInt("CR10A_SprayBeamType", (int)sprayBeamType), 0, 1);
+            sprayBeamOpacity = Mathf.Clamp(PlayerPrefs.GetFloat("CR10A_SprayBeamOpacity", sprayBeamOpacity), 0.15f, 1.0f);
+            if (PlayerPrefs.HasKey("CR10A_InkColorR"))
+            {
+                inkColor = new Color(
+                    Mathf.Clamp01(PlayerPrefs.GetFloat("CR10A_InkColorR", inkColor.r)),
+                    Mathf.Clamp01(PlayerPrefs.GetFloat("CR10A_InkColorG", inkColor.g)),
+                    Mathf.Clamp01(PlayerPrefs.GetFloat("CR10A_InkColorB", inkColor.b)),
+                    1f);
+            }
             sprayWidthMm = PlayerPrefs.GetFloat("CR10A_SprayWidth", 4.0f);
+            preferredIkBranchName = PlayerPrefs.GetString("CR10A_PreferredIkBranch", preferredIkBranchName ?? "");
             trajectoryCsvPath = PlayerPrefs.GetString("CR10A_TrajectoryCsv", trajectoryCsvPath);
 
             toolLength = PlayerPrefs.GetFloat("CR10A_ToolOffsetZ", toolLength);
@@ -1035,7 +1248,14 @@ public class DobotCR10AIKController : MonoBehaviour
             robotManual.toolOffsetXText = toolOffsetX.ToString("F1", CultureInfo.InvariantCulture);
             robotManual.toolOffsetYText = toolOffsetY.ToString("F1", CultureInfo.InvariantCulture);
         }
+        if (string.IsNullOrEmpty(preferredIkBranchName) && PlayerPrefs.HasKey("CR10A_PreferredIkBranch"))
+        {
+            preferredIkBranchName = PlayerPrefs.GetString("CR10A_PreferredIkBranch", "");
+        }
+        DobotCR10AKinematics.PreferredBranchName = preferredIkBranchName ?? "";
+
         UpdateSprayWidth(sprayWidthMm);
+        RefreshInkTrailAppearance();
 
         customWaypointConfigurations.Clear();
         string key = "CR10A_CustomWpConfigs_" + (string.IsNullOrEmpty(trajectoryCsvPath) ? "default" : trajectoryCsvPath.Replace("/", "_").Replace("\\", "_"));
@@ -1097,10 +1317,12 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         EnsureInkTrailMaterial();
         lineRenderer.sharedMaterial = inkTrailMaterial;
+        lineRenderer.textureMode = LineTextureMode.Stretch;
         lineRenderer.startWidth = sprayWidthMm * 0.001f;
         lineRenderer.endWidth = sprayWidthMm * 0.001f;
-        lineRenderer.startColor = inkColor;
-        lineRenderer.endColor = inkColor;
+        Color effCol = GetEffectiveSprayRenderColor();
+        lineRenderer.startColor = effCol;
+        lineRenderer.endColor = effCol;
         lineRenderer.numCapVertices = 4;
         lineRenderer.numCornerVertices = 4;
         lineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -1110,12 +1332,69 @@ public class DobotCR10AIKController : MonoBehaviour
     }
 
     private Material inkTrailMaterial;
+    private Texture2D spraySolidTex;
+    private Texture2D sprayFeatheredTex;
+
+    public Color GetEffectiveSprayRenderColor()
+    {
+        float a = Mathf.Clamp(sprayBeamOpacity, 0.15f, 1.0f);
+        return new Color(inkColor.r, inkColor.g, inkColor.b, a);
+    }
+
+    private void EnsureSprayBeamTextures()
+    {
+        if (spraySolidTex == null)
+        {
+            const int w = 8, h = 64;
+            spraySolidTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            spraySolidTex.name = "CR10A_SpraySolidTex";
+            spraySolidTex.wrapMode = TextureWrapMode.Clamp;
+            spraySolidTex.filterMode = FilterMode.Bilinear;
+            spraySolidTex.hideFlags = HideFlags.DontSave;
+            Color[] px = new Color[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                float edgeDist = Mathf.Abs(((y + 0.5f) / h) * 2f - 1f);
+                // Sắc nét (Solid) với 1px khử răng cưa nhẹ ở rìa ngoài cùng
+                float a = edgeDist <= 0.94f ? 1f : Mathf.Clamp01((1f - edgeDist) / 0.06f);
+                Color c = new Color(1f, 1f, 1f, a);
+                for (int x = 0; x < w; x++) px[y * w + x] = c;
+            }
+            spraySolidTex.SetPixels(px);
+            spraySolidTex.Apply(false, true);
+        }
+
+        if (sprayFeatheredTex == null)
+        {
+            const int w = 8, h = 64;
+            sprayFeatheredTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            sprayFeatheredTex.name = "CR10A_SprayFeatheredTex";
+            sprayFeatheredTex.wrapMode = TextureWrapMode.Clamp;
+            sprayFeatheredTex.filterMode = FilterMode.Bilinear;
+            sprayFeatheredTex.hideFlags = HideFlags.DontSave;
+            Color[] px = new Color[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                float d = Mathf.Abs(((y + 0.5f) / h) * 2f - 1f); // 0 ở tâm tia phun -> 1 ở 2 mép ngoài
+                // Mật độ Gaussian mờ dần êm từ tâm tia phun ra biên về 0
+                float gauss = Mathf.Exp(-4.6f * d * d);
+                float edgeFade = Mathf.Clamp01((1f - d) * 4f);
+                float a = Mathf.Clamp01(gauss * edgeFade);
+                Color c = new Color(1f, 1f, 1f, a);
+                for (int x = 0; x < w; x++) px[y * w + x] = c;
+            }
+            sprayFeatheredTex.SetPixels(px);
+            sprayFeatheredTex.Apply(false, true);
+        }
+    }
 
     private void EnsureInkTrailMaterial()
     {
+        EnsureSprayBeamTextures();
         if (inkTrailMaterial == null)
         {
-            Shader sh = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color");
+            // Sprites/Default hỗ trợ alpha-blending + vertex color + _MainTex ổn định trên cả URP & Built-in
+            Shader sh = Shader.Find("Sprites/Default") ?? Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
             if (sh != null)
             {
                 inkTrailMaterial = new Material(sh);
@@ -1125,51 +1404,85 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         if (inkTrailMaterial != null)
         {
-            inkTrailMaterial.color = inkColor;
+            Texture2D activeTex = (sprayBeamType == SprayBeamType.SoftFeathered) ? sprayFeatheredTex : spraySolidTex;
+            inkTrailMaterial.mainTexture = activeTex;
+            if (inkTrailMaterial.HasProperty("_BaseMap")) inkTrailMaterial.SetTexture("_BaseMap", activeTex);
+            inkTrailMaterial.color = Color.white;
             if (inkTrailMaterial.HasProperty("_BaseColor"))
             {
-                inkTrailMaterial.SetColor("_BaseColor", inkColor);
+                inkTrailMaterial.SetColor("_BaseColor", Color.white);
             }
+        }
+    }
+
+    public void RefreshInkTrailAppearance()
+    {
+        EnsureInkTrailMaterial();
+        float widthM = sprayWidthMm * 0.001f;
+        Color effCol = GetEffectiveSprayRenderColor();
+
+        if (lineRenderer != null)
+        {
+            lineRenderer.sharedMaterial = inkTrailMaterial;
+            lineRenderer.textureMode = LineTextureMode.Stretch;
+            lineRenderer.startWidth = widthM;
+            lineRenderer.endWidth = widthM;
+            lineRenderer.startColor = effCol;
+            lineRenderer.endColor = effCol;
+        }
+        for (int i = 0; i < committedTrailRenderers.Count; i++)
+        {
+            var lr = committedTrailRenderers[i];
+            if (lr == null) continue;
+            lr.sharedMaterial = inkTrailMaterial;
+            lr.textureMode = LineTextureMode.Stretch;
+            lr.startWidth = widthM;
+            lr.endWidth = widthM;
+            lr.startColor = effCol;
+            lr.endColor = effCol;
         }
     }
 
     public void UpdateSprayWidth(float widthMm)
     {
         sprayWidthMm = Mathf.Clamp(widthMm, 0.5f, 50.0f);
-        float widthM = sprayWidthMm * 0.001f;
-        if (lineRenderer != null)
-        {
-            lineRenderer.startWidth = widthM;
-            lineRenderer.endWidth = widthM;
-        }
-        for (int i = 0; i < committedTrailRenderers.Count; i++)
-        {
-            if (committedTrailRenderers[i] != null)
-            {
-                committedTrailRenderers[i].startWidth = widthM;
-                committedTrailRenderers[i].endWidth = widthM;
-            }
-        }
+        RefreshInkTrailAppearance();
     }
 
     public void SetInkColor(Color color)
     {
-        inkColor = color;
-        EnsureInkTrailMaterial();
-        if (lineRenderer != null)
+        inkColor = new Color(Mathf.Clamp01(color.r), Mathf.Clamp01(color.g), Mathf.Clamp01(color.b), 1f);
+        RefreshInkTrailAppearance();
+        MarkSettingsDirty();
+    }
+
+    public void SetSprayBeamType(SprayBeamType beamType)
+    {
+        sprayBeamType = beamType;
+        RefreshInkTrailAppearance();
+        MarkSettingsDirty();
+    }
+
+    public void SetSprayBeamOpacity(float opacity)
+    {
+        sprayBeamOpacity = Mathf.Clamp(opacity, 0.15f, 1.0f);
+        RefreshInkTrailAppearance();
+        MarkSettingsDirty();
+    }
+
+    public void SetPreferredIkBranch(string branchName, bool persistImmediately = true)
+    {
+        preferredIkBranchName = branchName ?? "";
+        DobotCR10AKinematics.PreferredBranchName = preferredIkBranchName;
+        PlayerPrefs.SetString("CR10A_PreferredIkBranch", preferredIkBranchName);
+        PlayerPrefs.Save();
+        if (persistImmediately)
         {
-            lineRenderer.sharedMaterial = inkTrailMaterial;
-            lineRenderer.startColor = inkColor;
-            lineRenderer.endColor = inkColor;
+            SaveAllWorkbenchSetups(showToast: true);
         }
-        for (int i = 0; i < committedTrailRenderers.Count; i++)
+        else
         {
-            if (committedTrailRenderers[i] != null)
-            {
-                committedTrailRenderers[i].sharedMaterial = inkTrailMaterial;
-                committedTrailRenderers[i].startColor = inkColor;
-                committedTrailRenderers[i].endColor = inkColor;
-            }
+            MarkSettingsDirty();
         }
     }
 
@@ -1446,8 +1759,9 @@ public class DobotCR10AIKController : MonoBehaviour
         if (waypoints == null || waypoints.Count == 0) return;
         int solvedCount = 0;
 
-        // Dùng nghiệm waypoint 0 (nếu đã có từ CSV hoặc lần tính trước) làm seed định hướng ban đầu
-        float[] lastAngles = waypoints[0].isSolved && waypoints[0].jointAngles_rad != null && waypoints[0].jointAngles_rad.Length >= 6
+        // Nếu người dùng có nhánh IK ưu tiên, khởi tạo điểm 0 đúng nhánh ưu tiên rồi bám liên tục sang các điểm kế tiếp (không nháy tư thế!)
+        float[] lastAngles = (string.IsNullOrEmpty(preferredIkBranchName) &&
+                              waypoints[0].isSolved && waypoints[0].jointAngles_rad != null && waypoints[0].jointAngles_rad.Length >= 6)
             ? (float[])waypoints[0].jointAngles_rad.Clone()
             : null;
 
@@ -1458,7 +1772,9 @@ public class DobotCR10AIKController : MonoBehaviour
             var sols = DobotCR10AKinematics.SolveTcpPose(wp.targetPosGlobal_mm, rot, lastAngles, toolLength, useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
             if (sols != null && sols.Count > 0)
             {
-                var best = sols[0];
+                var best = (i == 0 && !string.IsNullOrEmpty(preferredIkBranchName))
+                    ? DobotCR10AKinematics.SelectPreferredSolution(sols, preferredIkBranchName)
+                    : sols[0];
                 for (int j = 0; j < 6; j++)
                 {
                     wp.jointAngles_rad[j] = (float)best.jointsRad[j];
@@ -1466,6 +1782,8 @@ public class DobotCR10AIKController : MonoBehaviour
                 }
                 wp.isSolved = true;
                 wp.posError_mm = (float)best.positionErrorMm;
+                wp.selectedBranchName = best.branchName;
+                wp.selectedSolutionIndex = 0;
                 lastAngles = wp.jointAngles_rad;
                 solvedCount++;
             }
@@ -1528,8 +1846,15 @@ public class DobotCR10AIKController : MonoBehaviour
                     UpdateMeasuredTcpSpeedCv();
                     cycleTimerSec = 0f;
                     recordedSpraySpeedsMmS.Clear();
+                    // Chạy xong toàn bộ quỹ đạo -> tắt phun, dừng và tự động quay về Home
+                    SetSprayState(false);
+                    MoveToHomeGradually();
+                    if (robotManual != null)
+                        robotManual.ikStatus = $"Hoàn tất phun quỹ đạo ({waypoints.Count} điểm, {measuredCycleTimeSec:F1}s). Đang tự động về Home và dừng...";
+                    UpdateInkTrail();
+                    return;
                 }
-                currentWaypointIndex = (currentWaypointIndex + 1) % waypoints.Count;
+                currentWaypointIndex++;
                 if (robotManual != null)
                     robotManual.ikStatus = $"Đang vận hành quỹ đạo ({currentWaypointIndex + 1}/{waypoints.Count}) | v_TCP={liveTcpSpeedMmPerSec:F0} mm/s...";
             }
@@ -1559,6 +1884,11 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         UpdateInkTrail();
+    }
+
+    private void LateUpdate()
+    {
+        RebuildDepthTested3DOverlayMesh();
     }
 
     private void UpdateMeasuredTcpSpeedCv()
@@ -1721,27 +2051,44 @@ public class DobotCR10AIKController : MonoBehaviour
 
                 if (sols != null && sols.Count > 0)
                 {
+                    // Khi đang bám liên tục theo thời gian thực, LUÔN chọn nghiệm gần curQ nhất (sols[0])
+                    // và chặn bước nhảy góc lớn (> 25°/frame) để robot TUYỆT ĐỐI không bị nháy qua lại giữa 2 tư thế!
                     var best = sols[0];
-                    robotManual.axis0 = (float)best.jointsRad[0];
-                    robotManual.axis1 = (float)best.jointsRad[1];
-                    robotManual.axis2 = (float)best.jointsRad[2];
-                    robotManual.axis3 = (float)best.jointsRad[3];
-                    robotManual.axis4 = (float)best.jointsRad[4];
-                    robotManual.axis5 = (float)best.jointsRad[5];
-                    robotManual.ApplyRotations();
-
-                    bool sprayNow = sprayPaintEnabled && tcpTransform != null && waypoint.sprayOn;
-                    if (sprayNow && !prevWp.sprayOn && cartesianSegProgress <= (speedMmS * Mathf.Max(0f, deltaTime)) / segLenMm + 1e-4f)
+                    float maxJumpDeg = 0f;
+                    for (int j = 0; j < 6; j++)
                     {
-                        SetSprayState(false);
-                    }
-                    SetSprayState(sprayNow);
-                    if (sprayNow)
-                    {
-                        RecordSprayInkPoint(tcpTransform.position);
+                        float d = Mathf.Abs(Mathf.DeltaAngle(curQ[j] * Mathf.Rad2Deg, (float)best.jointsRad[j] * Mathf.Rad2Deg));
+                        if (d > maxJumpDeg) maxJumpDeg = d;
                     }
 
-                    return cartesianSegProgress >= 1f;
+                    if (maxJumpDeg <= 25f)
+                    {
+                        robotManual.axis0 = (float)best.jointsRad[0];
+                        robotManual.axis1 = (float)best.jointsRad[1];
+                        robotManual.axis2 = (float)best.jointsRad[2];
+                        robotManual.axis3 = (float)best.jointsRad[3];
+                        robotManual.axis4 = (float)best.jointsRad[4];
+                        robotManual.axis5 = (float)best.jointsRad[5];
+                        robotManual.ApplyRotations();
+
+                        bool sprayNow = sprayPaintEnabled && tcpTransform != null && waypoint.sprayOn;
+                        if (sprayNow && !prevWp.sprayOn && cartesianSegProgress <= (speedMmS * Mathf.Max(0f, deltaTime)) / segLenMm + 1e-4f)
+                        {
+                            SetSprayState(false);
+                        }
+                        SetSprayState(sprayNow);
+                        if (sprayNow)
+                        {
+                            RecordSprayInkPoint(tcpTransform.position);
+                        }
+
+                        return cartesianSegProgress >= 1f;
+                    }
+                    else
+                    {
+                        // Nếu bước nội suy Cartesian chạm ranh giới đảo nhánh -> dùng nội suy khớp mượt thay vì nhảy tư thế
+                        cartesianSegProgress = 0f;
+                    }
                 }
             }
         }
@@ -2047,10 +2394,12 @@ public class DobotCR10AIKController : MonoBehaviour
             LineRenderer lr = go.AddComponent<LineRenderer>();
             lr.useWorldSpace = true;
             lr.sharedMaterial = inkTrailMaterial != null ? inkTrailMaterial : lineRenderer.sharedMaterial;
+            lr.textureMode = LineTextureMode.Stretch;
             lr.startWidth = sprayWidthMm * 0.001f;
             lr.endWidth = sprayWidthMm * 0.001f;
-            lr.startColor = inkColor;
-            lr.endColor = inkColor;
+            Color effCol = GetEffectiveSprayRenderColor();
+            lr.startColor = effCol;
+            lr.endColor = effCol;
             lr.numCapVertices = 4;
             lr.numCornerVertices = 4;
             lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -2157,21 +2506,35 @@ public class DobotCR10AIKController : MonoBehaviour
     /// </summary>
     public void OpenFileBrowserForSample()
     {
-#if UNITY_EDITOR
-        string defaultDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "dataset", "_3D"));
-        if (!Directory.Exists(defaultDir))
+        string defaultDir = "";
+        if (!string.IsNullOrEmpty(customPlyPath))
         {
-            defaultDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "dataset", "_3D"));
+            try
+            {
+                string prevDir = Path.GetDirectoryName(customPlyPath);
+                if (!string.IsNullOrEmpty(prevDir) && Directory.Exists(prevDir)) defaultDir = prevDir;
+            }
+            catch { }
+        }
+        if (string.IsNullOrEmpty(defaultDir))
+        {
+            string[] candidates =
+            {
+                Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "dataset", "_3D")),
+                Path.GetFullPath(Path.Combine(Application.dataPath, "..", "dataset", "_3D")),
+                Path.GetFullPath(Path.Combine(Application.dataPath, ".."))
+            };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (Directory.Exists(candidates[i])) { defaultDir = candidates[i]; break; }
+            }
         }
 
-        string chosen = UnityEditor.EditorUtility.OpenFilePanel("Chọn file Point Cloud (.ply)", defaultDir, "ply");
+        string chosen = NativeFileDialog.OpenFile("Chọn file Point Cloud (.ply)", defaultDir, "ply");
         if (!string.IsNullOrEmpty(chosen))
         {
             SelectSampleByFullPath(chosen);
         }
-#else
-        Debug.LogWarning("[CR10A] OpenFilePanel chỉ khả dụng trong môi trường Unity Editor.");
-#endif
     }
 
     /// <summary>
@@ -2188,27 +2551,12 @@ public class DobotCR10AIKController : MonoBehaviour
     public void SelectSampleByFullPath(string fullPath)
     {
         if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return;
-        StopPlaybackForNewFrame();
-        waypoints.Clear();
+        InvalidateGeneratedTrajectoryOnEdit();
+        lastMissingLandmarksSampleName = "";
         selectedSampleName = Path.GetFileNameWithoutExtension(fullPath);
         customPlyPath = fullPath;
         ReloadPointCloudFromPath(fullPath);
-        LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true);
-
-        // Chỉ nạp file CSV dự phòng nếu chưa sinh được quỹ đạo từ mẫu/phương pháp hiện tại
-        if (waypoints == null || waypoints.Count == 0)
-        {
-            string candidateTraj = $"output_drawing/{selectedSampleName}_pen_trajectory.csv";
-            string resolvedTraj = Path.Combine(Application.dataPath, "..", candidateTraj);
-            if (!File.Exists(resolvedTraj))
-            {
-                resolvedTraj = Path.Combine(Application.dataPath, "..", "..", candidateTraj);
-            }
-            if (File.Exists(resolvedTraj))
-            {
-                LoadNamedTrajectory(candidateTraj);
-            }
-        }
+        LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
         SaveAllSettings();
     }
 
@@ -2258,22 +2606,9 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             ReloadPointCloudFromPath(customPlyPath);
         }
-        LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true);
-
-        // Chỉ nạp file quỹ đạo dự phòng nếu chưa sinh được quỹ đạo từ mẫu/phương pháp hiện tại
-        if (waypoints == null || waypoints.Count == 0)
-        {
-            string candidateTraj = $"output_drawing/{selectedSampleName}_pen_trajectory.csv";
-            string resolvedTraj = Path.Combine(Application.dataPath, "..", candidateTraj);
-            if (!File.Exists(resolvedTraj))
-            {
-                resolvedTraj = Path.Combine(Application.dataPath, "..", "..", candidateTraj);
-            }
-            if (File.Exists(resolvedTraj))
-            {
-                LoadNamedTrajectory(candidateTraj);
-            }
-        }
+        InvalidateGeneratedTrajectoryOnEdit();
+        lastMissingLandmarksSampleName = "";
+        LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
         SaveAllSettings();
     }
 
@@ -2308,11 +2643,11 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private int trajSimSubTab = 0; // 0: Mô phỏng, 1: Quỹ đạo 2D->3D
     private int configSubTab = 0;  // 0: Robot & Đầu phun, 1: Hiệu chuẩn Camera
-    public bool showCameraAxesInCalibration = true; // Hiện trục tọa độ XYZ của Camera khi đang hiệu chuẩn
+    public bool showCameraAxesInCalibration = false; // Hiện trục tọa độ XYZ của Camera (chỉnh trong tab 2. Views)
 
     private bool ShouldDrawCameraAxes3D()
     {
-        return showCameraAxesInCalibration && showDockPanel && (interfaceTab == 9 || (interfaceTab == 1 && configSubTab == 1));
+        return showCameraAxesInCalibration;
     }
 
     private static readonly string[] SinglePanelTabTitles =
@@ -2509,7 +2844,8 @@ public class DobotCR10AIKController : MonoBehaviour
             {
                 OpenOrFocusPanel(pIdx);
                 if (pIdx == 5 && diagnosticResults.Count == 0) RunDiagnostics();
-                if (pIdx == 6) LoadLandmarksAndSegmentationForSample(selectedSampleName);
+                if (pIdx == 6 && (landmarks3D.Count == 0 || loadedLandmarksSampleName != GetActiveCloudSampleName()))
+                    LoadLandmarksAndSegmentationForSample(selectedSampleName);
                 if (pIdx == 7 && detectedHoleCount == 0) DetectOcclusionAndHoles();
             }
             if (isCurrent)
@@ -2563,6 +2899,10 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             DrawFullscreenEvaluationReportOverlay(totalHeaderH);
         }
+        else
+        {
+            DrawViewportTrajectoryProgressHud();
+        }
 
         WorkbenchDockVisible = showDockPanel && !showFullscreen2DCanvas && !showFullscreenEvaluationReport;
         WorkbenchDockWidth = (showDockPanel && !showFullscreen2DCanvas && !showFullscreenEvaluationReport) ? singleMainPanel.rect.width : 0f;
@@ -2576,12 +2916,13 @@ public class DobotCR10AIKController : MonoBehaviour
 
     private void DrawTrajectoryAndSimCombinedCard(float width)
     {
+        if (trajSimSubTab > 1) trajSimSubTab = 1;
         GUILayout.BeginHorizontal(GUILayout.Width(width));
         if (GUILayout.Button("Mô phỏng", trajSimSubTab == 0 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
             trajSimSubTab = 0;
         }
-        if (GUILayout.Button("Quỹ đạo 2D -> 3D", trajSimSubTab == 1 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+        if (GUILayout.Button("Dạy phun & Quỹ đạo", trajSimSubTab == 1 ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
             trajSimSubTab = 1;
         }
@@ -2592,6 +2933,1022 @@ public class DobotCR10AIKController : MonoBehaviour
             DrawSimCard(width, null);
         else
             DrawTrajectoryEditingCard(width, null);
+    }
+
+    private static T CloneSerializable<T>(T src) where T : new()
+    {
+        if (src == null) return new T();
+        return JsonUtility.FromJson<T>(JsonUtility.ToJson(src));
+    }
+
+    private static string GetMethodMultiSampleSupportNote(string method)
+    {
+        switch (method)
+        {
+            case "P1":
+                return "P1 (Hỗ trợ nhiều mẫu): tự ánh xạ vùng dạy theo 12 mốc rồi sinh Zigzag với cấu hình P1.";
+            case "P2":
+                return "P2 (Hỗ trợ nhiều mẫu): tự áp vùng dạy bám trục giữa / biên ống quần mới với cấu hình P2.";
+            case "P3":
+                return "P3 (Hỗ trợ nhiều mẫu - Khuyến nghị): biến dạng lưới 12 mốc Barycentric sang mọi cỡ S/M/L.";
+            case "P4":
+                return "P4 (Hỗ trợ nhiều mẫu): đăng ký đám mây điểm 3D (ICP + CPD/TPS) sang phôi mới + chặn sai số.";
+            default:
+                return "Chọn P1, P2, P3 hoặc P4 để áp dụng mẫu dạy cho nhiều phôi.";
+        }
+    }
+
+    private void CaptureCurrentDrawnRegionsToCanonical()
+    {
+        taughtCanonicalRegions.Clear();
+        if (customDrawnRegions == null || customDrawnRegions.Count == 0) return;
+
+        Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        bool usingRealCam = (camTex != null);
+        Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, usingRealCam, out bool hasRealLm);
+        Vector2[] canonLmUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+        float camAspect = GetActiveCameraMetricAspect(plyLoader, nativeW, nativeH);
+
+        for (int r = 0; r < customDrawnRegions.Count; r++)
+        {
+            var src = customDrawnRegions[r];
+            if (src == null || src.verticesUV == null || src.verticesUV.Count < 3) continue;
+            var canonReg = new DrawnRegion2D
+            {
+                shapeType = src.shapeType,
+                brushWidthMm = src.brushWidthMm > 0.4f ? src.brushWidthMm : sprayWidthMm,
+                verticesUV = new List<Vector2>(src.verticesUV.Count)
+            };
+
+            Vector2 MapToCanon(Vector2 pt)
+            {
+                return (usingRealCam && hasRealLm && camLmUV != null)
+                    ? WarpUV2D(pt, camLmUV, canonLmUV, camAspect, 1f)
+                    : pt;
+            }
+
+            bool hasExistingCanon = (src.canonicalVerticesUV != null && src.canonicalVerticesUV.Count >= 3);
+            float minU = float.MaxValue, maxU = float.MinValue, minV = float.MaxValue, maxV = float.MinValue;
+            if (hasExistingCanon)
+            {
+                for (int i = 0; i < src.canonicalVerticesUV.Count; i++)
+                {
+                    Vector2 cp = src.canonicalVerticesUV[i];
+                    canonReg.verticesUV.Add(cp);
+                    if (cp.x < minU) minU = cp.x; if (cp.x > maxU) maxU = cp.x;
+                    if (cp.y < minV) minV = cp.y; if (cp.y > maxV) maxV = cp.y;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < src.verticesUV.Count; i++)
+                {
+                    Vector2 cp = MapToCanon(src.verticesUV[i]);
+                    canonReg.verticesUV.Add(cp);
+                    if (cp.x < minU) minU = cp.x; if (cp.x > maxU) maxU = cp.x;
+                    if (cp.y < minV) minV = cp.y; if (cp.y > maxV) maxV = cp.y;
+                }
+            }
+            canonReg.canonicalVerticesUV = new List<Vector2>(canonReg.verticesUV);
+            canonReg.rectUV = new Rect(minU, minV, Mathf.Max(0.002f, maxU - minU), Mathf.Max(0.002f, maxV - minV));
+            if (src.shapeType == CanvasDrawTool.Circle)
+            {
+                canonReg.centerUV = hasExistingCanon
+                    ? new Vector2(0.5f * (minU + maxU), 0.5f * (minV + maxV))
+                    : MapToCanon(src.centerUV);
+                canonReg.radiusUV = new Vector2(
+                    Mathf.Max(0.003f, 0.5f * (maxU - minU)),
+                    Mathf.Max(0.003f, 0.5f * (maxV - minV))
+                );
+            }
+            taughtCanonicalRegions.Add(canonReg);
+        }
+    }
+
+    private bool ReprojectTaughtCanonicalRegionsOntoCurrentCamera()
+    {
+        if (taughtCanonicalRegions == null || taughtCanonicalRegions.Count == 0) return false;
+
+        Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        bool usingRealCam = (camTex != null);
+        Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, usingRealCam, out bool hasRealLm);
+        Vector2[] canonLmUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+        float camAspect = GetActiveCameraMetricAspect(plyLoader, nativeW, nativeH);
+
+        customDrawnRegions.Clear();
+        selectedRegionIndex = -1;
+        activeRegionEditMode = RegionEditMode.None;
+
+        Vector2 MapToCam(Vector2 pt)
+        {
+            Vector2 res = (usingRealCam && hasRealLm && camLmUV != null)
+                ? WarpUV2D(pt, canonLmUV, camLmUV, 1f, camAspect)
+                : pt;
+            return new Vector2(Mathf.Clamp01(res.x), Mathf.Clamp01(res.y));
+        }
+
+        for (int r = 0; r < taughtCanonicalRegions.Count; r++)
+        {
+            var src = taughtCanonicalRegions[r];
+            if (src == null || src.verticesUV == null || src.verticesUV.Count < 3) continue;
+            var dst = new DrawnRegion2D
+            {
+                shapeType = src.shapeType,
+                brushWidthMm = src.brushWidthMm > 0.4f ? src.brushWidthMm : sprayWidthMm,
+                verticesUV = new List<Vector2>(src.verticesUV.Count),
+                // Bảo toàn chính xác tọa độ canonical gốc (tránh biến dạng lặp 2 lần khi chạy P3/P4!)
+                canonicalVerticesUV = new List<Vector2>(
+                    (src.canonicalVerticesUV != null && src.canonicalVerticesUV.Count >= 3) ? src.canonicalVerticesUV : src.verticesUV)
+            };
+
+            float minU = float.MaxValue, maxU = float.MinValue, minV = float.MaxValue, maxV = float.MinValue;
+            Vector2 sumPt = Vector2.zero;
+            for (int i = 0; i < src.verticesUV.Count; i++)
+            {
+                Vector2 mp = MapToCam(src.verticesUV[i]);
+                dst.verticesUV.Add(mp);
+                sumPt += mp;
+                if (mp.x < minU) minU = mp.x; if (mp.x > maxU) maxU = mp.x;
+                if (mp.y < minV) minV = mp.y; if (mp.y > maxV) maxV = mp.y;
+            }
+            dst.rectUV = new Rect(minU, minV, Mathf.Max(0.002f, maxU - minU), Mathf.Max(0.002f, maxV - minV));
+            if (src.shapeType == CanvasDrawTool.Circle)
+            {
+                dst.centerUV = (src.centerUV.sqrMagnitude > 1e-6f) ? MapToCam(src.centerUV) : (sumPt / Mathf.Max(1, dst.verticesUV.Count));
+                dst.radiusUV = new Vector2(Mathf.Max(0.003f, dst.rectUV.width * 0.5f), Mathf.Max(0.003f, dst.rectUV.height * 0.5f));
+                // Giữ chính xác đa giác đã biến dạng theo 12 mốc thay vì ép lại thành hình ellipse lệch góc
+            }
+            customDrawnRegions.Add(dst);
+        }
+        return customDrawnRegions.Count > 0;
+    }
+
+    public void RecordCurrentTeachingRecipe()
+    {
+        bool hasAnyRegion = customDrawnRegions != null && customDrawnRegions.Count > 0;
+        bool hasAnyFreehand = customDrawnStrokes != null && customDrawnStrokes.Count > 0;
+        bool hasAnyCanonStroke = canonicalPatternStrokes != null && canonicalPatternStrokes.Count > 0;
+        if (!hasAnyRegion && !hasAnyFreehand && !hasAnyCanonStroke)
+        {
+            teachingStatusMsg = "Chưa có hình vùng hoặc nét vẽ để ghi mẫu dạy. Hãy mở bảng vẽ mẫu trước.";
+            return;
+        }
+
+        if (hasAnyFreehand)
+        {
+            CaptureCurrentStrokesToCanonical();
+        }
+        else if (hasAnyRegion)
+        {
+            // Nếu mẫu dạy chỉ gồm các vùng hình (Tròn / Vuông / Đa giác), xóa nét cũ tránh lẫn vòng viền rỗng
+            canonicalPatternStrokes.Clear();
+        }
+        if (hasAnyRegion)
+        {
+            CaptureCurrentDrawnRegionsToCanonical();
+        }
+
+        string activeSample = GetActiveCloudSampleName();
+        if (!string.IsNullOrEmpty(activeSample)) taughtSourceSampleName = activeSample;
+        if (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" || activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4")
+        {
+            taughtMethod = activeTrajectoryMethod;
+        }
+        else if (string.IsNullOrEmpty(taughtMethod) || (taughtMethod != "P1" && taughtMethod != "P2" && taughtMethod != "P3" && taughtMethod != "P4"))
+        {
+            taughtMethod = "P3";
+        }
+
+        SyncP1ConfigFromTechParamsIfNeeded();
+        SyncP2ConfigFromTechParamsIfNeeded();
+        SyncP3ConfigFromTechParamsIfNeeded();
+        SyncP4ConfigFromTechParamsIfNeeded();
+
+        // Cập nhật mẫu chuẩn 3D cho P4 từ đúng phôi & vùng/nét vừa dạy (để P4 áp dụng lên phôi mới giống hệt lúc dạy!)
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (plyLoader != null && !string.IsNullOrEmpty(activeSample))
+        {
+            float voxelM = p4Config != null ? Mathf.Clamp(p4Config.voxelSizeMm, 2f, 15f) * 0.001f : 0.005f;
+            var srcCloud = plyLoader.ExtractGarmentSurfaceCloudVoxelized(voxelM, garmentContourWorld, 520);
+            if (srcCloud != null && srcCloud.Count >= 30)
+            {
+                templateReferenceCloud3DWorld = new List<Vector3>(srcCloud);
+                templateReferenceSampleName = activeSample;
+                if (landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+                    templateReferenceLandmarks3D = new List<Vector3>(landmarksWorldPos);
+
+                var refStrokes3D = new List<List<Vector3>>();
+                if (hasAnyRegion)
+                {
+                    var polysXZ = GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
+                    float effStepMm = ComputeEffectiveRegionFillSpacingMm();
+                    for (int r = 0; r < polysXZ.Count; r++)
+                    {
+                        var metricPaths = BuildMetricSprayPathsForWorldPolygon(polysXZ[r], effStepMm, useExactStepMm: true);
+                        for (int k = 0; k < metricPaths.Count; k++)
+                        {
+                            var s3 = new List<Vector3>(metricPaths[k].Count);
+                            for (int p = 0; p < metricPaths[k].Count; p++)
+                            {
+                                Vector2 xz = metricPaths[k][p];
+                                float y = plyLoader.SampleSurfaceWorldHeightAndNormal(xz.x, xz.y, out float cy, out _) ? cy : (plyLoader.estimatedTableY + 0.025f);
+                                s3.Add(new Vector3(xz.x, y, xz.y));
+                            }
+                            if (s3.Count >= 2) refStrokes3D.Add(s3);
+                        }
+                    }
+                }
+                if (refStrokes3D.Count > 0)
+                {
+                    templateReferenceStrokes3DWorld = refStrokes3D;
+                }
+                else
+                {
+                    templateReferenceStrokes3DWorld.Clear();
+                }
+            }
+        }
+
+        hasRecordedTeachingRecipe = true;
+
+        teachingStatusMsg = $"Đã ghi mẫu dạy [{taughtSourceSampleName}] ({taughtCanonicalRegions.Count} vùng, {canonicalPatternStrokes.Count} nét) | {taughtMethod} | Cọ {sprayWidthMm:F1}mm | Z {customDrawZOffsetMm:F1}mm.";
+    }
+
+    public void ApplyTaughtRecipeToCurrentSample()
+    {
+        if (!hasRecordedTeachingRecipe &&
+            (taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0 || customDrawnRegions.Count > 0 || customDrawnStrokes.Count > 0))
+        {
+            RecordCurrentTeachingRecipe();
+        }
+
+        if (taughtCanonicalRegions.Count == 0 && canonicalPatternStrokes.Count == 0 &&
+            customDrawnRegions.Count == 0 && customDrawnStrokes.Count == 0)
+        {
+            teachingStatusMsg = "Chưa có mẫu dạy nào. Hãy vẽ mẫu hoặc nạp file mẫu (.json) trước.";
+            return;
+        }
+
+        if (taughtCanonicalRegions.Count > 0)
+        {
+            ReprojectTaughtCanonicalRegionsOntoCurrentCamera();
+        }
+        if (canonicalPatternStrokes.Count > 0)
+        {
+            ReprojectCanonicalPatternOntoCurrentCameraImage();
+        }
+
+        string methodToRun = (taughtMethod == "P1" || taughtMethod == "P2" || taughtMethod == "P3" || taughtMethod == "P4")
+            ? taughtMethod
+            : "P3";
+
+        if (methodToRun == "P1") SyncP1ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P2") SyncP2ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P3") SyncP3ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P4") SyncP4ConfigFromTechParamsIfNeeded();
+
+        GenerateAndApplyMethodTrajectory(methodToRun);
+        showGizmos = true;
+        showTurnaroundConnectors = true;
+        int solved = 0;
+        for (int i = 0; i < waypoints.Count; i++) if (waypoints[i].isSolved) solved++;
+        float pct = waypoints.Count > 0 ? (100f * solved / waypoints.Count) : 0f;
+        teachingStatusMsg = $"Đã áp dụng [{methodToRun}] lên [{GetActiveCloudSampleName()}]: {waypoints.Count} điểm (IK {pct:F0}%).";
+    }
+
+    private string GetAppliedBatchSamplesDirectoryFullPath()
+    {
+        string raw = string.IsNullOrWhiteSpace(appliedBatchSamplesDirectory)
+            ? "output_drawing/applied_batch_samples"
+            : appliedBatchSamplesDirectory.Trim();
+        string full = Path.IsPathRooted(raw)
+            ? Path.GetFullPath(raw)
+            : Path.GetFullPath(Path.Combine(Application.dataPath, "..", raw));
+        if (!Directory.Exists(full)) Directory.CreateDirectory(full);
+        return full;
+    }
+
+    private static string SanitizeAppliedSampleStem(string rawName)
+    {
+        string stem = string.IsNullOrWhiteSpace(rawName) ? "sample" : Path.GetFileNameWithoutExtension(rawName).Trim();
+        var sb = new System.Text.StringBuilder(stem.Length);
+        for (int i = 0; i < stem.Length; i++)
+        {
+            char c = stem[i];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+                sb.Append(c);
+            else
+                sb.Append('_');
+        }
+        string cleaned = sb.ToString().Trim('_');
+        return string.IsNullOrEmpty(cleaned) ? "sample" : cleaned;
+    }
+
+    private string ResolveDefaultPlyExplorerDirectory()
+    {
+        if (batchSelectedPlyPaths.Count > 0)
+        {
+            try
+            {
+                string lastDir = Path.GetDirectoryName(batchSelectedPlyPaths[batchSelectedPlyPaths.Count - 1]);
+                if (!string.IsNullOrEmpty(lastDir) && Directory.Exists(lastDir)) return lastDir;
+            }
+            catch { }
+        }
+        if (!string.IsNullOrEmpty(customPlyPath))
+        {
+            try
+            {
+                string prevDir = Path.GetDirectoryName(customPlyPath);
+                if (!string.IsNullOrEmpty(prevDir) && Directory.Exists(prevDir)) return prevDir;
+            }
+            catch { }
+        }
+        string[] candidates =
+        {
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "ai_src", "dataset", "_3D")),
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "dataset", "_3D")),
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "dataset", "_3D")),
+            Path.GetFullPath(Path.Combine(Application.dataPath, ".."))
+        };
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            if (Directory.Exists(candidates[i])) return candidates[i];
+        }
+        return "";
+    }
+
+    public void OpenFileExplorerForBatchSamples()
+    {
+        string defaultDir = ResolveDefaultPlyExplorerDirectory();
+        string[] chosen = NativeFileDialog.OpenFiles("Chọn nhiều file Point Cloud (.ply) để áp dụng mẫu phun", defaultDir, "ply");
+        if (chosen == null || chosen.Length == 0) return;
+
+        int added = 0;
+        for (int i = 0; i < chosen.Length; i++)
+        {
+            string p = chosen[i];
+            if (string.IsNullOrWhiteSpace(p) || !File.Exists(p)) continue;
+            string full = Path.GetFullPath(p);
+            bool exists = false;
+            for (int j = 0; j < batchSelectedPlyPaths.Count; j++)
+            {
+                if (string.Equals(batchSelectedPlyPaths[j], full, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists)
+            {
+                batchSelectedPlyPaths.Add(full);
+                added++;
+            }
+        }
+        showBatchTeachSection = true;
+        teachingStatusMsg = added > 0
+            ? $"Đã thêm {added} file .PLY từ File Explorer (tổng {batchSelectedPlyPaths.Count} file chờ áp dụng)."
+            : $"Các file vừa chọn đã có sẵn trong danh sách ({batchSelectedPlyPaths.Count} file).";
+    }
+
+    public void LoadSavedAppliedBatchSamplesFromDisk()
+    {
+        try
+        {
+            string dir = GetAppliedBatchSamplesDirectoryFullPath();
+            batchTeachResults.Clear();
+            string[] metaFiles = Directory.GetFiles(dir, "*.meta.json");
+            Array.Sort(metaFiles, (a, b) => File.GetLastWriteTimeUtc(b).CompareTo(File.GetLastWriteTimeUtc(a)));
+            for (int i = 0; i < metaFiles.Length; i++)
+            {
+                try
+                {
+                    string json = File.ReadAllText(metaFiles[i], System.Text.Encoding.UTF8);
+                    BatchTeachResultItem item = JsonUtility.FromJson<BatchTeachResultItem>(json);
+                    if (item == null || string.IsNullOrEmpty(item.sampleName)) continue;
+                    item.metaJsonPath = metaFiles[i];
+                    if (item.success && !string.IsNullOrEmpty(item.csvPath) && !File.Exists(item.csvPath))
+                    {
+                        string localCsv = Path.Combine(dir, Path.GetFileName(item.csvPath));
+                        if (File.Exists(localCsv)) item.csvPath = localCsv;
+                    }
+                    batchTeachResults.Add(item);
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[BatchApply] Không thể nạp danh sách mẫu đã áp dụng: " + ex.Message);
+        }
+    }
+
+    private void SaveAppliedBatchResultToDisk(BatchTeachResultItem item)
+    {
+        if (item == null || string.IsNullOrEmpty(item.sampleName)) return;
+        try
+        {
+            string dir = GetAppliedBatchSamplesDirectoryFullPath();
+            string safeStem = SanitizeAppliedSampleStem(item.sampleName);
+            string metaPath = Path.Combine(dir, $"{safeStem}_applied.meta.json");
+            item.metaJsonPath = metaPath;
+            File.WriteAllText(metaPath, JsonUtility.ToJson(item, true), System.Text.Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[BatchApply] Không thể lưu metadata mẫu đã áp dụng: " + ex.Message);
+        }
+
+        // Cập nhật (upsert) theo sampleName, giữ nguyên tất cả các mẫu đã áp dụng khác
+        int existingIdx = -1;
+        for (int i = 0; i < batchTeachResults.Count; i++)
+        {
+            if (string.Equals(batchTeachResults[i].sampleName, item.sampleName, StringComparison.OrdinalIgnoreCase))
+            {
+                existingIdx = i;
+                break;
+            }
+        }
+        if (existingIdx >= 0) batchTeachResults[existingIdx] = item;
+        else batchTeachResults.Insert(0, item);
+    }
+
+    public void DeleteAppliedBatchSample(BatchTeachResultItem item)
+    {
+        if (item == null) return;
+        try
+        {
+            if (!string.IsNullOrEmpty(item.metaJsonPath) && File.Exists(item.metaJsonPath))
+                File.Delete(item.metaJsonPath);
+            if (!string.IsNullOrEmpty(item.csvPath) && File.Exists(item.csvPath))
+                File.Delete(item.csvPath);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[BatchApply] Không thể xóa file mẫu đã áp dụng: " + ex.Message);
+        }
+
+        batchTeachResults.Remove(item);
+        if (string.Equals(activeAppliedBatchSampleName, item.sampleName, StringComparison.OrdinalIgnoreCase))
+        {
+            activeAppliedBatchSampleName = "";
+        }
+        teachingStatusMsg = $"Đã xóa mẫu đã áp dụng [{item.sampleName}] khỏi thư mục lưu.";
+    }
+
+    public void DeleteAllAppliedBatchSamples()
+    {
+        try
+        {
+            string dir = GetAppliedBatchSamplesDirectoryFullPath();
+            foreach (string f in Directory.GetFiles(dir, "*.meta.json"))
+            {
+                try { File.Delete(f); } catch { }
+            }
+            foreach (string f in Directory.GetFiles(dir, "*.csv"))
+            {
+                try { File.Delete(f); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[BatchApply] Không thể xóa thư mục mẫu đã áp dụng: " + ex.Message);
+        }
+        batchTeachResults.Clear();
+        activeAppliedBatchSampleName = "";
+        teachingStatusMsg = "Đã xóa toàn bộ các mẫu đã áp dụng trong thư mục lưu.";
+    }
+
+    public void LoadAppliedBatchSample(BatchTeachResultItem item, bool startSprayingImmediately)
+    {
+        if (item == null) return;
+
+        bool prevAutoApply = autoApplyTaughtOnNewSample;
+        autoApplyTaughtOnNewSample = false;
+        try
+        {
+            StopPlaybackForNewFrame();
+            if (!string.IsNullOrEmpty(item.plyPath) && File.Exists(item.plyPath))
+            {
+                SelectSampleByFullPath(item.plyPath);
+            }
+            else
+            {
+                SelectSample(item.sampleName, loadLocalPointCloud: true);
+            }
+
+            bool loadedCsv = false;
+            if (!string.IsNullOrEmpty(item.csvPath) && File.Exists(item.csvPath))
+            {
+                LoadNamedTrajectory(item.csvPath);
+                loadedCsv = (waypoints != null && waypoints.Count > 0);
+            }
+
+            if (loadedCsv)
+            {
+                if (!string.IsNullOrEmpty(item.methodUsed)) activeTrajectoryMethod = item.methodUsed;
+                if (taughtCanonicalRegions.Count > 0) ReprojectTaughtCanonicalRegionsOntoCurrentCamera();
+                ProjectWaypointsOntoActiveCameraCanvas(waypoints, item.sampleName);
+            }
+            else if (hasRecordedTeachingRecipe || taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0)
+            {
+                ApplyTaughtRecipeToCurrentSample();
+            }
+
+            showGizmos = true;
+            showTurnaroundConnectors = true;
+            activeAppliedBatchSampleName = item.sampleName;
+
+            if (startSprayingImmediately)
+            {
+                showFullscreen2DCanvas = false;
+                trajSimSubTab = 0; // Đổi thẳng sang Mô phỏng phun sơn
+                sprayPaintEnabled = true;
+                ClearInkTrail();
+                if (waypoints != null && waypoints.Count > 0)
+                {
+                    ApplyWaypoint(0);
+                    isPlaying = true;
+                    isMovingToManualTarget = false;
+                    isMovingToHome = false;
+                    teachingStatusMsg = $"Đang phun sơn mẫu [{item.sampleName}] ({item.methodUsed} | {waypoints.Count} điểm).";
+                }
+                else
+                {
+                    teachingStatusMsg = $"Mẫu [{item.sampleName}] chưa có điểm quỹ đạo để phun.";
+                }
+            }
+            else
+            {
+                teachingStatusMsg = $"Đang xem mẫu đã áp dụng [{item.sampleName}] ({item.methodUsed} | {waypoints.Count} điểm).";
+            }
+        }
+        finally
+        {
+            autoApplyTaughtOnNewSample = prevAutoApply;
+        }
+    }
+
+    private BatchTeachResultItem ProcessSingleBatchSample(string plyPath, string methodToRun, string batchDir, string tplStem)
+    {
+        string smp = Path.GetFileNameWithoutExtension(plyPath);
+        var item = new BatchTeachResultItem
+        {
+            sampleName = smp,
+            plyPath = Path.GetFullPath(plyPath),
+            methodUsed = methodToRun,
+            templateName = tplStem,
+            appliedDate = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+        };
+
+        if (!File.Exists(plyPath))
+        {
+            item.success = false;
+            item.status = "Không thấy file .PLY";
+            SaveAppliedBatchResultToDisk(item);
+            return item;
+        }
+
+        SelectSampleByFullPath(plyPath);
+        item.detectedSize = detectedJeansSize;
+
+        if (landmarksWorldPos == null || landmarksWorldPos.Count < 12)
+        {
+            item.success = false;
+            item.status = "Thiếu 12 mốc AI";
+            SaveAppliedBatchResultToDisk(item);
+            return item;
+        }
+
+        if (taughtCanonicalRegions.Count > 0) ReprojectTaughtCanonicalRegionsOntoCurrentCamera();
+        if (canonicalPatternStrokes.Count > 0) ReprojectCanonicalPatternOntoCurrentCameraImage();
+
+        if (methodToRun == "P1") SyncP1ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P2") SyncP2ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P3") SyncP3ConfigFromTechParamsIfNeeded();
+        else if (methodToRun == "P4") SyncP4ConfigFromTechParamsIfNeeded();
+
+        GenerateAndApplyMethodTrajectory(methodToRun);
+
+        item.waypointCount = waypoints != null ? waypoints.Count : 0;
+        int solved = 0;
+        for (int w = 0; w < item.waypointCount; w++) if (waypoints[w].isSolved) solved++;
+        item.solvedCount = solved;
+        item.totalLengthMm = item.waypointCount > 0 ? waypoints[item.waypointCount - 1].distance_mm : 0f;
+
+        if (item.waypointCount > 0)
+        {
+            string safeStem = SanitizeAppliedSampleStem(smp);
+            string outCsv = Path.Combine(batchDir, $"{safeStem}_applied.csv");
+            ExportUpdatedCsvTrajectory(outCsv);
+            item.csvPath = outCsv;
+            item.success = true;
+            float ikPct = 100f * solved / item.waypointCount;
+            item.status = $"OK (IK {ikPct:F0}%)";
+        }
+        else
+        {
+            item.success = false;
+            item.status = "Không sinh được điểm";
+        }
+
+        SaveAppliedBatchResultToDisk(item);
+        return item;
+    }
+
+    public void ApplyTaughtRecipeToBatchSamples()
+    {
+        if (isRunningBatchApply)
+        {
+            teachingStatusMsg = "Đang xử lý áp dụng hàng loạt, vui lòng chờ hoàn tất hoặc bấm Hủy.";
+            return;
+        }
+        if (batchSelectedPlyPaths.Count == 0)
+        {
+            teachingStatusMsg = "Hãy bấm 'Chọn nhiều file .PLY...' từ File Explorer trước khi áp dụng.";
+            return;
+        }
+
+        if (!hasRecordedTeachingRecipe)
+        {
+            RecordCurrentTeachingRecipe();
+        }
+        if (taughtCanonicalRegions.Count == 0 && canonicalPatternStrokes.Count == 0 &&
+            customDrawnRegions.Count == 0 && customDrawnStrokes.Count == 0)
+        {
+            teachingStatusMsg = "Chưa có mẫu dạy để áp dụng hàng loạt.";
+            return;
+        }
+
+        string methodToRun = (taughtMethod == "P1" || taughtMethod == "P2" || taughtMethod == "P3" || taughtMethod == "P4")
+            ? taughtMethod
+            : "P3";
+
+        string batchDir = GetAppliedBatchSamplesDirectoryFullPath();
+        string tplStem = string.IsNullOrEmpty(saveTemplateFileName) ? "mau_day" : saveTemplateFileName.Trim();
+        List<string> targetPaths = new List<string>(batchSelectedPlyPaths);
+
+        if (Application.isPlaying && gameObject.activeInHierarchy)
+        {
+            StartCoroutine(ApplyTaughtRecipeToBatchSamplesRoutine(targetPaths, methodToRun, batchDir, tplStem));
+        }
+        else
+        {
+            bool prevAutoApply = autoApplyTaughtOnNewSample;
+            autoApplyTaughtOnNewSample = false;
+            int okCount = 0;
+            try
+            {
+                batchApplyTotalCount = targetPaths.Count;
+                for (int i = 0; i < targetPaths.Count; i++)
+                {
+                    batchApplyCurrentIndex = i + 1;
+                    batchApplyCurrentSample = Path.GetFileNameWithoutExtension(targetPaths[i]);
+                    var res = ProcessSingleBatchSample(targetPaths[i], methodToRun, batchDir, tplStem);
+                    if (res.success) okCount++;
+                }
+                batchApplySuccessCount = okCount;
+            }
+            finally
+            {
+                autoApplyTaughtOnNewSample = prevAutoApply;
+            }
+            showGizmos = true;
+            showTurnaroundConnectors = true;
+            teachingStatusMsg = $"Áp dụng xong [{methodToRun}]: {okCount}/{targetPaths.Count} mẫu (lưu tại {appliedBatchSamplesDirectory}).";
+        }
+    }
+
+    private System.Collections.IEnumerator ApplyTaughtRecipeToBatchSamplesRoutine(List<string> targetPaths, string methodToRun, string batchDir, string tplStem)
+    {
+        isRunningBatchApply = true;
+        cancelBatchApplyRequested = false;
+        batchApplyCurrentIndex = 0;
+        batchApplyTotalCount = targetPaths.Count;
+        batchApplySuccessCount = 0;
+        batchApplyCurrentSample = "";
+
+        bool prevAutoApply = autoApplyTaughtOnNewSample;
+        autoApplyTaughtOnNewSample = false;
+        BatchTeachResultItem lastSuccessItem = null;
+
+        try
+        {
+            for (int i = 0; i < targetPaths.Count; i++)
+            {
+                if (cancelBatchApplyRequested) break;
+
+                string plyPath = targetPaths[i];
+                batchApplyCurrentIndex = i + 1;
+                batchApplyCurrentSample = Path.GetFileNameWithoutExtension(plyPath);
+                teachingStatusMsg = $"Đang áp dụng ({batchApplyCurrentIndex}/{batchApplyTotalCount}): {batchApplyCurrentSample}...";
+
+                // Nhường 1 frame để Unity vẽ thanh tiến trình mượt mà
+                yield return null;
+
+                BatchTeachResultItem item = ProcessSingleBatchSample(plyPath, methodToRun, batchDir, tplStem);
+                if (item.success)
+                {
+                    batchApplySuccessCount++;
+                    lastSuccessItem = item;
+                }
+            }
+        }
+        finally
+        {
+            autoApplyTaughtOnNewSample = prevAutoApply;
+            isRunningBatchApply = false;
+        }
+
+        showGizmos = true;
+        showTurnaroundConnectors = true;
+        if (lastSuccessItem != null)
+        {
+            activeAppliedBatchSampleName = lastSuccessItem.sampleName;
+        }
+        teachingStatusMsg = cancelBatchApplyRequested
+            ? $"Đã hủy giữa chừng ({batchApplySuccessCount}/{batchApplyCurrentIndex} mẫu thành công)."
+            : $"Hoàn tất áp dụng [{methodToRun}]: {batchApplySuccessCount}/{batchApplyTotalCount} mẫu (lưu tại {appliedBatchSamplesDirectory}).";
+    }
+
+    private void DrawBatchProgressBarUI()
+    {
+        if (!isRunningBatchApply && batchApplyTotalCount <= 0) return;
+
+        float ratio = batchApplyTotalCount > 0
+            ? Mathf.Clamp01((float)batchApplyCurrentIndex / batchApplyTotalCount)
+            : 0f;
+        int pct = Mathf.RoundToInt(ratio * 100f);
+
+        GUILayout.Space(3);
+        Rect barRect = GUILayoutUtility.GetRect(100f, 20f, GUILayout.ExpandWidth(true));
+        DrawGuiSolidRect(barRect, new Color(0.10f, 0.13f, 0.18f, 1f));
+        Color fillCol = isRunningBatchApply
+            ? new Color(0.14f, 0.68f, 0.96f, 0.92f)
+            : new Color(0.18f, 0.78f, 0.42f, 0.92f);
+        DrawGuiSolidRect(new Rect(barRect.x + 1f, barRect.y + 1f, Mathf.Max(0f, (barRect.width - 2f) * ratio), barRect.height - 2f), fillCol);
+        DrawGuiRectOutline2D(barRect, new Color(0.32f, 0.45f, 0.62f, 0.85f), 1f);
+
+        string barLabel = isRunningBatchApply
+            ? $"Đang xử lý {batchApplyCurrentIndex}/{batchApplyTotalCount} ({pct}%): {batchApplyCurrentSample}"
+            : $"Hoàn tất {batchApplySuccessCount}/{batchApplyTotalCount} mẫu ({pct}%)";
+        GUI.Label(new Rect(barRect.x + 6f, barRect.y + 1f, barRect.width - 12f, barRect.height - 2f), barLabel, AntigravityUITheme.StyleCardHeader);
+    }
+
+    private void DrawAppliedBatchSamplesListUI(float width, bool compactInSimCard)
+    {
+        if (batchTeachResults.Count == 0 && compactInSimCard) return;
+
+        bool pendingReloadAll = false;
+        bool pendingDeleteAll = false;
+
+        GUILayout.Space(compactInSimCard ? 8 : 5);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"MẪU ĐÃ ÁP DỤNG ({batchTeachResults.Count})", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("Tải lại", AntigravityUITheme.StyleButton, GUILayout.Width(52), GUILayout.Height(20)))
+        {
+            pendingReloadAll = true;
+        }
+        if (GUILayout.Button("Thư mục", AntigravityUITheme.StyleButton, GUILayout.Width(60), GUILayout.Height(20)))
+        {
+            NativeFileDialog.OpenFolderInExplorer(GetAppliedBatchSamplesDirectoryFullPath());
+        }
+        bool prevEn = GUI.enabled;
+        GUI.enabled = prevEn && batchTeachResults.Count > 0 && !isRunningBatchApply;
+        if (GUILayout.Button("Xóa hết", AntigravityUITheme.StyleButton, GUILayout.Width(58), GUILayout.Height(20)))
+        {
+            pendingDeleteAll = true;
+        }
+        GUI.enabled = prevEn;
+        GUILayout.EndHorizontal();
+
+        if (batchTeachResults.Count == 0)
+        {
+            GUILayout.Label($"Chưa có mẫu nào trong thư mục lưu ({appliedBatchSamplesDirectory}).", AntigravityUITheme.StyleLabelMuted);
+            GUILayout.EndVertical();
+            if (pendingReloadAll) LoadSavedAppliedBatchSamplesFromDisk();
+            return;
+        }
+
+        string activeNow = !string.IsNullOrEmpty(activeAppliedBatchSampleName)
+            ? activeAppliedBatchSampleName
+            : GetActiveCloudSampleName();
+
+        BatchTeachResultItem pendingView = null;
+        BatchTeachResultItem pendingSpray = null;
+        BatchTeachResultItem pendingDelete = null;
+
+        float scrollH = Mathf.Clamp(batchTeachResults.Count * 26f + 8f, 44f, compactInSimCard ? 128f : 168f);
+        if (compactInSimCard)
+            simAppliedResultsScroll = GUILayout.BeginScrollView(simAppliedResultsScroll, GUILayout.Height(scrollH));
+        else
+            batchAppliedResultsScroll = GUILayout.BeginScrollView(batchAppliedResultsScroll, GUILayout.Height(scrollH));
+
+        for (int i = 0; i < batchTeachResults.Count; i++)
+        {
+            var r = batchTeachResults[i];
+            bool isActiveRow = string.Equals(r.sampleName, activeNow, StringComparison.OrdinalIgnoreCase);
+
+            GUILayout.BeginHorizontal();
+            string prefix = isActiveRow ? "> " : "";
+            string rowText = $"{prefix}{r.sampleName} | {r.detectedSize} | {r.waypointCount}đ | {r.status}";
+            GUIStyle rowStyle = !r.success
+                ? AntigravityUITheme.StyleLabelRed
+                : (isActiveRow ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelGreen);
+            GUILayout.Label(rowText, rowStyle);
+            GUILayout.FlexibleSpace();
+
+            bool rowEn = GUI.enabled;
+            GUI.enabled = rowEn && !isRunningBatchApply;
+            if (GUILayout.Button("Xem", isActiveRow ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Width(42), GUILayout.Height(21)))
+            {
+                pendingView = r;
+            }
+            if (r.success && GUILayout.Button("Phun sơn", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(68), GUILayout.Height(21)))
+            {
+                pendingSpray = r;
+            }
+            if (GUILayout.Button("Xóa", AntigravityUITheme.StyleButton, GUILayout.Width(36), GUILayout.Height(21)))
+            {
+                pendingDelete = r;
+            }
+            GUI.enabled = rowEn;
+            GUILayout.EndHorizontal();
+        }
+
+        GUILayout.EndScrollView();
+        GUILayout.EndVertical();
+
+        // Thực thi thao tác sau khi kết thúc vòng lặp để không thay đổi danh sách giữa pha IMGUI
+        if (pendingDeleteAll) DeleteAllAppliedBatchSamples();
+        else if (pendingReloadAll) LoadSavedAppliedBatchSamplesFromDisk();
+        else if (pendingDelete != null) DeleteAppliedBatchSample(pendingDelete);
+        else if (pendingSpray != null) LoadAppliedBatchSample(pendingSpray, startSprayingImmediately: true);
+        else if (pendingView != null) LoadAppliedBatchSample(pendingView, startSprayingImmediately: false);
+    }
+
+    private void DrawUnifiedSaveLoadAndTeachingSections(float width)
+    {
+        // 2. LƯU / NẠP MẪU & CẤU HÌNH DẠY (.JSON) — DUY NHẤT 1 CHỖ
+        GUILayout.Space(6);
+        GUILayout.Label("2. LƯU / NẠP MẪU & CẤU HÌNH (.JSON)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Thư mục:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(58));
+        sprayTemplateDirectory = GUILayout.TextField(sprayTemplateDirectory, AntigravityUITheme.StyleTextField, GUILayout.Height(22));
+        if (GUILayout.Button("Chọn...", AntigravityUITheme.StyleButton, GUILayout.Width(60), GUILayout.Height(22)))
+        {
+            ChooseSprayTemplateDirectory();
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Tên mẫu:", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(58));
+        saveTemplateFileName = GUILayout.TextField(saveTemplateFileName, AntigravityUITheme.StyleTextField, GUILayout.Height(24));
+        if (GUILayout.Button("Lưu mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(72), GUILayout.Height(24)))
+        {
+            RecordCurrentTeachingRecipe();
+            ExportSprayTemplateWithDialog();
+        }
+        if (GUILayout.Button("Nạp mẫu", AntigravityUITheme.StyleButton, GUILayout.Width(72), GUILayout.Height(24)))
+        {
+            ImportSprayTemplateWithDialog();
+            showGizmos = true;
+            showTurnaroundConnectors = true;
+        }
+        GUILayout.EndHorizontal();
+
+        if (availableSprayTemplateFiles == null || availableSprayTemplateFiles.Count == 0)
+        {
+            RefreshAvailableSprayTemplates();
+        }
+        if (availableSprayTemplateFiles != null && availableSprayTemplateFiles.Count > 0)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Có sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(52));
+            int maxShow = Mathf.Min(availableSprayTemplateFiles.Count, 3);
+            for (int f = 0; f < maxShow; f++)
+            {
+                string fn = availableSprayTemplateFiles[f];
+                if (GUILayout.Button(fn, AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+                {
+                    saveTemplateFileName = fn;
+                    ImportSprayTemplateFromFile(Path.Combine(GetSprayTemplateDirectoryFullPath(), fn + ".json"));
+                    showGizmos = true;
+                    showTurnaroundConnectors = true;
+                }
+            }
+            GUILayout.EndHorizontal();
+        }
+        GUILayout.EndVertical();
+
+        // 3. DẠY 1 MẪU -> ÁP DỤNG NHIỀU PHÔI (1 -> N)
+        GUILayout.Space(6);
+        GUILayout.Label("3. DẠY 1 MẪU -> ÁP DỤNG NHIỀU PHÔI", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+        string curSample = GetActiveCloudSampleName();
+        string taughtSrc = string.IsNullOrEmpty(taughtSourceSampleName) ? "(chưa ghi)" : taughtSourceSampleName;
+        int regCnt = hasRecordedTeachingRecipe && taughtCanonicalRegions.Count > 0 ? taughtCanonicalRegions.Count : customDrawnRegions.Count;
+        int strCnt = hasRecordedTeachingRecipe && canonicalPatternStrokes.Count > 0 ? canonicalPatternStrokes.Count : customDrawnStrokes.Count;
+        GUILayout.Label($"Phôi gốc: {taughtSrc} | {regCnt} vùng, {strCnt} nét | PP: {taughtMethod}",
+            hasRecordedTeachingRecipe ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelMuted);
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Ghi mẫu dạy", AntigravityUITheme.StyleButton, GUILayout.Height(25)))
+        {
+            RecordCurrentTeachingRecipe();
+        }
+        if (GUILayout.Button($"Áp dụng [{taughtMethod}] lên {curSample}", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(25)))
+        {
+            ApplyTaughtRecipeToCurrentSample();
+        }
+        GUILayout.EndHorizontal();
+
+        autoApplyTaughtOnNewSample = GUILayout.Toggle(
+            autoApplyTaughtOnNewSample,
+            " Tự áp dụng mẫu dạy khi đổi / nhận diện phôi mới",
+            AntigravityUITheme.StyleToggle
+        );
+
+        if (Event.current != null && Event.current.type == EventType.Layout)
+        {
+            layoutShowBatchSelectedList = batchSelectedPlyPaths.Count > 0;
+            layoutShowBatchProgress = isRunningBatchApply || batchApplyTotalCount > 0;
+        }
+
+        GUILayout.Space(4);
+        GUILayout.BeginHorizontal();
+        bool prevPickEn = GUI.enabled;
+        GUI.enabled = prevPickEn && !isRunningBatchApply;
+        if (GUILayout.Button($"Chọn nhiều file .PLY... ({batchSelectedPlyPaths.Count})", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(25)))
+        {
+            OpenFileExplorerForBatchSamples();
+        }
+        if (layoutShowBatchSelectedList && GUILayout.Button("Xóa DS", AntigravityUITheme.StyleButton, GUILayout.Width(62), GUILayout.Height(25)))
+        {
+            batchSelectedPlyPaths.Clear();
+            teachingStatusMsg = "Đã xóa danh sách file chờ áp dụng.";
+        }
+        GUI.enabled = prevPickEn;
+        GUILayout.EndHorizontal();
+
+        if (layoutShowBatchSelectedList)
+        {
+            int removeIdx = -1;
+            int drawCnt = batchSelectedPlyPaths.Count;
+            float selScrollH = Mathf.Clamp(drawCnt * 23f + 6f, 36f, 108f);
+            batchSampleListScroll = GUILayout.BeginScrollView(batchSampleListScroll, GUILayout.Height(selScrollH));
+            for (int i = 0; i < drawCnt; i++)
+            {
+                string fName = Path.GetFileName(batchSelectedPlyPaths[i]);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"{i + 1}. {fName}", AntigravityUITheme.StyleLabelCyan);
+                GUILayout.FlexibleSpace();
+                bool prevRm = GUI.enabled;
+                GUI.enabled = prevRm && !isRunningBatchApply;
+                if (GUILayout.Button("X", AntigravityUITheme.StyleButton, GUILayout.Width(24), GUILayout.Height(19)))
+                {
+                    removeIdx = i;
+                }
+                GUI.enabled = prevRm;
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.EndScrollView();
+            if (removeIdx >= 0 && removeIdx < batchSelectedPlyPaths.Count)
+            {
+                batchSelectedPlyPaths.RemoveAt(removeIdx);
+            }
+
+            GUILayout.BeginHorizontal();
+            bool prevRunEn = GUI.enabled;
+            GUI.enabled = prevRunEn && !isRunningBatchApply && batchSelectedPlyPaths.Count > 0;
+            if (GUILayout.Button($"Áp dụng hàng loạt ({batchSelectedPlyPaths.Count} mẫu) bằng {taughtMethod}", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
+            {
+                ApplyTaughtRecipeToBatchSamples();
+            }
+            GUI.enabled = prevRunEn;
+            if (isRunningBatchApply && GUILayout.Button("Hủy", AntigravityUITheme.StyleButton, GUILayout.Width(54), GUILayout.Height(28)))
+            {
+                cancelBatchApplyRequested = true;
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        // Thanh tiến trình xử lý hàng loạt
+        if (layoutShowBatchProgress) DrawBatchProgressBarUI();
+
+        if (!string.IsNullOrEmpty(teachingStatusMsg))
+        {
+            GUILayout.Label(teachingStatusMsg, AntigravityUITheme.StyleLabelCyan);
+        }
+
+        // Danh sách các mẫu đã áp dụng (lưu trong thư mục riêng, tự load lại, không mất khi đổi mẫu)
+        DrawAppliedBatchSamplesListUI(width, compactInSimCard: false);
+        GUILayout.EndVertical();
     }
 
     private void DrawConfigAndCalibrationCombinedCard(float width)
@@ -2703,6 +4060,16 @@ public class DobotCR10AIKController : MonoBehaviour
         string statusText = robotManual != null && !string.IsNullOrEmpty(robotManual.ikStatus) ? robotManual.ikStatus : "Sẵn sàng.";
         GUILayout.Label(statusText, AntigravityUITheme.StyleLabelMuted);
 
+        // Chọn nhanh loại tia phun (Solid / Tia mờ dần) & màu phun ngay trong Mô phỏng
+        GUILayout.Space(6);
+        GUILayout.Label("TIA PHUN & MÀU PHUN", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        DrawSprayAppearanceControlsUI(compact: true);
+        GUILayout.EndVertical();
+
+        // Giữ nguyên danh sách các mẫu đã áp dụng ngay trong giao diện Mô phỏng để đổi mẫu & phun sơn nhanh
+        DrawAppliedBatchSamplesListUI(width, compactInSimCard: true);
+
         GUILayout.EndVertical();
     }
 
@@ -2768,34 +4135,137 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         GUILayout.Space(8);
-        GUILayout.Label("3. VỆT PHUN MÔ PHỎNG", AntigravityUITheme.StyleSectionLabel);
-        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled, " Hiện vệt phun", AntigravityUITheme.StyleToggle, GUILayout.Height(22));
+        GUILayout.Label("3. THÔNG SỐ VỆT PHUN MÔ PHỎNG", AntigravityUITheme.StyleSectionLabel);
 
-        if (sprayPaintEnabled)
+        DrawSprayAppearanceControlsUI(compact: false);
+
+        GUILayout.Space(4);
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Bề rộng: {sprayWidthMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
+        float newWidth = GUILayout.HorizontalSlider(sprayWidthMm, 1f, 50f);
+        if (Mathf.Abs(newWidth - sprayWidthMm) > 0.1f) { UpdateSprayWidth(newWidth); MarkSettingsDirty(); }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("2 mm", Mathf.Abs(sprayWidthMm - 2f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(2.0f); MarkSettingsDirty(); }
+        if (GUILayout.Button("5 mm", Mathf.Abs(sprayWidthMm - 5f) < 0.3f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(5.0f); MarkSettingsDirty(); }
+        if (GUILayout.Button("15 mm", Mathf.Abs(sprayWidthMm - 15f) < 0.5f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(15.0f); MarkSettingsDirty(); }
+        if (GUILayout.Button("Xóa vệt", AntigravityUITheme.StyleButton, GUILayout.Height(20))) { ClearInkTrail(); }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Dung sai: {sprayPathToleranceMm:F0} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
+        sprayPathToleranceMm = GUILayout.HorizontalSlider(sprayPathToleranceMm, 5f, 50f);
+        GUILayout.EndHorizontal();
+
+        if (!string.IsNullOrEmpty(preferredIkBranchName))
         {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"Bề rộng: {sprayWidthMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
-            float newWidth = GUILayout.HorizontalSlider(sprayWidthMm, 1f, 50f);
-            if (Mathf.Abs(newWidth - sprayWidthMm) > 0.1f) { UpdateSprayWidth(newWidth); MarkSettingsDirty(); }
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("2 mm", Mathf.Abs(sprayWidthMm - 2f) < 0.2f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(2.0f); MarkSettingsDirty(); }
-            if (GUILayout.Button("5 mm", Mathf.Abs(sprayWidthMm - 5f) < 0.3f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(5.0f); MarkSettingsDirty(); }
-            if (GUILayout.Button("15 mm", Mathf.Abs(sprayWidthMm - 15f) < 0.5f ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(20))) { UpdateSprayWidth(15.0f); MarkSettingsDirty(); }
-            if (GUILayout.Button("Xóa vệt", AntigravityUITheme.StyleButton, GUILayout.Height(20))) { ClearInkTrail(); }
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"Dung sai: {sprayPathToleranceMm:F0} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(120));
-            sprayPathToleranceMm = GUILayout.HorizontalSlider(sprayPathToleranceMm, 5f, 50f);
-            GUILayout.EndHorizontal();
-
-            string sprayStateLabel = isSprayingNow ? "Trạng thái: Đang phun" : "Trạng thái: Tắt phun";
-            GUILayout.Label(sprayStateLabel, isSprayingNow ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelRed);
+            GUILayout.Label($"Nhánh IK ưu tiên: {preferredIkBranchName}", AntigravityUITheme.StyleLabelCyan);
         }
 
+        string sprayStateLabel = isSprayingNow ? "Trạng thái: Đang phun" : "Trạng thái: Tắt phun";
+        GUILayout.Label(sprayStateLabel, isSprayingNow ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelRed);
+
         GUILayout.EndVertical();
+    }
+
+    private static readonly Color[] SprayColorPresets = new Color[]
+    {
+        new Color(0.95f, 0.18f, 0.18f, 1f), // Đỏ
+        new Color(0.15f, 0.78f, 1.00f, 1f), // Xanh dương
+        new Color(0.96f, 0.96f, 0.96f, 1f), // Trắng tẩy
+        new Color(1.00f, 0.82f, 0.15f, 1f), // Vàng
+        new Color(0.22f, 0.92f, 0.42f, 1f), // Xanh lá
+        new Color(0.76f, 0.30f, 0.96f, 1f), // Tím
+        new Color(0.10f, 0.10f, 0.12f, 1f)  // Đen
+    };
+
+    private static readonly string[] SprayColorPresetNames = new string[]
+    {
+        "Đỏ", "Xanh", "Trắng", "Vàng", "Lá", "Tím", "Đen"
+    };
+
+    private void DrawSprayAppearanceControlsUI(bool compact)
+    {
+        // 1. Chọn loại tia phun: Solid (đặc) hoặc Tia mờ dần (Gaussian mềm)
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Loại tia:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(58));
+        bool isSolid = (sprayBeamType == SprayBeamType.Solid);
+        if (GUILayout.Button("Solid (Đặc)", isSolid ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        {
+            SetSprayBeamType(SprayBeamType.Solid);
+        }
+        if (GUILayout.Button("Tia mờ dần", !isSolid ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+        {
+            SetSprayBeamType(SprayBeamType.SoftFeathered);
+        }
+        GUILayout.EndHorizontal();
+
+        // 2. Độ đậm / trong suốt của tia phun
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"Độ đậm: {Mathf.RoundToInt(sprayBeamOpacity * 100f)}%", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(96));
+        float newOp = GUILayout.HorizontalSlider(sprayBeamOpacity, 0.15f, 1.0f);
+        if (Mathf.Abs(newOp - sprayBeamOpacity) > 0.01f)
+        {
+            SetSprayBeamOpacity(newOp);
+        }
+        GUILayout.EndHorizontal();
+
+        // 3. Hàng chọn nhanh màu phun + ô xem màu hiện tại
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Màu phun:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(64));
+        Rect swatchPreview = GUILayoutUtility.GetRect(24f, 18f, GUILayout.Width(24f), GUILayout.Height(18f));
+        DrawGuiSolidRect(swatchPreview, new Color(inkColor.r, inkColor.g, inkColor.b, 1f));
+        DrawGuiRectOutline2D(swatchPreview, new Color(0.85f, 0.90f, 0.98f, 0.9f), 1f);
+        GUILayout.Space(4);
+        if (GUILayout.Button(showCustomSprayColorSliders ? "Ẩn RGB" : "Tùy chỉnh RGB", AntigravityUITheme.StyleButton, GUILayout.Height(20)))
+        {
+            showCustomSprayColorSliders = !showCustomSprayColorSliders;
+        }
+        if (compact && GUILayout.Button("Xóa vệt", AntigravityUITheme.StyleButton, GUILayout.Width(58), GUILayout.Height(20)))
+        {
+            ClearInkTrail();
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        for (int i = 0; i < SprayColorPresets.Length; i++)
+        {
+            Color c = SprayColorPresets[i];
+            bool match = (Mathf.Abs(inkColor.r - c.r) + Mathf.Abs(inkColor.g - c.g) + Mathf.Abs(inkColor.b - c.b)) < 0.15f;
+            GUIStyle st = match ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+            if (GUILayout.Button(SprayColorPresetNames[i], st, GUILayout.Height(21)))
+            {
+                SetInkColor(c);
+            }
+            Rect btnRect = GUILayoutUtility.GetLastRect();
+            DrawGuiSolidRect(new Rect(btnRect.x + 2f, btnRect.yMax - 3f, Mathf.Max(2f, btnRect.width - 4f), 2.5f), c);
+        }
+        GUILayout.EndHorizontal();
+
+        if (showCustomSprayColorSliders)
+        {
+            float r = inkColor.r, g = inkColor.g, b = inkColor.b;
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"R: {Mathf.RoundToInt(r * 255f)}", AntigravityUITheme.StyleLabelRed, GUILayout.Width(52));
+            float nr = GUILayout.HorizontalSlider(r, 0f, 1f);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"G: {Mathf.RoundToInt(g * 255f)}", AntigravityUITheme.StyleLabelGreen, GUILayout.Width(52));
+            float ng = GUILayout.HorizontalSlider(g, 0f, 1f);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"B: {Mathf.RoundToInt(b * 255f)}", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(52));
+            float nb = GUILayout.HorizontalSlider(b, 0f, 1f);
+            GUILayout.EndHorizontal();
+
+            if (Mathf.Abs(nr - r) > 0.005f || Mathf.Abs(ng - g) > 0.005f || Mathf.Abs(nb - b) > 0.005f)
+            {
+                SetInkColor(new Color(nr, ng, nb, 1f));
+            }
+        }
     }
 
     // =========================================================================
@@ -2835,7 +4305,7 @@ public class DobotCR10AIKController : MonoBehaviour
             GUILayout.Label(cameraClient.lastStatusMessage, cameraClient.isServerOnline ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelMuted);
 
         GUILayout.Space(8);
-        GUILayout.Label("2. NẠP FILE .PLY & NHẬN DIỆN AI", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("2. NẠP FILE .PLY", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Chọn file .PLY...", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
         {
@@ -2851,23 +4321,87 @@ public class DobotCR10AIKController : MonoBehaviour
         int totalPts = plyLoader != null ? plyLoader.totalLoadedPoints : 0;
         GUILayout.Label($"File: {displaySample} ({totalPts:N0} điểm)", AntigravityUITheme.StyleLabelCyan);
 
+        GUILayout.Space(8);
+        GUILayout.Label("3. MÁY CHỦ AI NHẬN DIỆN", AntigravityUITheme.StyleSectionLabel);
         AiServerClient aiClient = EnsureAiClient();
         if (aiClient != null)
         {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("IP:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(24));
+            string newIp = GUILayout.TextField(aiClient.serverIp, AntigravityUITheme.StyleTextField, GUILayout.Width(115));
+            if (newIp != aiClient.serverIp) { aiClient.serverIp = newIp; aiClient.SaveSettings(); }
+
+            GUILayout.Label("Cổng:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(38));
+            string portStr = GUILayout.TextField(aiClient.serverPort.ToString(), AntigravityUITheme.StyleTextField, GUILayout.Width(52));
+            int parsedPort;
+            if (int.TryParse(portStr, out parsedPort) && parsedPort != aiClient.serverPort) { aiClient.serverPort = parsedPort; aiClient.SaveSettings(); }
+
+            if (GUILayout.Button("Ping", AntigravityUITheme.StyleButton, GUILayout.Width(56), GUILayout.Height(22)))
+            {
+                aiClient.CheckServerStatus();
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUIStyle bUdp = (aiClient.protocol == AiServerClient.ProtocolType.UDP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+            GUIStyle bHttp = (aiClient.protocol == AiServerClient.ProtocolType.HTTP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+            if (GUILayout.Button("UDP (5005)", bUdp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.UDP);
+            if (GUILayout.Button("HTTP (5000)", bHttp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.HTTP);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            bool isAiBusy = aiClient.isProcessing;
+            string sampleTag = !string.IsNullOrEmpty(selectedSampleName) ? selectedSampleName : "chưa chọn";
+            string aiBtnText = isAiBusy ? "Đang xử lý..." : $"Nhận diện [{sampleTag}]";
+            GUIStyle aiStyle = isAiBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
+            if (GUILayout.Button(aiBtnText, aiStyle, GUILayout.Height(28)))
+            {
+                InvalidateGeneratedTrajectoryOnEdit();
+                lastMissingLandmarksSampleName = "";
+                LoadLandmarksAndSegmentationForSample(selectedSampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
+                aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
+            }
+            if (GUILayout.Button("Mẫu mặc định", AntigravityUITheme.StyleButton, GUILayout.Width(96), GUILayout.Height(28)))
+            {
+                LoadPantsOutlineTrajectory();
+            }
+            GUILayout.EndHorizontal();
+
+            // Sửa 12 mốc AI khi nhận diện sai & tự động train lại khi đủ 10 mẫu sai
+            int fbPending = aiClient.feedbackPendingCount;
+            int fbThresh = Mathf.Max(1, aiClient.feedbackRetrainThreshold);
+            bool fbTraining = aiClient.isRetrainingPose;
+            GUILayout.BeginHorizontal();
+            GUIStyle editLmBtnSt = isEditingLandmarksMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+            if (GUILayout.Button(isEditingLandmarksMode ? "Đang sửa 12 mốc..." : "Đánh lại mốc AI", editLmBtnSt, GUILayout.Height(25)))
+            {
+                EnterLandmarkEditMode(openFullscreen: true);
+            }
+            bool prevFbEn = GUI.enabled;
+            GUI.enabled = prevFbEn && !fbTraining && (fbPending > 0 || aiClient.feedbackHistoryCount > 0);
+            string retrainBtnTxt = fbTraining ? "Đang train..." : $"Train lại ({fbPending}/{fbThresh})";
+            if (GUILayout.Button(retrainBtnTxt, AntigravityUITheme.StyleButton, GUILayout.Width(116), GUILayout.Height(25)))
+            {
+                aiClient.TriggerRetrainPoseModel(force: true);
+            }
+            GUI.enabled = prevFbEn;
+            GUILayout.EndHorizontal();
+            string fbSummary = fbTraining
+                ? (!string.IsNullOrEmpty(aiClient.feedbackStatusMessage) ? aiClient.feedbackStatusMessage : "Đang train lại YOLO11-pose ở nền...")
+                : $"Mẫu sai chờ train: {fbPending}/{fbThresh} | Đã train: {aiClient.feedbackTotalRetrains} lần";
+            GUILayout.Label(fbSummary, fbTraining ? AntigravityUITheme.StyleLabelYellow : AntigravityUITheme.StyleLabelMuted);
+
             bool newAuto = GUILayout.Toggle(aiClient.autoModeEnabled, " Tự động nhận từ AI (UDP 5006)", AntigravityUITheme.StyleToggle);
             if (newAuto != aiClient.autoModeEnabled) aiClient.SetAutoMode(newAuto);
 
-            if (!aiClient.autoModeEnabled)
+            if (!string.IsNullOrEmpty(aiClient.lastStatusMessage))
             {
-                bool isAiBusy = aiClient.isProcessing;
-                string aiBtnText = isAiBusy ? "Đang nhận diện..." : $"Nhận diện AI [{selectedSampleName}]";
-                GUIStyle aiStyle = isAiBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
-                if (GUILayout.Button(aiBtnText, aiStyle, GUILayout.Height(28)))
-                {
-                    DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
-                    aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
-                }
+                GUILayout.Label(aiClient.lastStatusMessage, aiClient.isServerOnline ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelRed);
             }
+        }
+        else
+        {
+            if (GUILayout.Button("Nạp quỹ đạo mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26))) LoadPantsOutlineTrajectory();
         }
 
         GUILayout.Space(6);
@@ -2895,7 +4429,7 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         GUILayout.BeginVertical(AntigravityUITheme.CardBoxStyle(), GUILayout.Width(width));
         GUILayout.BeginHorizontal();
-        GUILayout.Label("QUỸ ĐẠO 2D -> 3D", AntigravityUITheme.StyleCardHeader);
+        GUILayout.Label("DẠY PHUN & QUỸ ĐẠO (2D -> 3D)", AntigravityUITheme.StyleCardHeader);
         GUILayout.FlexibleSpace();
         if (onClose != null && GUILayout.Button("X", AntigravityUITheme.StyleCloseButton, GUILayout.Width(22), GUILayout.Height(18))) onClose();
         GUILayout.EndHorizontal();
@@ -2904,46 +4438,60 @@ public class DobotCR10AIKController : MonoBehaviour
         DrawCanonicalJeans2DCanvasSection(width - 16f);
 
         GUILayout.Space(8);
-        GUILayout.Label("1. SINH QUỸ ĐẠO (P1 / P2 / P3 / P4)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("1. PHƯƠNG PHÁP & CẤU HÌNH (P1 / P2 / P3 / P4)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("P1: Zigzag", activeTrajectoryMethod == "P1" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
+            taughtMethod = "P1";
             showP1ParameterPanel = true;
             showP2ParameterPanel = false;
             showP3ParameterPanel = false;
             showP4ParameterPanel = false;
             SyncP1ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P1");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         if (GUILayout.Button("P2: Trục giữa", activeTrajectoryMethod == "P2" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
+            taughtMethod = "P2";
             showP1ParameterPanel = false;
             showP2ParameterPanel = true;
             showP3ParameterPanel = false;
             showP4ParameterPanel = false;
             SyncP2ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P2");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         if (GUILayout.Button("P3: 12 Mốc", activeTrajectoryMethod == "P3" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
+            taughtMethod = "P3";
             showP1ParameterPanel = false;
             showP2ParameterPanel = false;
             showP3ParameterPanel = true;
             showP4ParameterPanel = false;
             SyncP3ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P3");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         if (GUILayout.Button("P4: ICP/CPD", activeTrajectoryMethod == "P4" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(26)))
         {
+            taughtMethod = "P4";
             showP1ParameterPanel = false;
             showP2ParameterPanel = false;
             showP3ParameterPanel = false;
             showP4ParameterPanel = true;
             SyncP4ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P4");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         GUILayout.EndHorizontal();
+
+        GUILayout.Label(GetMethodMultiSampleSupportNote(taughtMethod), AntigravityUITheme.StyleLabelMuted);
 
         if (activeTrajectoryMethod == "P1" || showP1ParameterPanel)
         {
@@ -2973,93 +4521,61 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndVertical();
 
-        GUILayout.Space(8);
-        GUILayout.Label("2. MÁY CHỦ AI", AntigravityUITheme.StyleSectionLabel);
-        AiServerClient aiClient = EnsureAiClient();
-        if (aiClient != null)
+        DrawUnifiedSaveLoadAndTeachingSections(width);
+
+        GUILayout.Space(6);
+        if (GUILayout.Button(showWaypointManualEditSection ? "Thu gọn: 4. Chỉnh điểm quỹ đạo (IK / RPY)" : "4. Chỉnh điểm quỹ đạo (IK / RPY)", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
         {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("IP:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(24));
-            string newIp = GUILayout.TextField(aiClient.serverIp, AntigravityUITheme.StyleTextField, GUILayout.Width(115));
-            if (newIp != aiClient.serverIp) { aiClient.serverIp = newIp; aiClient.SaveSettings(); }
-
-            GUILayout.Label("Cổng:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(38));
-            string portStr = GUILayout.TextField(aiClient.serverPort.ToString(), AntigravityUITheme.StyleTextField, GUILayout.Width(52));
-            int parsedPort;
-            if (int.TryParse(portStr, out parsedPort) && parsedPort != aiClient.serverPort) { aiClient.serverPort = parsedPort; aiClient.SaveSettings(); }
-
-            if (GUILayout.Button("Ping", AntigravityUITheme.StyleButton, GUILayout.Width(56), GUILayout.Height(22)))
-            {
-                aiClient.CheckServerStatus();
-            }
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUIStyle bUdp = (aiClient.protocol == AiServerClient.ProtocolType.UDP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-            GUIStyle bHttp = (aiClient.protocol == AiServerClient.ProtocolType.HTTP) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
-            if (GUILayout.Button("UDP (5005)", bUdp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.UDP);
-            if (GUILayout.Button("HTTP (5000)", bHttp, GUILayout.Height(22))) aiClient.SetProtocol(AiServerClient.ProtocolType.HTTP);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            bool isBusy = aiClient.isProcessing;
-            string aiBtnTitle = isBusy ? "Đang xử lý..." : $"Nhận diện [{selectedSampleName}]";
-            GUIStyle btnSt = isBusy ? AntigravityUITheme.StyleButton : AntigravityUITheme.StylePrimaryButton;
-            if (GUILayout.Button(aiBtnTitle, btnSt, GUILayout.Height(28)))
-            {
-                DetectJeansSizeAndSwitchSprayTemplate(selectedSampleName);
-                aiClient.TriggerDetectionWithSample(detectedJeansSize, selectedSampleName);
-            }
-            if (GUILayout.Button("Chọn file...", AntigravityUITheme.StyleButton, GUILayout.Width(86), GUILayout.Height(28)))
-            {
-                OpenFileBrowserForSample();
-            }
-            if (GUILayout.Button("Mẫu mặc định", AntigravityUITheme.StyleButton, GUILayout.Width(92), GUILayout.Height(28)))
-            {
-                LoadPantsOutlineTrajectory();
-            }
-            GUILayout.EndHorizontal();
-
-            bool newAutoMode = GUILayout.Toggle(aiClient.autoModeEnabled, " Tự động nhận từ AI (UDP 5006)", AntigravityUITheme.StyleToggle);
-            if (newAutoMode != aiClient.autoModeEnabled)
-            {
-                aiClient.SetAutoMode(newAutoMode);
-            }
-
-            if (!string.IsNullOrEmpty(aiClient.lastStatusMessage))
-            {
-                GUILayout.Label(aiClient.lastStatusMessage, aiClient.isServerOnline ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelRed);
-            }
+            showWaypointManualEditSection = !showWaypointManualEditSection;
         }
-        else
+        if (!showWaypointManualEditSection)
         {
-            if (GUILayout.Button("Nạp quỹ đạo mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26))) LoadPantsOutlineTrajectory();
+            GUILayout.EndVertical();
+            return;
         }
 
-        GUILayout.Space(8);
-        GUILayout.Label("3. CHỈNH ĐIỂM QUỸ ĐẠO", AntigravityUITheme.StyleSectionLabel);
-        showGizmos = GUILayout.Toggle(showGizmos, " Hiện đường quỹ đạo 3D", AntigravityUITheme.StyleToggle);
         int wpCount = waypoints.Count;
         int wpIdx = wpCount > 0 ? Mathf.Clamp(currentWaypointIndex, 0, wpCount - 1) : 0;
 
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("-10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 10));
-        if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24))) ApplyWaypoint(Mathf.Max(0, wpIdx - 1));
-        GUILayout.Label($"Điểm {wpIdx + 1}/{Mathf.Max(1, wpCount)}", AntigravityUITheme.StyleLabelCyan);
-        if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 1));
-        if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24))) ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 10));
+        if (GUILayout.Button("-10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24)) && wpCount > 0)
+        {
+            isPlaying = false;
+            ApplyWaypoint(Mathf.Max(0, wpIdx - 10));
+        }
+        if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24)) && wpCount > 0)
+        {
+            isPlaying = false;
+            ApplyWaypoint(Mathf.Max(0, wpIdx - 1));
+        }
+        wpIdx = wpCount > 0 ? Mathf.Clamp(currentWaypointIndex, 0, wpCount - 1) : 0;
+        GUILayout.Label($"Điểm {(wpCount > 0 ? wpIdx + 1 : 0)}/{wpCount}", AntigravityUITheme.StyleLabelCyan);
+        if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(34), GUILayout.Height(24)) && wpCount > 0)
+        {
+            isPlaying = false;
+            ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 1));
+        }
+        if (GUILayout.Button("+10", AntigravityUITheme.StyleButton, GUILayout.Width(38), GUILayout.Height(24)) && wpCount > 0)
+        {
+            isPlaying = false;
+            ApplyWaypoint(Mathf.Min(wpCount - 1, wpIdx + 10));
+        }
         GUILayout.EndHorizontal();
 
+        wpIdx = wpCount > 0 ? Mathf.Clamp(currentWaypointIndex, 0, wpCount - 1) : 0;
         int sliderIdx = Mathf.RoundToInt(GUILayout.HorizontalSlider(wpIdx, 0, Mathf.Max(0, wpCount - 1)));
-        if (sliderIdx != currentWaypointIndex)
+        if (wpCount > 0 && sliderIdx != wpIdx)
         {
             isPlaying = false;
             ApplyWaypoint(sliderIdx);
+            wpIdx = Mathf.Clamp(currentWaypointIndex, 0, wpCount - 1);
         }
 
         if (wpCount > 0)
         {
             WaypointData wp = waypoints[wpIdx];
+            SyncRpyDraftForWaypoint(wpIdx, wp);
+
             GUILayout.Space(4);
             GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
             GUILayout.Label($"TCP (mm): X={wp.targetPosGlobal_mm.x:F1}  Y={wp.targetPosGlobal_mm.y:F1}  Z={wp.targetPosGlobal_mm.z:F1}", AntigravityUITheme.StyleLabelMuted);
@@ -3067,89 +4583,121 @@ public class DobotCR10AIKController : MonoBehaviour
             GUILayout.EndVertical();
 
             GUILayout.Space(6);
-            GUILayout.Label("GÓC HƯỚNG ĐẦU PHUN (RPY)", AntigravityUITheme.StyleSectionLabel);
+            GUILayout.Label("ĐIỀU CHỈNH ROLL / PITCH / YAW & NGHIỆM IK", AntigravityUITheme.StyleSectionLabel);
+            GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+
+            bool draftChanged = false;
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Roll: {wp.roll_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
-            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 5f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg - 1f, wp.pitch_deg, wp.yaw_deg);
-            float rSlider = GUILayout.HorizontalSlider(wp.roll_deg, -180f, 180f);
-            if (Mathf.Abs(rSlider - wp.roll_deg) > 0.1f) UpdateWaypointRpy(wpIdx, Mathf.Round(rSlider * 10f) / 10f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 1f, wp.pitch_deg, wp.yaw_deg);
-            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg + 5f, wp.pitch_deg, wp.yaw_deg);
+            GUILayout.Label($"Roll: {rpyDraftRoll:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftRoll = Mathf.Clamp(rpyDraftRoll - 5f, -180f, 180f); draftChanged = true; }
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftRoll = Mathf.Clamp(rpyDraftRoll - 1f, -180f, 180f); draftChanged = true; }
+            float rSlider = GUILayout.HorizontalSlider(rpyDraftRoll, -180f, 180f);
+            if (Mathf.Abs(rSlider - rpyDraftRoll) > 0.05f) { rpyDraftRoll = Mathf.Round(rSlider * 10f) / 10f; draftChanged = true; }
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftRoll = Mathf.Clamp(rpyDraftRoll + 1f, -180f, 180f); draftChanged = true; }
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftRoll = Mathf.Clamp(rpyDraftRoll + 5f, -180f, 180f); draftChanged = true; }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Pitch: {wp.pitch_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
-            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 5f, wp.yaw_deg);
-            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg - 1f, wp.yaw_deg);
-            float pSlider = GUILayout.HorizontalSlider(wp.pitch_deg, -90f, 90f);
-            if (Mathf.Abs(pSlider - wp.pitch_deg) > 0.1f) UpdateWaypointRpy(wpIdx, wp.roll_deg, Mathf.Round(pSlider * 10f) / 10f, wp.yaw_deg);
-            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 1f, wp.yaw_deg);
-            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg + 5f, wp.yaw_deg);
+            GUILayout.Label($"Pitch: {rpyDraftPitch:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftPitch = Mathf.Clamp(rpyDraftPitch - 5f, -90f, 90f); draftChanged = true; }
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftPitch = Mathf.Clamp(rpyDraftPitch - 1f, -90f, 90f); draftChanged = true; }
+            float pSlider = GUILayout.HorizontalSlider(rpyDraftPitch, -90f, 90f);
+            if (Mathf.Abs(pSlider - rpyDraftPitch) > 0.05f) { rpyDraftPitch = Mathf.Round(pSlider * 10f) / 10f; draftChanged = true; }
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftPitch = Mathf.Clamp(rpyDraftPitch + 1f, -90f, 90f); draftChanged = true; }
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftPitch = Mathf.Clamp(rpyDraftPitch + 5f, -90f, 90f); draftChanged = true; }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"Yaw: {wp.yaw_deg:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
-            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 5f);
-            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg - 1f);
-            float ySlider = GUILayout.HorizontalSlider(wp.yaw_deg, -180f, 180f);
-            if (Mathf.Abs(ySlider - wp.yaw_deg) > 0.1f) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, Mathf.Round(ySlider * 10f) / 10f);
-            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 1f);
-            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) UpdateWaypointRpy(wpIdx, wp.roll_deg, wp.pitch_deg, wp.yaw_deg + 5f);
+            GUILayout.Label($"Yaw: {rpyDraftYaw:F1}°", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(82));
+            if (GUILayout.Button("-5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftYaw = Mathf.Clamp(rpyDraftYaw - 5f, -180f, 180f); draftChanged = true; }
+            if (GUILayout.Button("-1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftYaw = Mathf.Clamp(rpyDraftYaw - 1f, -180f, 180f); draftChanged = true; }
+            float ySlider = GUILayout.HorizontalSlider(rpyDraftYaw, -180f, 180f);
+            if (Mathf.Abs(ySlider - rpyDraftYaw) > 0.05f) { rpyDraftYaw = Mathf.Round(ySlider * 10f) / 10f; draftChanged = true; }
+            if (GUILayout.Button("+1", AntigravityUITheme.StyleButton, GUILayout.Width(26), GUILayout.Height(20))) { rpyDraftYaw = Mathf.Clamp(rpyDraftYaw + 1f, -180f, 180f); draftChanged = true; }
+            if (GUILayout.Button("+5", AntigravityUITheme.StyleButton, GUILayout.Width(30), GUILayout.Height(20))) { rpyDraftYaw = Mathf.Clamp(rpyDraftYaw + 5f, -180f, 180f); draftChanged = true; }
             GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Thẳng đứng", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+            if (draftChanged)
             {
-                UpdateWaypointRpy(wpIdx, 180f, 0f, 0f);
+                rpyDraftDirty = true;
+                RefreshRpyDraftSolutionsAndPreview(wpIdx, wp, previewOnRobot: true);
             }
-            if (GUILayout.Button("Áp dụng về sau", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
+            else
             {
-                PropagateRpyForward(wpIdx);
+                RefreshRpyDraftSolutionsAndPreview(wpIdx, wp, previewOnRobot: false);
             }
-            if (GUILayout.Button("Áp dụng tất cả", AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-            {
-                ApplyRpyToAllWaypoints(wp.roll_deg, wp.pitch_deg, wp.yaw_deg);
-            }
-            GUILayout.EndHorizontal();
 
-            Quaternion rot = GetWaypointFlangeRotation(wp);
-            float[] seedAngles = wpIdx > 0 ? waypoints[wpIdx - 1].jointAngles_rad : null;
-            List<DobotCR10AKinematics.IKSolution> sols = DobotCR10AKinematics.SolveTcpPose(
-                wp.targetPosGlobal_mm, rot, seedAngles, toolLength, useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
-
-            if (sols != null && sols.Count > 0)
+            GUILayout.Space(4);
+            if (rpyDraftSolutions != null && rpyDraftSolutions.Count > 0)
             {
-                GUILayout.Space(4);
-                GUILayout.Label($"NGHIỆM IK ({sols.Count})", AntigravityUITheme.StyleSectionLabel);
-                waypointSolsScroll = GUILayout.BeginScrollView(waypointSolsScroll, GUILayout.Height(Mathf.Min(120f, sols.Count * 24f + 4f)));
-                for (int i = 0; i < sols.Count; i++)
+                GUILayout.Label($"Nghiệm IK ({rpyDraftSolutions.Count}):", AntigravityUITheme.StyleLabelMuted);
+                waypointSolsScroll = GUILayout.BeginScrollView(waypointSolsScroll, GUILayout.Height(Mathf.Min(115f, rpyDraftSolutions.Count * 24f + 4f)));
+                for (int i = 0; i < rpyDraftSolutions.Count; i++)
                 {
-                    var s = sols[i];
-                    bool isCurrentChoice = IsMatchingConfiguration(wp.jointAngles_rad, s.jointsRad);
-                    string pref = isCurrentChoice ? "[Đang chọn] " : $"#{i + 1} ";
+                    var s = rpyDraftSolutions[i];
+                    bool isSelected = (i == rpyDraftSolIndex);
+                    string pref = isSelected ? "[Đang chọn] " : $"#{i + 1} ";
                     string label = $"{pref}{s.branchName} ({s.positionErrorMm:F3} mm)";
 
-                    GUIStyle btnStyle = isCurrentChoice ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                    GUIStyle btnStyle = isSelected ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
                     if (GUILayout.Button(label, btnStyle, GUILayout.Height(22)))
                     {
-                        ApplyConfigurationToWaypoint(wpIdx, s, i);
+                        rpyDraftSolIndex = i;
+                        rpyDraftBranchName = s.branchName;
+                        // Chốt ngay nhánh nghiệm người dùng chọn vào điểm hiện tại & lưu ưu tiên tự động để không bị nhảy về nghiệm cũ khi đổi tab/Views
+                        for (int j = 0; j < 6; j++)
+                        {
+                            wp.jointAngles_rad[j] = (float)s.jointsRad[j];
+                            wp.jointAngles_deg[j] = (float)s.jointsDeg[j];
+                        }
+                        wp.isSolved = true;
+                        wp.posError_mm = (float)s.positionErrorMm;
+                        wp.selectedSolutionIndex = i;
+                        wp.selectedBranchName = s.branchName;
+                        customWaypointConfigurations[wpIdx] = i;
+                        rpyDraftDirty = false;
+                        // Đồng bộ mượt nhánh nghiệm mới cho toàn bộ quỹ đạo (giữ nguyên RPY của từng điểm) để khi Chạy không bị đảo tư thế giữa các điểm
+                        PropagatePreferredBranchAcrossTrajectory(wpIdx, s.branchName);
+                        rpyDraftStatusMsg = $"Đã chọn & đồng bộ nhánh: {s.branchName} (đã lưu setup).";
+                        rpyDraftStatusIsError = false;
+                        PreviewRpyDraftSolutionOnRobot(wp, s);
+                        SetPreferredIkBranch(s.branchName, persistImmediately: true);
                     }
                 }
                 GUILayout.EndScrollView();
-
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Lan truyền về sau", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
-                {
-                    PropagateCurrentConfigurationForward(wpIdx);
-                }
-                if (GUILayout.Button("Mặc định Q*", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
-                {
-                    ResetWaypointToDefault(wpIdx);
-                }
-                GUILayout.EndHorizontal();
             }
+            else
+            {
+                GUILayout.Label("Không có nghiệm IK tại góc RPY này!", AntigravityUITheme.StyleLabelRed);
+            }
+
+            if (rpyDraftDirty && rpyDraftSolutions != null && rpyDraftSolutions.Count > 0)
+            {
+                GUILayout.Label("Đang xem trước thay đổi (bấm Áp dụng để lưu, Hủy để hoàn tác).", AntigravityUITheme.StyleLabelYellow);
+            }
+            if (!string.IsNullOrEmpty(rpyDraftStatusMsg))
+            {
+                GUILayout.Label(rpyDraftStatusMsg, rpyDraftStatusIsError ? AntigravityUITheme.StyleLabelRed : AntigravityUITheme.StyleLabelCyan);
+            }
+
+            GUILayout.EndVertical();
+
+            GUILayout.Space(4);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Hủy", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+            {
+                CancelRpyAndBranchDraft(wpIdx);
+            }
+            if (GUILayout.Button("Áp dụng", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(26)))
+            {
+                ApplyRpyAndBranchDraftToCurrent(wpIdx);
+            }
+            if (GUILayout.Button("Áp dụng cho tất cả", AntigravityUITheme.StyleButton, GUILayout.Height(26)))
+            {
+                ApplyRpyAndBranchDraftToAll(wpIdx);
+            }
+            GUILayout.EndHorizontal();
         }
 
         GUILayout.EndVertical();
@@ -3377,19 +4925,21 @@ public class DobotCR10AIKController : MonoBehaviour
         try
         {
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("index,dist_mm,x_mm,y_mm,z_mm,roll_deg,pitch_deg,yaw_deg,j1_deg,j2_deg,j3_deg,j4_deg,j5_deg,j6_deg,branch");
+            sb.AppendLine("index,dist_mm,x_mm,y_mm,z_mm,roll_deg,pitch_deg,yaw_deg,j1_deg,j2_deg,j3_deg,j4_deg,j5_deg,j6_deg,branch,spray_enabled,segment_name");
             for (int i = 0; i < waypoints.Count; i++)
             {
                 var wp = waypoints[i];
                 string branch = string.IsNullOrEmpty(wp.selectedBranchName) ? "Optimal_Q" : wp.selectedBranchName;
+                int sprayFlag = wp.sprayOn ? 1 : 0;
+                string segName = string.IsNullOrEmpty(wp.segmentName) ? "SPRAY" : wp.segmentName.Replace(",", "_");
                 sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                    "{0},{1:F2},{2:F2},{3:F2},{4:F2},{5:F2},{6:F2},{7:F2},{8:F3},{9:F3},{10:F3},{11:F3},{12:F3},{13:F3},{14}",
+                    "{0},{1:F2},{2:F2},{3:F2},{4:F2},{5:F2},{6:F2},{7:F2},{8:F3},{9:F3},{10:F3},{11:F3},{12:F3},{13:F3},{14},{15},{16}",
                     wp.index, wp.distance_mm,
                     wp.targetPosGlobal_mm.x, wp.targetPosGlobal_mm.y, wp.targetPosGlobal_mm.z,
                     wp.roll_deg, wp.pitch_deg, wp.yaw_deg,
                     wp.jointAngles_deg[0], wp.jointAngles_deg[1], wp.jointAngles_deg[2],
                     wp.jointAngles_deg[3], wp.jointAngles_deg[4], wp.jointAngles_deg[5],
-                    branch
+                    branch, sprayFlag, segName
                 ));
             }
 
@@ -3961,6 +5511,331 @@ public class DobotCR10AIKController : MonoBehaviour
         }
     }
 
+    private void SyncRpyDraftForWaypoint(int wpIdx, WaypointData wp)
+    {
+        if (wp == null) return;
+        if (rpyEditWpIndex != wpIdx || !ReferenceEquals(rpyEditWaypointRef, wp))
+        {
+            rpyEditWpIndex = wpIdx;
+            rpyEditWaypointRef = wp;
+            rpyDraftRoll = wp.roll_deg;
+            rpyDraftPitch = wp.pitch_deg;
+            rpyDraftYaw = wp.yaw_deg;
+            rpyDraftBranchName = wp.selectedBranchName ?? "";
+            rpyDraftSolIndex = Mathf.Max(0, wp.selectedSolutionIndex);
+            rpyDraftDirty = false;
+            rpyDraftStatusMsg = "";
+            rpyDraftStatusIsError = false;
+            rpyCacheRoll = float.NaN;
+        }
+    }
+
+    private void RefreshRpyDraftSolutionsAndPreview(int wpIdx, WaypointData wp, bool previewOnRobot)
+    {
+        if (wp == null) return;
+        bool cacheDirty =
+            float.IsNaN(rpyCacheRoll) ||
+            Vector3.SqrMagnitude(wp.targetPosGlobal_mm - rpyCachePosMm) > 1e-4f ||
+            Mathf.Abs(rpyDraftRoll - rpyCacheRoll) > 1e-3f ||
+            Mathf.Abs(rpyDraftPitch - rpyCachePitch) > 1e-3f ||
+            Mathf.Abs(rpyDraftYaw - rpyCacheYaw) > 1e-3f ||
+            Mathf.Abs(toolLength - rpyCacheToolLen) > 1e-3f ||
+            Mathf.Abs(toolOffsetX - rpyCacheToolOffX) > 1e-3f ||
+            Mathf.Abs(toolOffsetY - rpyCacheToolOffY) > 1e-3f;
+
+        if (cacheDirty)
+        {
+            Quaternion rot = DobotCR10AKinematics.RpyToUnityRotation(rpyDraftRoll, rpyDraftPitch, rpyDraftYaw);
+            float[] seed = wpIdx > 0 ? waypoints[wpIdx - 1].jointAngles_rad : (wp.isSolved ? wp.jointAngles_rad : null);
+            var sols = DobotCR10AKinematics.SolveTcpPose(
+                wp.targetPosGlobal_mm, rot, seed, toolLength,
+                useAdaptiveTilt: false, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+
+            rpyDraftSolutions = sols ?? new List<DobotCR10AKinematics.IKSolution>();
+            rpyCachePosMm = wp.targetPosGlobal_mm;
+            rpyCacheRoll = rpyDraftRoll;
+            rpyCachePitch = rpyDraftPitch;
+            rpyCacheYaw = rpyDraftYaw;
+            rpyCacheToolLen = toolLength;
+            rpyCacheToolOffX = toolOffsetX;
+            rpyCacheToolOffY = toolOffsetY;
+
+            if (rpyDraftSolutions.Count > 0)
+            {
+                int chosenIdx = -1;
+                if (!rpyDraftDirty && wp.isSolved)
+                {
+                    for (int i = 0; i < rpyDraftSolutions.Count; i++)
+                    {
+                        if (IsMatchingConfiguration(wp.jointAngles_rad, rpyDraftSolutions[i].jointsRad))
+                        {
+                            chosenIdx = i;
+                            break;
+                        }
+                    }
+                }
+                if (chosenIdx < 0 && !string.IsNullOrEmpty(rpyDraftBranchName))
+                {
+                    for (int i = 0; i < rpyDraftSolutions.Count; i++)
+                    {
+                        if (rpyDraftSolutions[i].branchName == rpyDraftBranchName)
+                        {
+                            chosenIdx = i;
+                            break;
+                        }
+                    }
+                }
+                if (chosenIdx < 0) chosenIdx = 0;
+                rpyDraftSolIndex = chosenIdx;
+                rpyDraftBranchName = rpyDraftSolutions[chosenIdx].branchName;
+            }
+            else
+            {
+                rpyDraftSolIndex = -1;
+            }
+        }
+
+        if (previewOnRobot && rpyDraftSolutions != null && rpyDraftSolIndex >= 0 && rpyDraftSolIndex < rpyDraftSolutions.Count)
+        {
+            PreviewRpyDraftSolutionOnRobot(wp, rpyDraftSolutions[rpyDraftSolIndex]);
+        }
+    }
+
+    private void PreviewRpyDraftSolutionOnRobot(WaypointData wp, DobotCR10AKinematics.IKSolution sol)
+    {
+        if (robotManual == null || wp == null || sol == null || sol.jointsRad == null || sol.jointsRad.Length < 6) return;
+        isPlaying = false;
+        isMovingToManualTarget = false;
+        isMovingToHome = false;
+        robotManual.axis0 = (float)sol.jointsRad[0];
+        robotManual.axis1 = (float)sol.jointsRad[1];
+        robotManual.axis2 = (float)sol.jointsRad[2];
+        robotManual.axis3 = (float)sol.jointsRad[3];
+        robotManual.axis4 = (float)sol.jointsRad[4];
+        robotManual.axis5 = (float)sol.jointsRad[5];
+        robotManual.ApplyRotations();
+        robotManual.SyncTargetPoseFromWaypoint(wp.targetPosGlobal_mm, rpyDraftRoll, rpyDraftPitch, rpyDraftYaw);
+    }
+
+    private void PropagatePreferredBranchAcrossTrajectory(int anchorIdx, string branchName)
+    {
+        if (waypoints == null || waypoints.Count == 0 || string.IsNullOrEmpty(branchName)) return;
+        int start = Mathf.Clamp(anchorIdx, 0, waypoints.Count - 1);
+
+        // Lan truyền mượt về phía sau từ anchorIdx -> N-1
+        float[] seedFwd = waypoints[start].isSolved ? (float[])waypoints[start].jointAngles_rad.Clone() : null;
+        for (int idx = start + 1; idx < waypoints.Count; idx++)
+        {
+            var w = waypoints[idx];
+            Quaternion rot = GetWaypointFlangeRotation(w);
+            var sols = DobotCR10AKinematics.SolveTcpPose(
+                w.targetPosGlobal_mm, rot, seedFwd, toolLength,
+                useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+            if (sols != null && sols.Count > 0)
+            {
+                var chosen = DobotCR10AKinematics.SelectPreferredSolution(sols, branchName);
+                // Nếu nhánh trùng tên gây nhảy góc quá lớn so với điểm ngay trước đó thì giữ nghiệm liên tục gần seedFwd nhất
+                if (seedFwd != null)
+                {
+                    float jumpDeg = 0f;
+                    for (int j = 0; j < 6; j++)
+                        jumpDeg = Mathf.Max(jumpDeg, Mathf.Abs(Mathf.DeltaAngle(seedFwd[j] * Mathf.Rad2Deg, (float)chosen.jointsRad[j] * Mathf.Rad2Deg)));
+                    if (jumpDeg > 55f) chosen = sols[0];
+                }
+                for (int j = 0; j < 6; j++)
+                {
+                    w.jointAngles_rad[j] = (float)chosen.jointsRad[j];
+                    w.jointAngles_deg[j] = (float)chosen.jointsDeg[j];
+                }
+                w.isSolved = true;
+                w.posError_mm = (float)chosen.positionErrorMm;
+                w.selectedBranchName = chosen.branchName;
+                seedFwd = w.jointAngles_rad;
+            }
+        }
+
+        // Lan truyền mượt về phía trước từ anchorIdx -> 0
+        float[] seedBack = waypoints[start].isSolved ? (float[])waypoints[start].jointAngles_rad.Clone() : null;
+        for (int idx = start - 1; idx >= 0; idx--)
+        {
+            var w = waypoints[idx];
+            Quaternion rot = GetWaypointFlangeRotation(w);
+            var sols = DobotCR10AKinematics.SolveTcpPose(
+                w.targetPosGlobal_mm, rot, seedBack, toolLength,
+                useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+            if (sols != null && sols.Count > 0)
+            {
+                var chosen = DobotCR10AKinematics.SelectPreferredSolution(sols, branchName);
+                if (seedBack != null)
+                {
+                    float jumpDeg = 0f;
+                    for (int j = 0; j < 6; j++)
+                        jumpDeg = Mathf.Max(jumpDeg, Mathf.Abs(Mathf.DeltaAngle(seedBack[j] * Mathf.Rad2Deg, (float)chosen.jointsRad[j] * Mathf.Rad2Deg)));
+                    if (jumpDeg > 55f) chosen = sols[0];
+                }
+                for (int j = 0; j < 6; j++)
+                {
+                    w.jointAngles_rad[j] = (float)chosen.jointsRad[j];
+                    w.jointAngles_deg[j] = (float)chosen.jointsDeg[j];
+                }
+                w.isSolved = true;
+                w.posError_mm = (float)chosen.positionErrorMm;
+                w.selectedBranchName = chosen.branchName;
+                seedBack = w.jointAngles_rad;
+            }
+        }
+    }
+
+    public void CancelRpyAndBranchDraft(int wpIdx)
+    {
+        if (wpIdx < 0 || wpIdx >= waypoints.Count) return;
+        WaypointData wp = waypoints[wpIdx];
+        rpyDraftRoll = wp.roll_deg;
+        rpyDraftPitch = wp.pitch_deg;
+        rpyDraftYaw = wp.yaw_deg;
+        rpyDraftBranchName = wp.selectedBranchName ?? "";
+        rpyDraftSolIndex = Mathf.Max(0, wp.selectedSolutionIndex);
+        rpyDraftDirty = false;
+        rpyCacheRoll = float.NaN;
+        rpyDraftStatusMsg = "Đã hủy thay đổi.";
+        rpyDraftStatusIsError = false;
+        ApplyWaypoint(wpIdx);
+    }
+
+    public void ApplyRpyAndBranchDraftToCurrent(int wpIdx)
+    {
+        if (wpIdx < 0 || wpIdx >= waypoints.Count) return;
+        WaypointData wp = waypoints[wpIdx];
+        RefreshRpyDraftSolutionsAndPreview(wpIdx, wp, previewOnRobot: false);
+
+        if (rpyDraftSolutions == null || rpyDraftSolutions.Count == 0 || rpyDraftSolIndex < 0 || rpyDraftSolIndex >= rpyDraftSolutions.Count)
+        {
+            rpyDraftStatusMsg = "Không thể áp dụng: không có nghiệm IK ở góc RPY này!";
+            rpyDraftStatusIsError = true;
+            return;
+        }
+
+        var chosen = rpyDraftSolutions[rpyDraftSolIndex];
+        wp.roll_deg = Mathf.Clamp(rpyDraftRoll, -180f, 180f);
+        wp.pitch_deg = Mathf.Clamp(rpyDraftPitch, -90f, 90f);
+        wp.yaw_deg = Mathf.Clamp(rpyDraftYaw, -180f, 180f);
+        for (int j = 0; j < 6; j++)
+        {
+            wp.jointAngles_rad[j] = (float)chosen.jointsRad[j];
+            wp.jointAngles_deg[j] = (float)chosen.jointsDeg[j];
+        }
+        wp.isSolved = true;
+        wp.posError_mm = (float)chosen.positionErrorMm;
+        wp.selectedSolutionIndex = rpyDraftSolIndex;
+        wp.selectedBranchName = chosen.branchName;
+
+        customWaypointConfigurations[wpIdx] = rpyDraftSolIndex;
+        SetPreferredIkBranch(chosen.branchName, persistImmediately: true);
+        ApplyWaypoint(wpIdx);
+        RunDiagnostics();
+
+        rpyDraftDirty = false;
+        rpyDraftStatusMsg = $"Đã áp dụng cho điểm #{wpIdx + 1} ({chosen.branchName}).";
+        rpyDraftStatusIsError = false;
+    }
+
+    public void ApplyRpyAndBranchDraftToAll(int currentWpIdx)
+    {
+        if (waypoints == null || waypoints.Count == 0) return;
+        float targetRoll = Mathf.Clamp(rpyDraftRoll, -180f, 180f);
+        float targetPitch = Mathf.Clamp(rpyDraftPitch, -90f, 90f);
+        float targetYaw = Mathf.Clamp(rpyDraftYaw, -180f, 180f);
+        string preferredBranch = rpyDraftBranchName;
+        Quaternion rot = DobotCR10AKinematics.RpyToUnityRotation(targetRoll, targetPitch, targetYaw);
+
+        int okCount = 0;
+        int failCount = 0;
+        float[] seed = null;
+
+        for (int i = 0; i < waypoints.Count; i++)
+        {
+            WaypointData w = waypoints[i];
+            float[] curSeed = seed ?? (w.isSolved ? w.jointAngles_rad : null);
+            var sols = DobotCR10AKinematics.SolveTcpPose(
+                w.targetPosGlobal_mm, rot, curSeed, toolLength,
+                useAdaptiveTilt: false, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+
+            if (sols != null && sols.Count > 0)
+            {
+                int chosenIdx = 0;
+                if (!string.IsNullOrEmpty(preferredBranch))
+                {
+                    for (int sIdx = 0; sIdx < sols.Count; sIdx++)
+                    {
+                        if (sols[sIdx].branchName == preferredBranch)
+                        {
+                            chosenIdx = sIdx;
+                            break;
+                        }
+                    }
+                }
+                var chosen = sols[chosenIdx];
+                w.roll_deg = targetRoll;
+                w.pitch_deg = targetPitch;
+                w.yaw_deg = targetYaw;
+                for (int j = 0; j < 6; j++)
+                {
+                    w.jointAngles_rad[j] = (float)chosen.jointsRad[j];
+                    w.jointAngles_deg[j] = (float)chosen.jointsDeg[j];
+                }
+                w.isSolved = true;
+                w.posError_mm = (float)chosen.positionErrorMm;
+                w.selectedSolutionIndex = chosenIdx;
+                w.selectedBranchName = chosen.branchName;
+                customWaypointConfigurations[i] = chosenIdx;
+                seed = w.jointAngles_rad;
+                okCount++;
+            }
+            else
+            {
+                failCount++;
+            }
+        }
+
+        int focusIdx = Mathf.Clamp(currentWpIdx, 0, waypoints.Count - 1);
+        if (!string.IsNullOrEmpty(preferredBranch))
+        {
+            SetPreferredIkBranch(preferredBranch, persistImmediately: true);
+        }
+        else
+        {
+            SaveAllWorkbenchSetups(showToast: true);
+        }
+        ApplyWaypoint(focusIdx);
+        RunDiagnostics();
+
+        WaypointData focusWp = waypoints[focusIdx];
+        rpyEditWpIndex = focusIdx;
+        rpyEditWaypointRef = focusWp;
+        rpyDraftRoll = focusWp.roll_deg;
+        rpyDraftPitch = focusWp.pitch_deg;
+        rpyDraftYaw = focusWp.yaw_deg;
+        rpyDraftBranchName = focusWp.selectedBranchName ?? "";
+        rpyDraftSolIndex = Mathf.Max(0, focusWp.selectedSolutionIndex);
+        rpyCacheRoll = float.NaN;
+        rpyDraftDirty = false;
+        if (okCount == 0)
+        {
+            rpyDraftStatusMsg = "Không thể áp dụng: không điểm nào có nghiệm IK ở góc RPY này!";
+            rpyDraftStatusIsError = true;
+        }
+        else if (failCount > 0)
+        {
+            rpyDraftStatusMsg = $"Đã áp dụng cho {okCount}/{waypoints.Count} điểm ({failCount} điểm ngoài tầm RPY giữ nguyên).";
+            rpyDraftStatusIsError = false;
+        }
+        else
+        {
+            rpyDraftStatusMsg = $"Đã áp dụng RPY & nhánh nghiệm cho tất cả {okCount}/{waypoints.Count} điểm.";
+            rpyDraftStatusIsError = false;
+        }
+    }
+
     /// <summary>
     /// Điều chỉnh góc hướng TCP (Roll, Pitch, Yaw) cho một waypoint cụ thể và giải tích lại IK
     /// </summary>
@@ -3968,18 +5843,21 @@ public class DobotCR10AIKController : MonoBehaviour
     {
         if (wpIndex < 0 || wpIndex >= waypoints.Count) return;
         WaypointData wp = waypoints[wpIndex];
-        wp.roll_deg = Mathf.Clamp(newRoll, -180f, 180f);
-        wp.pitch_deg = Mathf.Clamp(newPitch, -90f, 90f);
-        wp.yaw_deg = Mathf.Clamp(newYaw, -180f, 180f);
+        float r = Mathf.Clamp(newRoll, -180f, 180f);
+        float p = Mathf.Clamp(newPitch, -90f, 90f);
+        float y = Mathf.Clamp(newYaw, -180f, 180f);
 
-        Quaternion rot = GetWaypointFlangeRotation(wp);
-        float[] seed = wpIndex > 0 ? waypoints[wpIndex - 1].jointAngles_rad : null;
-        var sols = DobotCR10AKinematics.SolveTcpPose(wp.targetPosGlobal_mm, rot, seed, toolLength, useAdaptiveTilt: true, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
+        Quaternion rot = DobotCR10AKinematics.RpyToUnityRotation(r, p, y);
+        float[] seed = wpIndex > 0 ? waypoints[wpIndex - 1].jointAngles_rad : (wp.isSolved ? wp.jointAngles_rad : null);
+        var sols = DobotCR10AKinematics.SolveTcpPose(wp.targetPosGlobal_mm, rot, seed, toolLength, useAdaptiveTilt: false, toolOffsetX: toolOffsetX, toolOffsetY: toolOffsetY);
         if (sols != null && sols.Count > 0)
         {
             int solIdx = customWaypointConfigurations.ContainsKey(wpIndex) ? customWaypointConfigurations[wpIndex] : 0;
-            if (solIdx >= sols.Count) solIdx = 0;
+            if (solIdx < 0 || solIdx >= sols.Count) solIdx = 0;
             var chosen = sols[solIdx];
+            wp.roll_deg = r;
+            wp.pitch_deg = p;
+            wp.yaw_deg = y;
             for (int j = 0; j < 6; j++)
             {
                 wp.jointAngles_rad[j] = (float)chosen.jointsRad[j];
@@ -3989,9 +5867,8 @@ public class DobotCR10AIKController : MonoBehaviour
             wp.posError_mm = (float)chosen.positionErrorMm;
             wp.selectedSolutionIndex = solIdx;
             wp.selectedBranchName = chosen.branchName;
+            ApplyWaypoint(wpIndex);
         }
-
-        ApplyWaypoint(wpIndex);
     }
 
     /// <summary>
@@ -4008,6 +5885,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             UpdateWaypointRpy(i, r, p, y);
         }
+        ApplyWaypoint(startIdx);
         RunDiagnostics();
     }
 
@@ -4016,10 +5894,12 @@ public class DobotCR10AIKController : MonoBehaviour
     /// </summary>
     public void ApplyRpyToAllWaypoints(float r, float p, float y)
     {
+        int focusIdx = Mathf.Clamp(currentWaypointIndex, 0, Mathf.Max(0, waypoints.Count - 1));
         for (int i = 0; i < waypoints.Count; i++)
         {
             UpdateWaypointRpy(i, r, p, y);
         }
+        if (waypoints.Count > 0) ApplyWaypoint(focusIdx);
         RunDiagnostics();
     }
 
@@ -4059,8 +5939,22 @@ public class DobotCR10AIKController : MonoBehaviour
         FixedRigCamera rigViewCam = rcc != null ? rcc.EnsureFixedRigCamera(createIfMissing: false) : FindAnyObjectByType<FixedRigCamera>();
         if (rigViewCam != null)
         {
-            rigViewCam.showRuntimeRigVisual = GUILayout.Toggle(rigViewCam.showRuntimeRigVisual, " Hiện mô hình Camera Zivid & vùng FOV 3D", AntigravityUITheme.StyleToggle);
-            rigViewCam.showRuntimeFovFrustum = rigViewCam.showRuntimeRigVisual;
+            bool prevRigVis = rigViewCam.showRuntimeRigVisual;
+            bool prevFovVis = rigViewCam.showRuntimeFovFrustum;
+            rigViewCam.showRuntimeRigVisual = GUILayout.Toggle(rigViewCam.showRuntimeRigVisual, " Hiện mô hình Camera Zivid & giá treo 3D", AntigravityUITheme.StyleToggle);
+            rigViewCam.showRuntimeFovFrustum = GUILayout.Toggle(rigViewCam.showRuntimeFovFrustum, " Hiện vùng camera", AntigravityUITheme.StyleToggle);
+            if (rigViewCam.showRuntimeRigVisual != prevRigVis || rigViewCam.showRuntimeFovFrustum != prevFovVis)
+            {
+                rigViewCam.SaveRigVisualSettings();
+            }
+        }
+        bool prevCamAxes = showCameraAxesInCalibration;
+        showCameraAxesInCalibration = GUILayout.Toggle(showCameraAxesInCalibration, " Hiện trục XYZ Camera (X: Đỏ, Y: Xanh lá, Z: Xanh dương)", AntigravityUITheme.StyleToggle);
+        if (showCameraAxesInCalibration != prevCamAxes)
+        {
+            PlayerPrefs.SetInt("CR10A_ShowCameraAxes", showCameraAxesInCalibration ? 1 : 0);
+            PlayerPrefs.Save();
+            MarkSettingsDirty();
         }
 
         GUILayout.Space(6);
@@ -4091,7 +5985,7 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        GUILayout.Label("3. CÁC LỚP HIỂN THỊ (CHỖ CẦN PHUN & QUỸ ĐẠO)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("3. CÁC LỚP HIỂN THỊ (QUỸ ĐẠO, PHUN, VÁ LỖ & BÀN COLLIDER)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
 
         // Phân biệt rạch ròi 3 lớp hiển thị độc lập: Chỗ cần phun vs Đường quỹ đạo (quét/tắt súng) vs Đường phun (bật súng)
@@ -4118,6 +6012,7 @@ public class DobotCR10AIKController : MonoBehaviour
         showSprayZones3D = GUILayout.Toggle(showSprayZones3D, " Chỗ cần phun (Mẫu vẽ / Vùng R: Vàng cam | R_safe: Xanh lá)", AntigravityUITheme.StyleToggle);
         showTurnaroundConnectors = GUILayout.Toggle(showTurnaroundConnectors, " Đường quỹ đạo (Quét qua lại & quay đầu — TẮT súng: Đứt cam)", AntigravityUITheme.StyleToggle);
         showGizmos = GUILayout.Toggle(showGizmos, " Đường phun (Đoạn BẬT súng phun lên mẫu: Cyan nét liền)", AntigravityUITheme.StyleToggle);
+        sprayPaintEnabled = GUILayout.Toggle(sprayPaintEnabled, " Vệt phun mô phỏng trên bề mặt", AntigravityUITheme.StyleToggle);
         showP2SkeletonAxis = GUILayout.Toggle(showP2SkeletonAxis, " Trục giữa ống quần Skeleton (P2: Hồng tím)", AntigravityUITheme.StyleToggle);
         showP3TriangulationMesh = GUILayout.Toggle(showP3TriangulationMesh, " Lưới 32 tam giác mốc Barycentric (P3: Xanh ngọc)", AntigravityUITheme.StyleToggle);
         showP4RegisteredCloud3D = GUILayout.Toggle(showP4RegisteredCloud3D, " Đám mây điểm 3D đã đăng ký (P4: Xanh chanh)", AntigravityUITheme.StyleToggle);
@@ -4328,40 +6223,7 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndVertical();
 
         GUILayout.Space(6);
-        GUILayout.Label("4. HIỂN THỊ", AntigravityUITheme.StyleSectionLabel);
-        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-
-        showHoleRegionOutlines3D = GUILayout.Toggle(showHoleRegionOutlines3D, " Viền đỏ bao quanh vùng cần vá", AntigravityUITheme.StyleToggle);
-
-        bool prevSolid = renderInpaintedAsSolidMesh;
-        renderInpaintedAsSolidMesh = GUILayout.Toggle(renderInpaintedAsSolidMesh, " Hiển thị lớp vá dạng 3D Mesh đặc", AntigravityUITheme.StyleToggle);
-        if (renderInpaintedAsSolidMesh != prevSolid && compensatedSurfacePointsWorld.Count > 0)
-        {
-            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
-            BuildAndDisplayInpaintedMesh(pl);
-        }
-
-        bool prevShowInpainted = showInpaintedSurface3D;
-        showInpaintedSurface3D = GUILayout.Toggle(showInpaintedSurface3D, " Hiện lớp vá 3D", AntigravityUITheme.StyleToggle);
-        if (showInpaintedSurface3D != prevShowInpainted && inpaintedMeshObject != null)
-        {
-            var mr = inpaintedMeshObject.GetComponent<MeshRenderer>();
-            if (mr != null) mr.enabled = showInpaintedSurface3D;
-        }
-
-        bool prevHighlight = highlightInpaintedMesh;
-        highlightInpaintedMesh = GUILayout.Toggle(highlightInpaintedMesh, " Tô màu Cyan vùng vá", AntigravityUITheme.StyleToggle);
-        if (highlightInpaintedMesh != prevHighlight && compensatedSurfacePointsWorld.Count > 0)
-        {
-            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
-            BuildAndDisplayInpaintedMesh(pl);
-        }
-
-        showGunTiltVectors3D = GUILayout.Toggle(showGunTiltVectors3D, " Hiện tia hướng súng", AntigravityUITheme.StyleToggle);
-        GUILayout.EndVertical();
-
-        GUILayout.Space(6);
-        GUILayout.Label("5. THỰC THI & XUẤT MESH", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("4. THỰC THI & XUẤT MESH", AntigravityUITheme.StyleSectionLabel);
         if (GUILayout.Button("Vá kín 100% vùng bị che", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(30)))
         {
             showHoleRegionOutlines3D = true;
@@ -5954,7 +7816,13 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.BeginHorizontal();
         GUILayout.Label("VẼ MẪU PHUN 2D -> 3D", AntigravityUITheme.StyleSectionLabel);
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Phóng to", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(72), GUILayout.Height(20)))
+        GUIStyle dockLmBtnSt = isEditingLandmarksMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Sửa mốc", dockLmBtnSt, GUILayout.Width(64), GUILayout.Height(20)))
+        {
+            if (isEditingLandmarksMode) ExitLandmarkEditMode();
+            else EnterLandmarkEditMode(openFullscreen: false);
+        }
+        if (GUILayout.Button("Phóng to", AntigravityUITheme.StylePrimaryButton, GUILayout.Width(68), GUILayout.Height(20)))
         {
             showCanonicalDrawPanel = true;
             showFullscreen2DCanvas = true;
@@ -5962,12 +7830,12 @@ public class DobotCR10AIKController : MonoBehaviour
         AiServerClient camClient = EnsureAiClient();
         bool prevGuiEnabled = GUI.enabled;
         GUI.enabled = prevGuiEnabled && camClient != null && !camClient.isProcessing;
-        if (GUILayout.Button("Chụp cam", AntigravityUITheme.StyleButton, GUILayout.Width(72), GUILayout.Height(20)))
+        if (GUILayout.Button("Chụp cam", AntigravityUITheme.StyleButton, GUILayout.Width(68), GUILayout.Height(20)))
         {
             camClient.CapturePreview();
         }
         GUI.enabled = prevGuiEnabled;
-        if (GUILayout.Button(showCanonicalDrawPanel ? "Thu gọn" : "Mở", AntigravityUITheme.StyleButton, GUILayout.Width(64), GUILayout.Height(20)))
+        if (GUILayout.Button(showCanonicalDrawPanel ? "Thu gọn" : "Mở", AntigravityUITheme.StyleButton, GUILayout.Width(58), GUILayout.Height(20)))
         {
             showCanonicalDrawPanel = !showCanonicalDrawPanel;
         }
@@ -6015,8 +7883,25 @@ public class DobotCR10AIKController : MonoBehaviour
             : (activeTrajectoryMethod == "P4" ? " | Đang xem: P4 (ICP/TPS)" : " | Đang xem: Vẽ tay")));
         GUILayout.Label(camSourceLabel + methodBadge, canvasUsingRealCamera ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelMuted);
 
-        // Thanh công cụ chọn kiểu vẽ (Vẽ tay / Tròn / Vuông / Đa giác) & chỉnh cỡ cọ (mm)
-        Draw2DCanvasBrushAndShapeToolbar(isFullscreen: false);
+        // Đồng bộ bộ 12 mốc có thể sửa nếu người dùng đang ở chế độ Sửa mốc AI
+        if (isEditingLandmarksMode)
+        {
+            SyncEditableLandmarksForActiveSample(curLandmarksUV, hasRealLandmarks);
+        }
+        if (Event.current != null && Event.current.type == EventType.Layout)
+        {
+            layoutShowLandmarkEditPanel = isEditingLandmarksMode;
+        }
+
+        if (layoutShowLandmarkEditPanel)
+        {
+            DrawLandmarkEditPanel(isFullscreen: false, activeCamTex, nativeW, nativeH);
+        }
+        else
+        {
+            // Thanh công cụ chọn kiểu vẽ (Vẽ tay / Tròn / Vuông / Đa giác) & chỉnh cỡ cọ (mm)
+            Draw2DCanvasBrushAndShapeToolbar(isFullscreen: false);
+        }
 
         // Khung Canvas 2D theo đúng tỷ lệ ảnh thực tế từ camera (không làm méo ảnh)
         float maxCanvasW = Mathf.Clamp(width - 24f, 260f, 360f);
@@ -6062,7 +7947,11 @@ public class DobotCR10AIKController : MonoBehaviour
         Handle2DCanvasMouseInput(canvasRect, isFullscreen: false, hasRealLandmarks, curLandmarksUV);
 
         // Vẽ 12 điểm mốc AI đúng vị trí thực tế trên ảnh Camera 2D
-        if (curLandmarksUV != null && curLandmarksUV.Length == 12)
+        if (isEditingLandmarksMode && editableLandmarksUV != null && editableLandmarksUV.Length == 12)
+        {
+            DrawEditableLandmarksOn2DCanvas(canvasRect, isFullscreen: false);
+        }
+        else if (curLandmarksUV != null && curLandmarksUV.Length == 12)
         {
             for (int i = 0; i < curLandmarksUV.Length; i++)
             {
@@ -6074,8 +7963,11 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         // Vẽ tách biệt 2 lớp trên ảnh Camera 2D: (1) CHỖ CẦN PHUN (Vùng R & R_safe) và (2) ĐƯỜNG QUỸ ĐẠO (ON / OFF)
-        DrawTargetAndTrajectoryOverlaysOn2DCanvas(canvasRect, isFullscreen: false);
-        Draw2DCanvasToolPreview(canvasRect, isFullscreen: false);
+        if (!isEditingLandmarksMode)
+        {
+            DrawTargetAndTrajectoryOverlaysOn2DCanvas(canvasRect, isFullscreen: false);
+            Draw2DCanvasToolPreview(canvasRect, isFullscreen: false);
+        }
 
         GUILayout.Space(4);
         // Nút bật/tắt độc lập 3 lớp hiển thị: Chỗ cần phun vs Đường quỹ đạo (quét/tắt súng) vs Đường phun (bật súng)
@@ -6140,59 +8032,6 @@ public class DobotCR10AIKController : MonoBehaviour
             ClearAll2DAnd3DTrajectoryLines();
         }
         GUILayout.EndHorizontal();
-
-        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-        GUILayout.Label("LƯU / NẠP MẪU (.JSON)", AntigravityUITheme.StyleSectionLabel);
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Thư mục:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(58));
-        sprayTemplateDirectory = GUILayout.TextField(sprayTemplateDirectory, AntigravityUITheme.StyleTextField, GUILayout.Height(22));
-        if (GUILayout.Button("Chọn...", AntigravityUITheme.StyleButton, GUILayout.Width(66), GUILayout.Height(22)))
-        {
-            ChooseSprayTemplateDirectory();
-        }
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Tên file:", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(58));
-        saveTemplateFileName = GUILayout.TextField(saveTemplateFileName, AntigravityUITheme.StyleTextField, GUILayout.Width(110), GUILayout.Height(24));
-        if (GUILayout.Button("Lưu mẫu", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(24)))
-        {
-            ExportSprayTemplateWithDialog();
-        }
-        if (GUILayout.Button("Nạp mẫu", AntigravityUITheme.StyleButton, GUILayout.Height(24)))
-        {
-            ImportSprayTemplateWithDialog();
-        }
-        GUILayout.EndHorizontal();
-
-        if (availableSprayTemplateFiles == null || availableSprayTemplateFiles.Count == 0)
-        {
-            RefreshAvailableSprayTemplates();
-        }
-        if (availableSprayTemplateFiles != null && availableSprayTemplateFiles.Count > 0)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Có sẵn:", AntigravityUITheme.StyleLabelMuted, GUILayout.Width(52));
-            int maxShow = Mathf.Min(availableSprayTemplateFiles.Count, 3);
-            for (int f = 0; f < maxShow; f++)
-            {
-                string fn = availableSprayTemplateFiles[f];
-                if (GUILayout.Button(fn, AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-                {
-                    saveTemplateFileName = fn;
-                    ImportSprayTemplateFromFile(Path.Combine(GetSprayTemplateDirectoryFullPath(), fn + ".json"));
-                }
-            }
-            GUILayout.EndHorizontal();
-        }
-
-        preserveCustomDrawingAcrossSamples = GUILayout.Toggle(
-            preserveCustomDrawingAcrossSamples,
-            " Giữ mẫu vẽ khi đổi phôi",
-            AntigravityUITheme.StyleToggle
-        );
-        GUILayout.EndVertical();
 
         GUILayout.BeginHorizontal();
         GUILayout.Label($"Độ cao Z: {customDrawZOffsetMm:F1} mm", AntigravityUITheme.StyleLabelCyan, GUILayout.Width(130));
@@ -6878,6 +8717,12 @@ public class DobotCR10AIKController : MonoBehaviour
         Event ev = Event.current;
         if (ev == null || ev.type == EventType.Layout || canvasRect.width < 4f || canvasRect.height < 4f) return;
 
+        if (isEditingLandmarksMode)
+        {
+            Handle2DCanvasLandmarkEditMouseInput(canvasRect, isFullscreen, hasRealLandmarks, curLandmarksUV);
+            return;
+        }
+
         int canvasCtrlId = GUIUtility.GetControlID(FocusType.Passive);
         bool insideCanvas = canvasRect.Contains(ev.mousePosition);
         Vector2 normUV = new Vector2(
@@ -6941,6 +8786,10 @@ public class DobotCR10AIKController : MonoBehaviour
             else if (ev.type == EventType.MouseUp && ev.button == 0)
             {
                 ApplyActiveRegionEditDrag(normUV, canvasRect, ev.shift);
+                if (selectedRegionIndex >= 0 && selectedRegionIndex < customDrawnRegions.Count)
+                {
+                    CaptureRegionCanonicalVertices(customDrawnRegions[selectedRegionIndex], hasRealLandmarks, curLandmarksUV);
+                }
                 activeRegionEditMode = RegionEditMode.None;
                 activeEditHandleIndex = -1;
                 ReleaseCanvasHotControl();
@@ -7198,6 +9047,7 @@ public class DobotCR10AIKController : MonoBehaviour
             radiusUV = radiusUV,
             verticesUV = BuildCirclePolygonFromCenterRadiusUV(centerUV, radiusUV, 48)
         };
+        CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
@@ -7228,6 +9078,7 @@ public class DobotCR10AIKController : MonoBehaviour
                 new Vector2(rUV.xMin, rUV.yMax)
             }
         };
+        CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
@@ -7262,11 +9113,90 @@ public class DobotCR10AIKController : MonoBehaviour
             rectUV = new Rect(minU, minV, maxU - minU, maxV - minV),
             verticesUV = new List<Vector2>(polyUV)
         };
+        CaptureRegionCanonicalVertices(region, hasRealLandmarks, curLandmarksUV);
         customDrawnRegions.Add(region);
         undoHistoryIsRegion.Add(true);
         selectedRegionIndex = customDrawnRegions.Count - 1;
         customDrawStatusMsg = $"Đã thêm vùng Đa giác {polyUV.Count} đỉnh ({customDrawnRegions.Count} vùng). Chọn P1 / P2 / P3 / P4 để sinh quỹ đạo.";
         InvalidateGeneratedTrajectoryOnEdit();
+    }
+
+    private void CaptureRegionCanonicalVertices(DrawnRegion2D reg, bool hasRealLandmarks, Vector2[] curLandmarksUV)
+    {
+        if (reg == null) return;
+        reg.canonicalVerticesUV.Clear();
+
+        List<Vector2> srcVerts = null;
+        if (reg.shapeType == CanvasDrawTool.Circle && reg.radiusUV.x > 0.001f && reg.radiusUV.y > 0.001f)
+        {
+            srcVerts = BuildCirclePolygonFromCenterRadiusUV(reg.centerUV, reg.radiusUV, 48);
+        }
+        else if (reg.shapeType == CanvasDrawTool.Rectangle && reg.rectUV.width > 0.001f && reg.rectUV.height > 0.001f)
+        {
+            srcVerts = new List<Vector2>(24);
+            Vector2[] c =
+            {
+                new Vector2(reg.rectUV.xMin, reg.rectUV.yMin),
+                new Vector2(reg.rectUV.xMax, reg.rectUV.yMin),
+                new Vector2(reg.rectUV.xMax, reg.rectUV.yMax),
+                new Vector2(reg.rectUV.xMin, reg.rectUV.yMax)
+            };
+            for (int e = 0; e < 4; e++)
+            {
+                for (int k = 0; k < 6; k++)
+                    srcVerts.Add(Vector2.Lerp(c[e], c[(e + 1) % 4], k / 6f));
+            }
+        }
+        else if (reg.verticesUV != null && reg.verticesUV.Count >= 3)
+        {
+            srcVerts = new List<Vector2>(reg.verticesUV.Count * 4);
+            for (int e = 0; e < reg.verticesUV.Count; e++)
+            {
+                Vector2 a = reg.verticesUV[e];
+                Vector2 b = reg.verticesUV[(e + 1) % reg.verticesUV.Count];
+                int sub = Mathf.Clamp(Mathf.CeilToInt(Vector2.Distance(a, b) / 0.025f), 1, 16);
+                for (int k = 0; k < sub; k++)
+                    srcVerts.Add(Vector2.Lerp(a, b, k / (float)sub));
+            }
+        }
+        if (srcVerts == null || srcVerts.Count < 3) return;
+
+        Vector2[] canonLm = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+        Vector2[] srcLm = (hasRealLandmarks && curLandmarksUV != null && curLandmarksUV.Length == 12)
+            ? curLandmarksUV
+            : ((strokesReferenceLandmarksUV != null && strokesReferenceLandmarksUV.Length == 12) ? strokesReferenceLandmarksUV : null);
+
+        for (int i = 0; i < srcVerts.Count; i++)
+        {
+            Vector2 pt = srcVerts[i];
+            if (srcLm != null && canonLm != null)
+                pt = TrajectoryEvaluationEngine.WarpPointBarycentric12(pt, srcLm, canonLm, 1f, 1f);
+            reg.canonicalVerticesUV.Add(pt);
+        }
+    }
+
+    public List<List<Vector2>> GetCustomDrawnRegionCanonicalPolygonsUV()
+    {
+        var list = new List<List<Vector2>>();
+        if (customDrawnRegions == null || customDrawnRegions.Count == 0) return list;
+
+        Texture2D activeCamTex = GetActiveRealCameraTexture(out PLYDirectLoader foundPly, out int nativeW, out int nativeH, out _);
+        Vector2[] camLmUV = GetActiveCanvasLandmarks12UV(foundPly, nativeW, nativeH, activeCamTex != null, out bool hasRealLm);
+
+        for (int r = 0; r < customDrawnRegions.Count; r++)
+        {
+            var reg = customDrawnRegions[r];
+            if (reg == null) continue;
+            if (reg.canonicalVerticesUV == null || reg.canonicalVerticesUV.Count < 3)
+            {
+                CaptureRegionCanonicalVertices(reg, hasRealLm, camLmUV);
+            }
+            if (reg.canonicalVerticesUV != null && reg.canonicalVerticesUV.Count >= 3)
+            {
+                list.Add(new List<Vector2>(reg.canonicalVerticesUV));
+            }
+        }
+        return list;
     }
 
     private static void AppendSubdividedSegmentUV(List<Vector2> dst, Vector2 a, Vector2 b, float maxStepUV = 0.020f)
@@ -7468,7 +9398,14 @@ public class DobotCR10AIKController : MonoBehaviour
     /// (1) 1 vòng chạy viền khép kín đúng 100% hình dạng vùng vẽ,
     /// (2) Các lượt quét song song bên trong vùng cách nhau theo cỡ cọ sprayWidthMm.
     /// </summary>
-    private static List<List<Vector2>> BuildMetricSprayPathsForWorldPolygon(List<Vector2> polyXZ, float widthMm)
+    public float ComputeEffectiveRegionFillSpacingMm()
+    {
+        float brushMm = Mathf.Clamp(sprayWidthMm, 2f, 80f);
+        float overlap = sprayTechParams != null ? Mathf.Clamp(sprayTechParams.overlapRatio, 0.10f, 0.85f) : 0.45f;
+        return Mathf.Clamp(brushMm * (1f - overlap), 3.0f, 35.0f);
+    }
+
+    private static List<List<Vector2>> BuildMetricSprayPathsForWorldPolygon(List<Vector2> polyXZ, float widthMm, bool useExactStepMm = false)
     {
         var strokes = new List<List<Vector2>>();
         if (polyXZ == null || polyXZ.Count < 3) return strokes;
@@ -7497,8 +9434,10 @@ public class DobotCR10AIKController : MonoBehaviour
             strokes.Add(perimeter);
         }
 
-        // 2. Các lượt quét song song bên trong vùng cách nhau theo cỡ cọ (72% bề rộng cọ)
-        float stepM = Mathf.Clamp(widthMm * 0.72f, 4.0f, 40.0f) * 0.001f;
+        // 2. Các lượt quét song song bên trong vùng cách nhau theo bước phủ thực tế
+        float stepM = (useExactStepMm
+            ? Mathf.Clamp(widthMm, 3.0f, 40.0f)
+            : Mathf.Clamp(widthMm * 0.72f, 4.0f, 40.0f)) * 0.001f;
         if (hM > stepM * 1.4f)
         {
             float insetM = Mathf.Min(stepM * 0.35f, Mathf.Min(wM, hM) * 0.12f);
@@ -7587,17 +9526,60 @@ public class DobotCR10AIKController : MonoBehaviour
         List<List<Vector2>> result = new List<List<Vector2>>();
         if (customDrawnRegions == null || customDrawnRegions.Count == 0) return result;
 
+        float effStepMm = ComputeEffectiveRegionFillSpacingMm();
+        float stepUV = Mathf.Clamp(effStepMm / 900f, 0.005f, 0.045f);
+
         for (int r = 0; r < customDrawnRegions.Count; r++)
         {
             var region = customDrawnRegions[r];
             if (region == null || region.verticesUV == null || region.verticesUV.Count < 3) continue;
             var polyUV = region.verticesUV;
+
+            // 1. Đường viền khép kín
             List<Vector2> closedLoop = new List<Vector2>(polyUV.Count + 1);
+            float minV = float.MaxValue, maxV = float.MinValue;
             for (int i = 0; i < polyUV.Count; i++)
             {
+                if (polyUV[i].y < minV) minV = polyUV[i].y;
+                if (polyUV[i].y > maxV) maxV = polyUV[i].y;
                 AppendSubdividedSegmentUV(closedLoop, polyUV[i], polyUV[(i + 1) % polyUV.Count], 0.015f);
             }
             if (closedLoop.Count >= 3) result.Add(closedLoop);
+
+            // 2. Các đường quét phủ kín (fill) bên trong vùng Tròn/Vuông/Đa giác
+            float spanV = maxV - minV;
+            if (spanV > stepUV * 0.8f)
+            {
+                int lines = Mathf.Clamp(Mathf.CeilToInt(spanV / stepUV), 2, 80);
+                var xs = new List<float>(16);
+                for (int li = 0; li < lines; li++)
+                {
+                    float frac = (li + 0.5f) / lines;
+                    float vLine = Mathf.Lerp(minV, maxV, frac);
+                    xs.Clear();
+                    int n = polyUV.Count;
+                    for (int i = 0, j = n - 1; i < n; j = i++)
+                    {
+                        Vector2 a = polyUV[j];
+                        Vector2 b = polyUV[i];
+                        if ((a.y <= vLine && b.y > vLine) || (b.y <= vLine && a.y > vLine))
+                        {
+                            float t = (vLine - a.y) / (b.y - a.y);
+                            xs.Add(a.x + t * (b.x - a.x));
+                        }
+                    }
+                    xs.Sort();
+                    for (int k = 0; k + 1 < xs.Count; k += 2)
+                    {
+                        float u0 = (li % 2 == 0) ? xs[k] : xs[k + 1];
+                        float u1 = (li % 2 == 0) ? xs[k + 1] : xs[k];
+                        if (Mathf.Abs(u1 - u0) < 0.004f) continue;
+                        var seg = new List<Vector2>();
+                        AppendSubdividedSegmentUV(seg, new Vector2(u0, vLine), new Vector2(u1, vLine), 0.015f);
+                        if (seg.Count >= 2) result.Add(seg);
+                    }
+                }
+            }
         }
         return result;
     }
@@ -7812,6 +9794,562 @@ public class DobotCR10AIKController : MonoBehaviour
         }
     }
 
+    // =========================================================================
+    // ĐÁNH LẠI / SỬA 12 MỐC AI & LƯU MẪU SAI ĐỂ TỰ ĐỘNG TRAIN LẠI (ĐỦ 10 MẪU)
+    // =========================================================================
+
+    private void EnterLandmarkEditMode(bool openFullscreen)
+    {
+        isDrawingOnCanvas = false;
+        currentDrawingStroke = null;
+        isDraggingShape = false;
+        activeRegionEditMode = RegionEditMode.None;
+        activeEditHandleIndex = -1;
+        activePolygonVerticesUV.Clear();
+        ReleaseCanvasHotControl();
+
+        isEditingLandmarksMode = true;
+        isSequentialLandmarkClickMode = false;
+        selectedEditLandmarkIndex = 0;
+        draggingLandmarkIndex = -1;
+        draggingLandmarkOnFullscreen = false;
+        landmarkEditSampleName = "";
+        editableLandmarksUV = null;
+        originalAiLandmarksUV = null;
+        hasUnsavedLandmarkEdits = false;
+        landmarkEditStatusMsg = "Kéo từng mốc M0..M11 trên ảnh để sửa, hoặc bấm 'Đánh lần lượt M0->M11'.";
+
+        Texture2D activeCamTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
+        Vector2[] curLm = GetActiveCanvasLandmarks12UV(plyLoader, nativeW, nativeH, activeCamTex != null, out bool hasReal);
+        SyncEditableLandmarksForActiveSample(curLm, hasReal);
+
+        AiServerClient aiClient = EnsureAiClient();
+        if (aiClient != null) aiClient.RefreshFeedbackStatus();
+
+        showCanonicalDrawPanel = true;
+        if (openFullscreen) showFullscreen2DCanvas = true;
+    }
+
+    private void ExitLandmarkEditMode()
+    {
+        isEditingLandmarksMode = false;
+        isSequentialLandmarkClickMode = false;
+        draggingLandmarkIndex = -1;
+        draggingLandmarkOnFullscreen = false;
+        ReleaseCanvasHotControl();
+    }
+
+    private void SyncEditableLandmarksForActiveSample(Vector2[] curLandmarksUV, bool hasRealLandmarks)
+    {
+        string activeSample = GetActiveCloudSampleName();
+        if (string.IsNullOrEmpty(activeSample)) activeSample = !string.IsNullOrEmpty(selectedSampleName) ? selectedSampleName : "sample";
+
+        if (editableLandmarksUV != null && editableLandmarksUV.Length == 12 && landmarkEditSampleName == activeSample)
+        {
+            return;
+        }
+
+        landmarkEditSampleName = activeSample;
+        editableLandmarksUV = new Vector2[12];
+        originalAiLandmarksUV = new Vector2[12];
+        Vector2[] src = (hasRealLandmarks && curLandmarksUV != null && curLandmarksUV.Length == 12)
+            ? curLandmarksUV
+            : GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 p = (src != null && i < src.Length) ? src[i] : new Vector2(0.5f, 0.5f);
+            p = new Vector2(Mathf.Clamp01(p.x), Mathf.Clamp01(p.y));
+            editableLandmarksUV[i] = p;
+            originalAiLandmarksUV[i] = p;
+        }
+
+        hasUnsavedLandmarkEdits = false;
+        if (!hasRealLandmarks)
+        {
+            landmarkEditStatusMsg = $"Mẫu [{activeSample}] chưa có mốc AI -> dùng khung mặc định. Hãy kéo/đánh lại 12 mốc rồi lưu mẫu sai.";
+        }
+    }
+
+    private static Color GetLandmarkGroupColor(int index)
+    {
+        if (index <= 2) return new Color(0.15f, 0.88f, 1.0f, 1.0f);       // Cạp quần (Cyan)
+        if (index == 3) return new Color(1.0f, 0.30f, 0.25f, 1.0f);       // Đáy đũng (Đỏ cam)
+        if (index == 4 || index == 6 || index == 8 || index == 9)
+            return new Color(0.25f, 0.96f, 0.45f, 1.0f);                  // Ống trái (Xanh lá)
+        return new Color(1.0f, 0.78f, 0.14f, 1.0f);                       // Ống phải (Vàng cam)
+    }
+
+    private void Handle2DCanvasLandmarkEditMouseInput(Rect canvasRect, bool isFullscreen, bool hasRealLandmarks, Vector2[] curLandmarksUV)
+    {
+        Event ev = Event.current;
+        if (ev == null || ev.type == EventType.Layout) return;
+        SyncEditableLandmarksForActiveSample(curLandmarksUV, hasRealLandmarks);
+        if (editableLandmarksUV == null || editableLandmarksUV.Length != 12) return;
+
+        int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
+        bool insideCanvas = canvasRect.Contains(ev.mousePosition);
+        Vector2 normUV = new Vector2(
+            Mathf.Clamp01((ev.mousePosition.x - canvasRect.x) / canvasRect.width),
+            Mathf.Clamp01((ev.mousePosition.y - canvasRect.y) / canvasRect.height)
+        );
+
+        if (ev.type == EventType.MouseDown && ev.button == 0 && insideCanvas)
+        {
+            if (isSequentialLandmarkClickMode)
+            {
+                int idx = Mathf.Clamp(selectedEditLandmarkIndex, 0, 11);
+                editableLandmarksUV[idx] = normUV;
+                hasUnsavedLandmarkEdits = true;
+                int nextIdx = idx + 1;
+                if (nextIdx >= 12)
+                {
+                    selectedEditLandmarkIndex = 0;
+                    isSequentialLandmarkClickMode = false;
+                    landmarkEditStatusMsg = "Đã đặt đủ 12 mốc M0..M11. Kéo tinh chỉnh hoặc bấm 'Áp dụng & Lưu mẫu sai'.";
+                }
+                else
+                {
+                    selectedEditLandmarkIndex = nextIdx;
+                    landmarkEditStatusMsg = $"Đã đặt M{idx}. Tiếp theo click đặt M{nextIdx}: {LandmarkVietnameseLabels[nextIdx]}.";
+                }
+                ev.Use();
+                return;
+            }
+
+            // Kiểm tra xem người dùng có bấm trúng 1 trong 12 mốc để kéo không
+            float hitRadiusPx = isFullscreen ? 18f : 14f;
+            int hitIdx = -1;
+            float bestDist = hitRadiusPx;
+            for (int i = 0; i < 12; i++)
+            {
+                Vector2 ptScreen = new Vector2(
+                    canvasRect.x + editableLandmarksUV[i].x * canvasRect.width,
+                    canvasRect.y + editableLandmarksUV[i].y * canvasRect.height
+                );
+                float d = Vector2.Distance(ev.mousePosition, ptScreen);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    hitIdx = i;
+                }
+            }
+
+            if (hitIdx >= 0)
+            {
+                selectedEditLandmarkIndex = hitIdx;
+                draggingLandmarkIndex = hitIdx;
+            }
+            else
+            {
+                // Click ra ngoài -> dời ngay mốc đang chọn đến vị trí click và cho phép kéo mượt
+                selectedEditLandmarkIndex = Mathf.Clamp(selectedEditLandmarkIndex, 0, 11);
+                editableLandmarksUV[selectedEditLandmarkIndex] = normUV;
+                draggingLandmarkIndex = selectedEditLandmarkIndex;
+                hasUnsavedLandmarkEdits = true;
+            }
+
+            draggingLandmarkOnFullscreen = isFullscreen;
+            activeCanvasControlId = ctrlId;
+            GUIUtility.hotControl = ctrlId;
+            landmarkEditStatusMsg = $"Đang chỉnh M{draggingLandmarkIndex}: {LandmarkVietnameseLabels[draggingLandmarkIndex]}";
+            ev.Use();
+            return;
+        }
+
+        if (ev.type == EventType.MouseDrag && draggingLandmarkIndex >= 0 && draggingLandmarkOnFullscreen == isFullscreen)
+        {
+            editableLandmarksUV[draggingLandmarkIndex] = normUV;
+            hasUnsavedLandmarkEdits = true;
+            ev.Use();
+            return;
+        }
+
+        if (ev.type == EventType.MouseUp && ev.button == 0 && draggingLandmarkIndex >= 0 && draggingLandmarkOnFullscreen == isFullscreen)
+        {
+            editableLandmarksUV[draggingLandmarkIndex] = normUV;
+            hasUnsavedLandmarkEdits = true;
+            landmarkEditStatusMsg = $"Đã dời M{draggingLandmarkIndex}: {LandmarkVietnameseLabels[draggingLandmarkIndex]}. Bấm 'Áp dụng & Lưu mẫu sai' khi xong.";
+            draggingLandmarkIndex = -1;
+            draggingLandmarkOnFullscreen = false;
+            ReleaseCanvasHotControl();
+            ev.Use();
+            return;
+        }
+    }
+
+    private void DrawEditableLandmarksOn2DCanvas(Rect canvasRect, bool isFullscreen)
+    {
+        if (editableLandmarksUV == null || editableLandmarksUV.Length != 12) return;
+
+        // 1. Vẽ khung xương nối 12 mốc
+        int numPairs = LandmarkSkeletonPairs.GetLength(0);
+        Color skelCol = new Color(0.85f, 0.96f, 1.0f, 0.78f);
+        for (int k = 0; k < numPairs; k++)
+        {
+            int i0 = LandmarkSkeletonPairs[k, 0];
+            int i1 = LandmarkSkeletonPairs[k, 1];
+            Vector2 s0 = new Vector2(canvasRect.x + editableLandmarksUV[i0].x * canvasRect.width, canvasRect.y + editableLandmarksUV[i0].y * canvasRect.height);
+            Vector2 s1 = new Vector2(canvasRect.x + editableLandmarksUV[i1].x * canvasRect.width, canvasRect.y + editableLandmarksUV[i1].y * canvasRect.height);
+            DrawGuiLine2D(s0, s1, skelCol, isFullscreen ? 2.2f : 1.6f);
+        }
+
+        // 2. Vẽ 12 điểm mốc lớn, rõ màu theo nhóm + viền trắng nổi bật cho mốc đang chọn/kéo
+        Event ev = Event.current;
+        Vector2 mousePos = ev != null ? ev.mousePosition : new Vector2(-9999f, -9999f);
+        float baseR = isFullscreen ? 7.5f : 5.5f;
+
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 pt = new Vector2(
+                canvasRect.x + editableLandmarksUV[i].x * canvasRect.width,
+                canvasRect.y + editableLandmarksUV[i].y * canvasRect.height
+            );
+            bool isSelected = (i == selectedEditLandmarkIndex);
+            bool isDragged = (i == draggingLandmarkIndex);
+            bool isHovered = canvasRect.Contains(mousePos) && Vector2.Distance(mousePos, pt) <= (isFullscreen ? 15f : 11f);
+            Color c = GetLandmarkGroupColor(i);
+            float r = (isDragged || isSelected || isHovered) ? (baseR + 2.5f) : baseR;
+
+            // Vòng sáng ngoài cho mốc đang chọn / đang kéo
+            if (isSelected || isDragged || isHovered)
+            {
+                DrawGuiSmoothCircle2D(pt, r + 4f, r + 4f, new Color(1f, 1f, 1f, 0.22f), new Color(1f, 1f, 1f, 0.98f));
+            }
+            DrawGuiSmoothCircle2D(pt, r, r, c, new Color(0.05f, 0.06f, 0.09f, 0.95f));
+
+            // Nhãn M0..M11 (hiện tên đầy đủ cho mốc đang chọn/hover để dễ nhìn)
+            string tag = (isSelected || isDragged || isHovered)
+                ? $"M{i}: {LandmarkVietnameseLabels[i]}"
+                : $"M{i}";
+            float lblW = (isSelected || isDragged || isHovered) ? 132f : 28f;
+            float lblX = Mathf.Min(pt.x + r + 4f, canvasRect.xMax - lblW - 4f);
+            float lblY = Mathf.Clamp(pt.y - 9f, canvasRect.y + 2f, canvasRect.yMax - 18f);
+            DrawGuiSolidRect(new Rect(lblX - 2f, lblY, lblW, 17f), new Color(0.04f, 0.06f, 0.10f, 0.78f));
+            GUI.Label(new Rect(lblX + 1f, lblY, lblW, 17f), tag,
+                (isSelected || isDragged) ? AntigravityUITheme.StyleLabelCyan : AntigravityUITheme.StyleLabelYellow);
+        }
+
+        // 3. Nếu đang ở chế độ click tuần tự, vẽ vòng chữ thập dẫn đường tại con trỏ chuột
+        if (isSequentialLandmarkClickMode && canvasRect.Contains(mousePos))
+        {
+            int idx = Mathf.Clamp(selectedEditLandmarkIndex, 0, 11);
+            Color c = GetLandmarkGroupColor(idx);
+            DrawGuiSmoothCircle2D(mousePos, 11f, 11f, new Color(c.r, c.g, c.b, 0.12f), c);
+            DrawGuiLine2D(new Vector2(mousePos.x - 15f, mousePos.y), new Vector2(mousePos.x + 15f, mousePos.y), c, 1.2f);
+            DrawGuiLine2D(new Vector2(mousePos.x, mousePos.y - 15f), new Vector2(mousePos.x, mousePos.y + 15f), c, 1.2f);
+        }
+    }
+
+    private void DrawLandmarkEditPanel(bool isFullscreen, Texture2D activeCamTex, int nativeW, int nativeH)
+    {
+        AiServerClient aiClient = EnsureAiClient();
+        int pending = aiClient != null ? aiClient.feedbackPendingCount : 0;
+        int thresh = aiClient != null ? Mathf.Max(1, aiClient.feedbackRetrainThreshold) : 10;
+        int history = aiClient != null ? aiClient.feedbackHistoryCount : 0;
+        int retrains = aiClient != null ? aiClient.feedbackTotalRetrains : 0;
+        bool isTraining = aiClient != null && aiClient.isRetrainingPose;
+
+        GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("ĐÁNH LẠI 12 MỐC AI (ACTIVE LEARNING)", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.FlexibleSpace();
+        GUILayout.Label($"Mẫu sai: {pending}/{thresh}", pending >= thresh ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelYellow);
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        GUIStyle dragModeSt = !isSequentialLandmarkClickMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        GUIStyle seqModeSt = isSequentialLandmarkClickMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUILayout.Button("Kéo từng mốc", dragModeSt, GUILayout.Height(23)))
+        {
+            isSequentialLandmarkClickMode = false;
+            landmarkEditStatusMsg = "Kéo trực tiếp từng mốc M0..M11 trên ảnh (hoặc chọn mốc rồi click vị trí mới).";
+        }
+        if (GUILayout.Button("Đánh lần lượt M0->M11", seqModeSt, GUILayout.Height(23)))
+        {
+            isSequentialLandmarkClickMode = true;
+            selectedEditLandmarkIndex = 0;
+            landmarkEditStatusMsg = $"Chế độ đánh nhanh: Click đặt M0: {LandmarkVietnameseLabels[0]}.";
+        }
+        if (GUILayout.Button("Khôi phục", AntigravityUITheme.StyleButton, GUILayout.Width(74), GUILayout.Height(23)))
+        {
+            if (originalAiLandmarksUV != null && originalAiLandmarksUV.Length == 12 && editableLandmarksUV != null && editableLandmarksUV.Length == 12)
+            {
+                Array.Copy(originalAiLandmarksUV, editableLandmarksUV, 12);
+                hasUnsavedLandmarkEdits = false;
+                landmarkEditStatusMsg = "Đã khôi phục 12 mốc AI ban đầu.";
+            }
+        }
+        GUILayout.EndHorizontal();
+
+        if (isFullscreen)
+        {
+            // Lưới 2 cột chọn nhanh 12 mốc M0..M11 trong chế độ toàn màn hình
+            GUILayout.Space(3);
+            for (int row = 0; row < 6; row++)
+            {
+                GUILayout.BeginHorizontal();
+                for (int col = 0; col < 2; col++)
+                {
+                    int idx = row * 2 + col;
+                    GUIStyle lmSt = (idx == selectedEditLandmarkIndex) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+                    if (GUILayout.Button($"M{idx}: {LandmarkVietnameseLabels[idx]}", lmSt, GUILayout.Height(22)))
+                    {
+                        selectedEditLandmarkIndex = idx;
+                        landmarkEditStatusMsg = $"Đang chọn M{idx}: {LandmarkVietnameseLabels[idx]}. Click hoặc kéo trên ảnh.";
+                    }
+                }
+                GUILayout.EndHorizontal();
+            }
+        }
+        else
+        {
+            // Thanh chọn gọn trong panel thu nhỏ
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("<", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(21)))
+                selectedEditLandmarkIndex = (selectedEditLandmarkIndex + 11) % 12;
+            GUILayout.Label($"Đang chọn: M{selectedEditLandmarkIndex} - {LandmarkVietnameseLabels[Mathf.Clamp(selectedEditLandmarkIndex, 0, 11)]}", AntigravityUITheme.StyleLabelCyan);
+            if (GUILayout.Button(">", AntigravityUITheme.StyleButton, GUILayout.Width(28), GUILayout.Height(21)))
+                selectedEditLandmarkIndex = (selectedEditLandmarkIndex + 1) % 12;
+            GUILayout.EndHorizontal();
+        }
+
+        GUILayout.Space(4);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button($"Áp dụng & Lưu mẫu sai ({pending}/{thresh})", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(27)))
+        {
+            ApplyEditedLandmarksToCurrentSample(saveToActiveLearning: true, activeCamTex, nativeW, nativeH);
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Chỉ áp dụng 3D", AntigravityUITheme.StyleButton, GUILayout.Height(23)))
+        {
+            ApplyEditedLandmarksToCurrentSample(saveToActiveLearning: false, activeCamTex, nativeW, nativeH);
+        }
+        bool prevEn = GUI.enabled;
+        GUI.enabled = prevEn && aiClient != null && !isTraining && (pending > 0 || history > 0);
+        string rtTxt = isTraining ? "Đang train lại..." : $"Train lại ngay ({pending}/{thresh})";
+        if (GUILayout.Button(rtTxt, AntigravityUITheme.StyleButton, GUILayout.Height(23)))
+        {
+            aiClient.TriggerRetrainPoseModel(force: true, onComplete: (ok, msg) =>
+            {
+                landmarkEditStatusMsg = msg;
+            });
+        }
+        GUI.enabled = prevEn;
+        if (GUILayout.Button("Đóng sửa", AntigravityUITheme.StyleButton, GUILayout.Width(72), GUILayout.Height(23)))
+        {
+            ExitLandmarkEditMode();
+        }
+        GUILayout.EndHorizontal();
+
+        if (!string.IsNullOrEmpty(landmarkEditStatusMsg))
+        {
+            GUILayout.Label(landmarkEditStatusMsg, AntigravityUITheme.StyleLabelCyan);
+        }
+        string fbLine = isTraining
+            ? (!string.IsNullOrEmpty(aiClient.feedbackStatusMessage) ? aiClient.feedbackStatusMessage : "Đang train lại YOLO11-pose ở nền...")
+            : $"Tự động train lại khi đủ {thresh} mẫu sai | Kho cũ: {history} mẫu | Đã train: {retrains} lần";
+        GUILayout.Label(fbLine, isTraining ? AntigravityUITheme.StyleLabelYellow : AntigravityUITheme.StyleLabelMuted);
+        GUILayout.EndVertical();
+    }
+
+    private bool TrySampleCameraUVToWorldWithFallback(PLYDirectLoader plyLoader, Vector2 uv, Vector3 fallbackWorld, out Vector3 worldPos, out Vector3 normalWorld)
+    {
+        if (plyLoader != null)
+        {
+            if (plyLoader.TrySampleCameraUVToWorld(uv, out worldPos, out normalWorld))
+            {
+                return true;
+            }
+            // Tìm lân cận nhỏ nếu đúng pixel đó bị khuyết NaN
+            float[] radii = new float[] { 0.004f, 0.008f, 0.015f, 0.025f };
+            for (int r = 0; r < radii.Length; r++)
+            {
+                float rad = radii[r];
+                for (int a = 0; a < 8; a++)
+                {
+                    float ang = a * Mathf.PI * 0.25f;
+                    Vector2 cand = new Vector2(
+                        Mathf.Clamp01(uv.x + Mathf.Cos(ang) * rad),
+                        Mathf.Clamp01(uv.y + Mathf.Sin(ang) * rad)
+                    );
+                    if (plyLoader.TrySampleCameraUVToWorld(cand, out worldPos, out normalWorld))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        worldPos = fallbackWorld;
+        normalWorld = Vector3.up;
+        return false;
+    }
+
+    private string ResolveActiveCameraImagePathForFeedback(string activeSample)
+    {
+        if (!string.IsNullOrEmpty(explicitRealCameraImagePath) && File.Exists(explicitRealCameraImagePath))
+        {
+            return explicitRealCameraImagePath;
+        }
+        if (string.IsNullOrEmpty(activeSample)) return "";
+        string rawClean = Path.GetFileNameWithoutExtension(activeSample).Trim();
+        string numOnly = rawClean.StartsWith("pcl_") ? rawClean.Substring(4) : rawClean;
+        string[] cands = new string[]
+        {
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "dataset", "_2D", rawClean + ".png"),
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "dataset", "_2D", rawClean + ".jpg"),
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "dataset", "_2D", "image_" + numOnly + ".png"),
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "dataset", "_2D", "image_" + numOnly + ".jpg")
+        };
+        for (int i = 0; i < cands.Length; i++)
+        {
+            if (File.Exists(cands[i])) return Path.GetFullPath(cands[i]);
+        }
+        return "";
+    }
+
+    private void ApplyEditedLandmarksToCurrentSample(bool saveToActiveLearning, Texture2D activeCamTex, int nativeW, int nativeH)
+    {
+        if (editableLandmarksUV == null || editableLandmarksUV.Length != 12)
+        {
+            landmarkEditStatusMsg = "Chưa có dữ liệu 12 mốc để áp dụng.";
+            return;
+        }
+
+        string activeSample = GetActiveCloudSampleName();
+        if (string.IsNullOrEmpty(activeSample)) activeSample = !string.IsNullOrEmpty(selectedSampleName) ? selectedSampleName : "sample";
+
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        int imgW = nativeW > 1 ? nativeW : (activeCamTex != null ? activeCamTex.width : 1944);
+        int imgH = nativeH > 1 ? nativeH : (activeCamTex != null ? activeCamTex.height : 1200);
+        Vector2[] canonUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
+
+        List<LandmarkItem3D> updatedLm3D = new List<LandmarkItem3D>(12);
+        List<Vector3> updatedWorld = new List<Vector3>(12);
+
+        for (int i = 0; i < 12; i++)
+        {
+            Vector2 uv = new Vector2(Mathf.Clamp01(editableLandmarksUV[i].x), Mathf.Clamp01(editableLandmarksUV[i].y));
+            Vector3 fallbackW = (landmarksWorldPos != null && i < landmarksWorldPos.Count)
+                ? landmarksWorldPos[i]
+                : new Vector3(0f, 0.01f, 0.55f);
+
+            TrySampleCameraUVToWorldWithFallback(plyLoader, uv, fallbackW, out Vector3 worldP, out Vector3 normalW);
+            Vector3 posMm = globalReference != null
+                ? globalReference.InverseTransformPoint(worldP) * 1000f
+                : new Vector3((1.100f - worldP.z) * 1000f, -worldP.x * 1000f, worldP.y * 1000f);
+            Vector3 nLocal = globalReference != null
+                ? globalReference.InverseTransformDirection(normalW).normalized
+                : new Vector3(-normalW.z, -normalW.x, normalW.y).normalized;
+            if (nLocal.sqrMagnitude < 1e-6f) nLocal = Vector3.forward;
+
+            LandmarkItem3D item = new LandmarkItem3D
+            {
+                id = i,
+                name = LandmarkCanonicalNames[i],
+                label_vi = LandmarkVietnameseLabels[i],
+                canonical_u = (canonUV != null && i < canonUV.Length) ? canonUV[i].x : 0.5f,
+                canonical_v = (canonUV != null && i < canonUV.Length) ? canonUV[i].y : 0.5f,
+                pixel_u = Mathf.RoundToInt(uv.x * (imgW - 1)),
+                pixel_v = Mathf.RoundToInt(uv.y * (imgH - 1)),
+                x_mm = posMm.x,
+                y_mm = posMm.y,
+                z_mm = posMm.z,
+                nx = nLocal.x,
+                ny = nLocal.y,
+                nz = nLocal.z
+            };
+            updatedLm3D.Add(item);
+            updatedWorld.Add(worldP);
+        }
+
+        landmarks3D = updatedLm3D;
+        landmarksWorldPos = updatedWorld;
+        loadedLandmarksSampleName = activeSample;
+        lastMissingLandmarksSampleName = "";
+        showLandmarks3D = true;
+
+        ComputeJeansMeasurementsFromLandmarks();
+        detectedJeansSize = ClassifyJeansSizeKMeans(detectedInseamMm, detectedOutseamMm);
+        sizeDetectionSummary = $"[{loadedLandmarksSampleName}] Size {detectedJeansSize} (Đã sửa mốc tay | Inseam {detectedInseamMm:F0}, Outseam {detectedOutseamMm:F0} mm)";
+
+        // Lưu đè file {sample}_landmarks_seg.json để lần nạp sau dùng đúng 12 mốc vừa sửa
+        SaveCorrectedLandmarksJsonForSample(activeSample);
+
+        // Xóa quỹ đạo cũ (đã lệch theo mốc sai) để người dùng sinh lại quỹ đạo theo 12 mốc mới
+        InvalidateGeneratedTrajectoryOnEdit();
+        hasUnsavedLandmarkEdits = false;
+        if (originalAiLandmarksUV != null && originalAiLandmarksUV.Length == 12)
+        {
+            Array.Copy(editableLandmarksUV, originalAiLandmarksUV, 12);
+        }
+
+        if (!saveToActiveLearning)
+        {
+            landmarkEditStatusMsg = $"Đã áp dụng 12 mốc mới lên 3D cho [{activeSample}] (không tính vào mẫu train).";
+            return;
+        }
+
+        AiServerClient aiClient = EnsureAiClient();
+        if (aiClient == null)
+        {
+            landmarkEditStatusMsg = $"Đã cập nhật 3D [{activeSample}], nhưng chưa có AiServerClient để lưu mẫu train.";
+            return;
+        }
+
+        string knownImgPath = ResolveActiveCameraImagePathForFeedback(activeSample);
+        Vector2[] snapshot12 = new Vector2[12];
+        Array.Copy(editableLandmarksUV, snapshot12, 12);
+        landmarkEditStatusMsg = $"Đang lưu mẫu sửa mốc [{activeSample}]...";
+        aiClient.SubmitCorrectedLandmarksFeedback(
+            activeSample,
+            snapshot12,
+            activeCamTex,
+            knownImgPath,
+            autoRetrain: true,
+            onComplete: (ok, msg) =>
+            {
+                landmarkEditStatusMsg = msg;
+            }
+        );
+    }
+
+    private void SaveCorrectedLandmarksJsonForSample(string sampleName)
+    {
+        try
+        {
+            string rawClean = Path.GetFileNameWithoutExtension(sampleName).Trim();
+            string outDir = Path.Combine(Application.dataPath, "..", "output_drawing");
+            Directory.CreateDirectory(outDir);
+            string jsonPath = Path.Combine(outDir, $"{rawClean}_landmarks_seg.json");
+
+            LandmarkSegmentationPayload payload = null;
+            if (File.Exists(jsonPath))
+            {
+                try { payload = JsonUtility.FromJson<LandmarkSegmentationPayload>(File.ReadAllText(jsonPath)); }
+                catch { payload = null; }
+            }
+            if (payload == null) payload = new LandmarkSegmentationPayload();
+
+            payload.sample = rawClean;
+            payload.detected_size = detectedJeansSize;
+            payload.outseam_mm = detectedOutseamMm;
+            payload.inseam_mm = detectedInseamMm;
+            payload.waist_mm = detectedWaistMm;
+            payload.cuff_mm = detectedCuffMm;
+            payload.area_cm2 = detectedAreaCm2;
+            payload.landmarks = new List<LandmarkItem3D>(landmarks3D);
+
+            File.WriteAllText(jsonPath, JsonUtility.ToJson(payload, true), System.Text.Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[LandmarkEdit] Không thể cập nhật file *_landmarks_seg.json: " + ex.Message);
+        }
+    }
+
     private Vector2 fullscreenSidebarScroll = Vector2.zero;
     private float fullscreenSidebarWidth = 480f;
     private bool isResizingFullscreenSidebar = false;
@@ -7823,6 +10361,28 @@ public class DobotCR10AIKController : MonoBehaviour
         Event ev = Event.current;
         if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
         {
+            if (isEditingLandmarksMode)
+            {
+                if (draggingLandmarkIndex >= 0)
+                {
+                    draggingLandmarkIndex = -1;
+                    draggingLandmarkOnFullscreen = false;
+                    ReleaseCanvasHotControl();
+                    ev.Use();
+                    return;
+                }
+                if (isSequentialLandmarkClickMode)
+                {
+                    isSequentialLandmarkClickMode = false;
+                    landmarkEditStatusMsg = "Đã thoát chế độ đánh lần lượt. Kéo từng mốc để tinh chỉnh.";
+                    ev.Use();
+                    return;
+                }
+                ExitLandmarkEditMode();
+                showFullscreen2DCanvas = false;
+                ev.Use();
+                return;
+            }
             if (isDraggingShape || activePolygonVerticesUV.Count > 0 || activeRegionEditMode != RegionEditMode.None)
             {
                 isDraggingShape = false;
@@ -7879,16 +10439,33 @@ public class DobotCR10AIKController : MonoBehaviour
             : (activeTrajectoryMethod == "P4" ? " | Đang xem: P4 (ICP/TPS)" : " | Đang xem: Vẽ tay")));
 
         // 1. Thanh tiêu đề trên cùng của bảng vẽ phóng to
+        if (isEditingLandmarksMode)
+        {
+            SyncEditableLandmarksForActiveSample(curLandmarksUV, hasRealLandmarks);
+        }
+        if (ev != null && ev.type == EventType.Layout)
+        {
+            layoutShowLandmarkEditPanel = isEditingLandmarksMode;
+        }
+
         float topBarH = 40f;
         Rect topBarRect = new Rect(fullRect.x + 12f, fullRect.y + 8f, fullRect.width - 24f, topBarH);
         GUI.DrawTexture(topBarRect, AntigravityUITheme.TexBgCard);
-        GUI.Label(new Rect(topBarRect.x + 14f, topBarRect.y + 4f, 420f, 20f), "BẢNG VẼ MẪU PHUN TOÀN MÀN HÌNH (2D -> 3D)", AntigravityUITheme.StyleCardHeader);
-        string activeToolHint = activeDrawTool == CanvasDrawTool.Select ? "Sửa vùng: Click chọn để di chuyển, kéo nút để đổi cỡ"
+        GUI.Label(new Rect(topBarRect.x + 14f, topBarRect.y + 4f, 460f, 20f),
+            isEditingLandmarksMode ? "ĐÁNH LẠI 12 MỐC AI & LƯU MẪU TRAIN LẠI" : "BẢNG VẼ MẪU PHUN TOÀN MÀN HÌNH (2D -> 3D)",
+            AntigravityUITheme.StyleCardHeader);
+        string activeToolHint = isEditingLandmarksMode
+            ? (isSequentialLandmarkClickMode
+                ? $"Click tuần tự lên ảnh để đặt mốc M{selectedEditLandmarkIndex}: {LandmarkVietnameseLabels[Mathf.Clamp(selectedEditLandmarkIndex, 0, 11)]}"
+                : "Kéo trực tiếp từng mốc M0..M11 trên ảnh (hoặc chọn mốc bên phải rồi click đặt vị trí mới)")
+            : (activeDrawTool == CanvasDrawTool.Select ? "Sửa vùng: Click chọn để di chuyển, kéo nút để đổi cỡ"
             : (activeDrawTool == CanvasDrawTool.Freehand ? "Vẽ tay: Kéo chuột trái"
             : (activeDrawTool == CanvasDrawTool.Circle ? "Hình tròn: Kéo từ tâm ra ngoài"
             : (activeDrawTool == CanvasDrawTool.Rectangle ? "Hình vuông/CN: Kéo chéo góc (Shift = Vuông)"
-            : "Đa giác: Click trái thêm đỉnh, Click phải/Enter để đóng")));
-        GUI.Label(new Rect(topBarRect.x + 14f, topBarRect.y + 21f, 680f, 16f), $"{camSourceLabel}{methodBadge} | Cọ {sprayWidthMm:F1}mm | {activeToolHint}", AntigravityUITheme.StyleLabelCyan);
+            : "Đa giác: Click trái thêm đỉnh, Click phải/Enter để đóng"))));
+        GUI.Label(new Rect(topBarRect.x + 14f, topBarRect.y + 21f, 700f, 16f),
+            isEditingLandmarksMode ? $"{camSourceLabel} | {activeToolHint}" : $"{camSourceLabel}{methodBadge} | Cọ {sprayWidthMm:F1}mm | {activeToolHint}",
+            AntigravityUITheme.StyleLabelCyan);
 
         float btnRight = topBarRect.xMax - 10f;
         btnRight -= 130f;
@@ -7896,6 +10473,7 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             isDrawingOnCanvas = false;
             currentDrawingStroke = null;
+            draggingLandmarkIndex = -1;
             isResizingFullscreenSidebar = false;
             showFullscreen2DCanvas = false;
             return;
@@ -7909,6 +10487,13 @@ public class DobotCR10AIKController : MonoBehaviour
             camClient.CapturePreview();
         }
         GUI.enabled = prevEn;
+        btnRight -= 118f;
+        GUIStyle fsLmBtnSt = isEditingLandmarksMode ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
+        if (GUI.Button(new Rect(btnRight, topBarRect.y + 6f, 110f, 28f), isEditingLandmarksMode ? "Xong sửa mốc" : "Sửa mốc AI", fsLmBtnSt))
+        {
+            if (isEditingLandmarksMode) ExitLandmarkEditMode();
+            else EnterLandmarkEditMode(openFullscreen: true);
+        }
 
         // 2. Bố cục: Khung vẽ lớn bên trái + Thanh kéo đổi độ rộng + Bảng công cụ rộng bên phải
         float contentY = topBarRect.yMax + 8f;
@@ -8007,8 +10592,12 @@ public class DobotCR10AIKController : MonoBehaviour
         // Xử lý chuột vẽ mịn (Vẽ tay / Tròn / Vuông / Đa giác) trên khung phóng to
         Handle2DCanvasMouseInput(canvasRect, isFullscreen: true, hasRealLandmarks, curLandmarksUV);
 
-        // Vẽ 12 mốc AI + khung nối giải phẫu mờ trên khung phóng to
-        if (curLandmarksUV != null && curLandmarksUV.Length == 12)
+        // Vẽ 12 mốc AI + khung nối giải phẫu trên khung phóng to
+        if (isEditingLandmarksMode && editableLandmarksUV != null && editableLandmarksUV.Length == 12)
+        {
+            DrawEditableLandmarksOn2DCanvas(canvasRect, isFullscreen: true);
+        }
+        else if (curLandmarksUV != null && curLandmarksUV.Length == 12)
         {
             int numPairs = LandmarkSkeletonPairs.GetLength(0);
             Color skelCol = new Color(1f, 0.78f, 0.15f, 0.42f);
@@ -8031,12 +10620,21 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         // Vẽ tách biệt 2 lớp trên khung phóng to: (1) CHỖ CẦN PHUN (R & R_safe) và (2) ĐƯỜNG QUỸ ĐẠO (ON / OFF)
-        DrawTargetAndTrajectoryOverlaysOn2DCanvas(canvasRect, isFullscreen: true);
-        Draw2DCanvasToolPreview(canvasRect, isFullscreen: true);
+        if (!isEditingLandmarksMode)
+        {
+            DrawTargetAndTrajectoryOverlaysOn2DCanvas(canvasRect, isFullscreen: true);
+            Draw2DCanvasToolPreview(canvasRect, isFullscreen: true);
+        }
 
         // 3. Bảng điều khiển bên phải trong chế độ toàn màn hình
         GUILayout.BeginArea(sideAreaRect, AntigravityUITheme.CardBoxStyle());
         fullscreenSidebarScroll = GUILayout.BeginScrollView(fullscreenSidebarScroll);
+
+        if (layoutShowLandmarkEditPanel)
+        {
+            DrawLandmarkEditPanel(isFullscreen: true, activeCamTex, nativeW, nativeH);
+            GUILayout.Space(8);
+        }
 
         GUILayout.Label("HIỂN THỊ LỚP (QUỸ ĐẠO vs ĐƯỜNG PHUN)", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
@@ -8125,41 +10723,53 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("P1: Zigzag", activeTrajectoryMethod == "P1" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(28)))
         {
+            taughtMethod = "P1";
             showP1ParameterPanel = true;
             showP2ParameterPanel = false;
             showP3ParameterPanel = false;
             showP4ParameterPanel = false;
             SyncP1ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P1");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         if (GUILayout.Button("P2: Trục giữa", activeTrajectoryMethod == "P2" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(28)))
         {
+            taughtMethod = "P2";
             showP1ParameterPanel = false;
             showP2ParameterPanel = true;
             showP3ParameterPanel = false;
             showP4ParameterPanel = false;
             SyncP2ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P2");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         GUILayout.EndHorizontal();
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("P3: 12 Mốc", activeTrajectoryMethod == "P3" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(28)))
         {
+            taughtMethod = "P3";
             showP1ParameterPanel = false;
             showP2ParameterPanel = false;
             showP3ParameterPanel = true;
             showP4ParameterPanel = false;
             SyncP3ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P3");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         if (GUILayout.Button("P4: ICP/CPD", activeTrajectoryMethod == "P4" ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(28)))
         {
+            taughtMethod = "P4";
             showP1ParameterPanel = false;
             showP2ParameterPanel = false;
             showP3ParameterPanel = false;
             showP4ParameterPanel = true;
             SyncP4ConfigFromTechParamsIfNeeded();
             GenerateAndApplyMethodTrajectory("P4");
+            showGizmos = true;
+            showTurnaroundConnectors = true;
         }
         GUILayout.EndHorizontal();
         if (activeTrajectoryMethod == "P1" || showP1ParameterPanel)
@@ -8293,17 +10903,13 @@ public class DobotCR10AIKController : MonoBehaviour
     public void ChooseSprayTemplateDirectory()
     {
         string cur = GetSprayTemplateDirectoryFullPath();
-#if UNITY_EDITOR
-        string chosen = UnityEditor.EditorUtility.OpenFolderPanel("Chọn Thư Mục Lưu/Import Mẫu Phun", cur, "");
+        string chosen = NativeFileDialog.OpenFolder("Chọn Thư Mục Lưu/Import Mẫu Phun", cur);
         if (!string.IsNullOrEmpty(chosen))
         {
             sprayTemplateDirectory = chosen;
             RefreshAvailableSprayTemplates();
             customDrawStatusMsg = $"Thư mục: {chosen}";
         }
-#else
-        customDrawStatusMsg = $"Thư mục: {cur}";
-#endif
     }
 
     public void ExportSprayTemplateWithDialog()
@@ -8320,8 +10926,7 @@ public class DobotCR10AIKController : MonoBehaviour
         string defName = string.IsNullOrEmpty(saveTemplateFileName) ? $"mau_phun_size_{activeSprayTemplateSize}" : saveTemplateFileName.Trim();
         if (!defName.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) defName += ".json";
 
-#if UNITY_EDITOR
-        string chosenPath = UnityEditor.EditorUtility.SaveFilePanel("Chọn Nơi Xuất Mẫu Phun (.json)", curDir, defName, "json");
+        string chosenPath = NativeFileDialog.SaveFile("Chọn Nơi Xuất Mẫu Phun (.json)", curDir, defName, "json");
         if (!string.IsNullOrEmpty(chosenPath))
         {
             SaveCurrentSprayTemplateToPath(chosenPath);
@@ -8329,9 +10934,6 @@ public class DobotCR10AIKController : MonoBehaviour
             saveTemplateFileName = Path.GetFileNameWithoutExtension(chosenPath);
             RefreshAvailableSprayTemplates();
         }
-#else
-        SaveCurrentSprayTemplate(defName);
-#endif
     }
 
     public void ImportSprayTemplateWithDialog()
@@ -8339,22 +10941,20 @@ public class DobotCR10AIKController : MonoBehaviour
         string curDir = GetSprayTemplateDirectoryFullPath();
         if (!Directory.Exists(curDir)) Directory.CreateDirectory(curDir);
 
-#if UNITY_EDITOR
-        string chosenFile = UnityEditor.EditorUtility.OpenFilePanel("Chọn File Mẫu Phun Cần Import (.json)", curDir, "json");
+        string chosenFile = NativeFileDialog.OpenFile("Chọn File Mẫu Phun Cần Import (.json)", curDir, "json");
         if (!string.IsNullOrEmpty(chosenFile))
         {
             sprayTemplateDirectory = Path.GetDirectoryName(chosenFile);
             ImportSprayTemplateFromFile(chosenFile);
         }
-#else
-        ImportSprayTemplateFromFile(saveTemplateFileName);
-#endif
     }
 
     public void SaveCurrentSprayTemplateToPath(string fullPath)
     {
         if ((customDrawnStrokes == null || customDrawnStrokes.Count == 0) &&
-            (customDrawnRegions == null || customDrawnRegions.Count == 0))
+            (customDrawnRegions == null || customDrawnRegions.Count == 0) &&
+            (canonicalPatternStrokes == null || canonicalPatternStrokes.Count == 0) &&
+            (taughtCanonicalRegions == null || taughtCanonicalRegions.Count == 0))
         {
             customDrawStatusMsg = "Chưa có nét vẽ hoặc vùng vẽ để lưu.";
             return;
@@ -8368,6 +10968,21 @@ public class DobotCR10AIKController : MonoBehaviour
                 Directory.CreateDirectory(dir);
             }
 
+            if (customDrawnRegions != null && customDrawnRegions.Count > 0)
+            {
+                CaptureCurrentDrawnRegionsToCanonical();
+            }
+            string activeSampleForSave = GetActiveCloudSampleName();
+            if (string.IsNullOrEmpty(taughtSourceSampleName)) taughtSourceSampleName = activeSampleForSave;
+            string methodToSave = (taughtMethod == "P1" || taughtMethod == "P2" || taughtMethod == "P3" || taughtMethod == "P4")
+                ? taughtMethod
+                : (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" || activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4" ? activeTrajectoryMethod : "P3");
+
+            SyncP1ConfigFromTechParamsIfNeeded();
+            SyncP2ConfigFromTechParamsIfNeeded();
+            SyncP3ConfigFromTechParamsIfNeeded();
+            SyncP4ConfigFromTechParamsIfNeeded();
+
             SprayPatternTemplate template = new SprayPatternTemplate
             {
                 templateName = Path.GetFileNameWithoutExtension(fullPath),
@@ -8376,7 +10991,24 @@ public class DobotCR10AIKController : MonoBehaviour
                 zOffsetMm = customDrawZOffsetMm,
                 sprayWidthMm = sprayWidthMm,
                 strokes = new List<Stroke2D>(),
-                regions = new List<Region2DJson>()
+                regions = new List<Region2DJson>(),
+                canonicalRegions = new List<Region2DJson>(),
+                teachingConfig = new TeachingConfigJson
+                {
+                    hasConfig = true,
+                    taughtSampleName = taughtSourceSampleName,
+                    taughtMethod = methodToSave,
+                    autoApplyOnSampleChange = autoApplyTaughtOnNewSample,
+                    sprayWidthMm = sprayWidthMm,
+                    zOffsetMm = customDrawZOffsetMm,
+                    playbackSpeed = playbackSpeed,
+                    targetTcpSpeedMmPerSec = targetTcpSpeedMmPerSec,
+                    techParams = CloneSerializable(sprayTechParams),
+                    p1 = CloneSerializable(p1Config),
+                    p2 = CloneSerializable(p2Config),
+                    p3 = CloneSerializable(p3Config),
+                    p4 = CloneSerializable(p4Config)
+                }
             };
 
             Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyLoader, out int nativeW, out int nativeH, out _);
@@ -8385,9 +11017,13 @@ public class DobotCR10AIKController : MonoBehaviour
             Vector2[] canonLmUV = GetCanonicalLandmarks12UV(activeSprayTemplateSize);
             float camAspect = GetActiveCameraMetricAspect(plyLoader, nativeW, nativeH);
 
-            List<List<Vector2>> sourceStrokesToSave = (canonicalPatternStrokes != null && canonicalPatternStrokes.Count > 0)
-                ? canonicalPatternStrokes
-                : customDrawnStrokes;
+            bool hasRegionOnly = (customDrawnRegions != null && customDrawnRegions.Count > 0) &&
+                                 (customDrawnStrokes == null || customDrawnStrokes.Count == 0);
+            List<List<Vector2>> sourceStrokesToSave = hasRegionOnly
+                ? new List<List<Vector2>>()
+                : ((canonicalPatternStrokes != null && canonicalPatternStrokes.Count > 0)
+                    ? canonicalPatternStrokes
+                    : customDrawnStrokes);
             bool alreadyCanonical = (sourceStrokesToSave == canonicalPatternStrokes);
 
             foreach (var st in sourceStrokesToSave)
@@ -8425,11 +11061,35 @@ public class DobotCR10AIKController : MonoBehaviour
                 template.regions.Add(regJson);
             }
 
+            for (int r = 0; r < taughtCanonicalRegions.Count; r++)
+            {
+                var reg = taughtCanonicalRegions[r];
+                if (reg == null || reg.verticesUV == null || reg.verticesUV.Count < 3) continue;
+                var regJson = new Region2DJson
+                {
+                    shapeType = (int)reg.shapeType,
+                    brushWidthMm = reg.brushWidthMm,
+                    centerU = reg.centerUV.x,
+                    centerV = reg.centerUV.y,
+                    radiusU = reg.radiusUV.x,
+                    radiusV = reg.radiusUV.y,
+                    points = new List<StrokePoint2D>(reg.verticesUV.Count)
+                };
+                for (int i = 0; i < reg.verticesUV.Count; i++)
+                {
+                    regJson.points.Add(new StrokePoint2D(reg.verticesUV[i].x, reg.verticesUV[i].y));
+                }
+                template.canonicalRegions.Add(regJson);
+            }
+
             string json = JsonUtility.ToJson(template, true);
             File.WriteAllText(fullPath, json);
             RefreshAvailableSprayTemplates();
-            customDrawStatusMsg = $"Đã lưu mẫu: {Path.GetFileName(fullPath)} ({template.regions.Count} vùng, {template.strokes.Count} nét, Size {activeSprayTemplateSize})";
-            Debug.Log($"[CR10A SprayTemplate] Đã xuất mẫu phun vào {fullPath}");
+            hasRecordedTeachingRecipe = true;
+            string savedMsg = $"Đã lưu mẫu + cấu hình dạy [{methodToSave}]: {Path.GetFileName(fullPath)} ({template.canonicalRegions.Count} vùng, {template.strokes.Count} nét, Cọ {sprayWidthMm:F1}mm)";
+            customDrawStatusMsg = savedMsg;
+            teachingStatusMsg = savedMsg;
+            Debug.Log($"[CR10A SprayTemplate] {savedMsg} -> {fullPath}");
         }
         catch (Exception ex)
         {
@@ -8495,14 +11155,19 @@ public class DobotCR10AIKController : MonoBehaviour
             SprayPatternTemplate template = JsonUtility.FromJson<SprayPatternTemplate>(json);
             bool hasTplStrokes = template != null && template.strokes != null && template.strokes.Count > 0;
             bool hasTplRegions = template != null && template.regions != null && template.regions.Count > 0;
-            if (template != null && (hasTplStrokes || hasTplRegions))
+            bool hasTplCanonRegions = template != null && template.canonicalRegions != null && template.canonicalRegions.Count > 0;
+            bool hasTplTeachCfg = template != null && template.teachingConfig != null && template.teachingConfig.hasConfig;
+            if (template != null && (hasTplStrokes || hasTplRegions || hasTplCanonRegions || hasTplTeachCfg))
             {
                 hasInitializedDefaultStrokes = true;
                 isDrawingOnCanvas = false;
                 currentDrawingStroke = null;
                 isDraggingShape = false;
+                activeRegionEditMode = RegionEditMode.None;
+                selectedRegionIndex = -1;
                 activePolygonVerticesUV.Clear();
                 customDrawnRegions.Clear();
+                taughtCanonicalRegions.Clear();
                 undoHistoryIsRegion.Clear();
                 customDrawnStrokes.Clear();
 
@@ -8520,9 +11185,10 @@ public class DobotCR10AIKController : MonoBehaviour
                     }
                 }
 
-                if (hasTplRegions)
+                List<Region2DJson> regionSourceToLoad = hasTplCanonRegions ? template.canonicalRegions : template.regions;
+                if (regionSourceToLoad != null && regionSourceToLoad.Count > 0)
                 {
-                    foreach (var rj in template.regions)
+                    foreach (var rj in regionSourceToLoad)
                     {
                         if (rj == null || rj.points == null || rj.points.Count < 3) continue;
                         var reg = new DrawnRegion2D
@@ -8543,9 +11209,17 @@ public class DobotCR10AIKController : MonoBehaviour
                             if (v.y < minV) minV = v.y;
                             if (v.y > maxV) maxV = v.y;
                         }
-                        reg.rectUV = new Rect(minU, minV, maxU - minU, maxV - minV);
-                        customDrawnRegions.Add(reg);
-                        undoHistoryIsRegion.Add(true);
+                        reg.rectUV = new Rect(minU, minV, Mathf.Max(0.002f, maxU - minU), Mathf.Max(0.002f, maxV - minV));
+                        if (hasTplCanonRegions)
+                        {
+                            reg.canonicalVerticesUV = new List<Vector2>(reg.verticesUV);
+                            taughtCanonicalRegions.Add(reg);
+                        }
+                        else
+                        {
+                            customDrawnRegions.Add(reg);
+                            undoHistoryIsRegion.Add(true);
+                        }
                     }
                 }
 
@@ -8567,6 +11241,15 @@ public class DobotCR10AIKController : MonoBehaviour
                     canonicalPatternStrokes.Add(new List<Vector2>(customDrawnStrokes[s]));
                 }
 
+                if (hasTplCanonRegions && taughtCanonicalRegions.Count > 0)
+                {
+                    ReprojectTaughtCanonicalRegionsOntoCurrentCamera();
+                }
+                else if (customDrawnRegions.Count > 0)
+                {
+                    CaptureCurrentDrawnRegionsToCanonical();
+                }
+
                 ReprojectCanonicalPatternOntoCurrentCameraImage();
 
                 if (template.zOffsetMm > 0f)
@@ -8578,16 +11261,53 @@ public class DobotCR10AIKController : MonoBehaviour
                 {
                     UpdateSprayWidth(template.sprayWidthMm);
                 }
+
+                // Khôi phục đầy đủ cấu hình dạy phun (P1 / P2 / P3 / P4 + cỡ cọ + Z + tốc độ + thông số phun)
+                if (hasTplTeachCfg)
+                {
+                    var tc = template.teachingConfig;
+                    taughtSourceSampleName = tc.taughtSampleName ?? "";
+                    if (tc.taughtMethod == "P1" || tc.taughtMethod == "P2" || tc.taughtMethod == "P3" || tc.taughtMethod == "P4")
+                    {
+                        taughtMethod = tc.taughtMethod;
+                    }
+                    autoApplyTaughtOnNewSample = tc.autoApplyOnSampleChange;
+                    if (tc.sprayWidthMm > 0.4f) UpdateSprayWidth(tc.sprayWidthMm);
+                    if (tc.zOffsetMm >= 0f)
+                    {
+                        customDrawZOffsetMm = tc.zOffsetMm;
+                    }
+                    if (tc.playbackSpeed > 0.05f) playbackSpeed = Mathf.Clamp(tc.playbackSpeed, 0.1f, 2.0f);
+                    if (tc.targetTcpSpeedMmPerSec > 10f) targetTcpSpeedMmPerSec = Mathf.Clamp(tc.targetTcpSpeedMmPerSec, 20f, 800f);
+                    if (tc.techParams != null) sprayTechParams = CloneSerializable(tc.techParams);
+                    if (tc.p1 != null) p1Config = CloneSerializable(tc.p1);
+                    if (tc.p2 != null) p2Config = CloneSerializable(tc.p2);
+                    if (tc.p3 != null) p3Config = CloneSerializable(tc.p3);
+                    if (tc.p4 != null) p4Config = CloneSerializable(tc.p4);
+                    p1ConfigInitializedFromTech = true;
+                    p2ConfigInitializedFromTech = true;
+                    hasRecordedTeachingRecipe = true;
+                }
+                else
+                {
+                    hasRecordedTeachingRecipe = (taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0);
+                }
+
                 saveTemplateFileName = Path.GetFileNameWithoutExtension(fullPath);
                 sprayTemplateDirectory = Path.GetDirectoryName(fullPath);
                 RefreshAvailableSprayTemplates();
 
-                // Nếu người dùng đang chọn P1/P2/P3/P4 thì áp dụng lại phương pháp đó với mẫu mới; ngược lại ánh xạ mẫu 3D trực tiếp
+                // Nếu mẫu lưu kèm cấu hình dạy P1/P2/P3/P4 và phôi hiện tại đã có 12 mốc -> áp dụng luôn phương pháp đó
                 if (waypoints != null) waypoints.Clear();
                 ClearInkTrail();
                 if (depositionHeatmapObj != null) depositionHeatmapObj.SetActive(false);
-                if (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" ||
-                    activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4")
+                if (hasTplTeachCfg && (taughtMethod == "P1" || taughtMethod == "P2" || taughtMethod == "P3" || taughtMethod == "P4") &&
+                    landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+                {
+                    GenerateAndApplyMethodTrajectory(taughtMethod);
+                }
+                else if (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" ||
+                         activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4")
                 {
                     GenerateAndApplyMethodTrajectory(activeTrajectoryMethod);
                 }
@@ -8596,7 +11316,12 @@ public class DobotCR10AIKController : MonoBehaviour
                     InvalidateGeneratedTrajectoryOnEdit();
                 }
 
-                customDrawStatusMsg = $"Đã nạp mẫu {Path.GetFileName(fullPath)} ({canonicalPatternStrokes.Count} nét -> phôi {GetActiveCloudSampleName()}). Chọn P1 / P2 / P3 / P4 để sinh quỹ đạo.";
+                string loadedSummary = hasTplTeachCfg
+                    ? $"Đã nạp mẫu + cấu hình dạy [{taughtMethod}]: {Path.GetFileName(fullPath)} (Cọ {sprayWidthMm:F1}mm, Z {customDrawZOffsetMm:F1}mm)"
+                    : $"Đã nạp mẫu {Path.GetFileName(fullPath)} ({customDrawnRegions.Count} vùng, {canonicalPatternStrokes.Count} nét -> phôi {GetActiveCloudSampleName()})";
+                customDrawStatusMsg = loadedSummary;
+                teachingStatusMsg = loadedSummary;
+                MarkSettingsDirty();
                 Debug.Log($"[CR10A SprayTemplate] Đã import mẫu từ {fullPath}");
             }
             else
@@ -8731,6 +11456,8 @@ public class DobotCR10AIKController : MonoBehaviour
         ReleaseCanvasHotControl();
         activePolygonVerticesUV.Clear();
         customDrawnRegions.Clear();
+        taughtCanonicalRegions.Clear();
+        hasRecordedTeachingRecipe = false;
         undoHistoryIsRegion.Clear();
         activeTrajectoryMethod = "CUSTOM";
         showP1ParameterPanel = false;
@@ -9030,6 +11757,8 @@ public class DobotCR10AIKController : MonoBehaviour
         isDraggingShape = false;
         activePolygonVerticesUV.Clear();
         customDrawnRegions.Clear();
+        taughtCanonicalRegions.Clear();
+        hasRecordedTeachingRecipe = false;
         undoHistoryIsRegion.Clear();
         if (waypoints != null) waypoints.Clear();
         ClearInkTrail();
@@ -9052,6 +11781,8 @@ public class DobotCR10AIKController : MonoBehaviour
         isDraggingShape = false;
         activePolygonVerticesUV.Clear();
         customDrawnRegions.Clear();
+        taughtCanonicalRegions.Clear();
+        hasRecordedTeachingRecipe = false;
         undoHistoryIsRegion.Clear();
         if (waypoints != null) waypoints.Clear();
         ClearInkTrail();
@@ -9200,7 +11931,7 @@ public class DobotCR10AIKController : MonoBehaviour
             var regionPolysXZ = GetCustomDrawnRegionPolygonsWorldXZ(plyLoader);
             for (int r = 0; r < regionPolysXZ.Count; r++)
             {
-                var regionMetricPaths = BuildMetricSprayPathsForWorldPolygon(regionPolysXZ[r], sprayWidthMm);
+                var regionMetricPaths = BuildMetricSprayPathsForWorldPolygon(regionPolysXZ[r], ComputeEffectiveRegionFillSpacingMm(), useExactStepMm: true);
                 for (int k = 0; k < regionMetricPaths.Count; k++)
                 {
                     directWorldXZStrokes.Add(regionMetricPaths[k]);
@@ -9606,24 +12337,31 @@ public class DobotCR10AIKController : MonoBehaviour
     // =========================================================================
     // NẠP & ĐỒNG BỘ 12 ĐIỂM MỐC GIẢI PHẪU 3D + ĐƯỜNG BAO SEGMENTATION 3D
     // =========================================================================
-    public void LoadLandmarksAndSegmentationForSample(string sampleName, bool autoSwitchSprayTemplate = false, string exactJsonPath = null)
+    public void LoadLandmarksAndSegmentationForSample(string sampleName, bool autoSwitchSprayTemplate = false, string exactJsonPath = null, bool generateTrajectory = false)
     {
-        if (string.IsNullOrEmpty(sampleName)) sampleName = "pcl_25";
-        string clean = Path.GetFileNameWithoutExtension(sampleName).Trim();
-        if (clean == "full_cloud_world") clean = "pcl_25";
-        else if (!clean.StartsWith("pcl_")) clean = "pcl_" + clean;
+        if (string.IsNullOrEmpty(sampleName)) return;
+        string rawClean = Path.GetFileNameWithoutExtension(sampleName).Trim();
+        if (rawClean == "full_cloud_world") rawClean = "pcl_25";
+        string pclClean = rawClean.StartsWith("pcl_") ? rawClean : ("pcl_" + rawClean);
+
+        if (!string.IsNullOrEmpty(exactJsonPath))
+        {
+            lastMissingLandmarksSampleName = "";
+        }
 
         string[] candidatePaths = new string[]
         {
             exactJsonPath ?? "",
-            Path.Combine(Application.dataPath, "..", "output_drawing", $"{clean}_landmarks_seg.json"),
-            Path.Combine(Application.dataPath, "..", "..", "ai_src", "step3_3d_trajectory", "outputs", $"{clean}_landmarks_seg.json")
+            Path.Combine(Application.dataPath, "..", "output_drawing", $"{rawClean}_landmarks_seg.json"),
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "step3_3d_trajectory", "outputs", $"{rawClean}_landmarks_seg.json"),
+            Path.Combine(Application.dataPath, "..", "output_drawing", $"{pclClean}_landmarks_seg.json"),
+            Path.Combine(Application.dataPath, "..", "..", "ai_src", "step3_3d_trajectory", "outputs", $"{pclClean}_landmarks_seg.json")
         };
 
         string foundPath = null;
         for (int i = 0; i < candidatePaths.Length; i++)
         {
-            if (File.Exists(candidatePaths[i]))
+            if (!string.IsNullOrEmpty(candidatePaths[i]) && File.Exists(candidatePaths[i]))
             {
                 foundPath = candidatePaths[i];
                 break;
@@ -9632,6 +12370,7 @@ public class DobotCR10AIKController : MonoBehaviour
 
         if (string.IsNullOrEmpty(foundPath))
         {
+            lastMissingLandmarksSampleName = rawClean;
             landmarks3D.Clear(); landmarksWorldPos.Clear(); garmentContourWorld.Clear();
             sprayZoneLeftWorld.Clear(); sprayZoneRightWorld.Clear(); loadedLandmarksSampleName = "";
             lastP1Result = null;
@@ -9655,12 +12394,13 @@ public class DobotCR10AIKController : MonoBehaviour
             LandmarkSegmentationPayload payload = JsonUtility.FromJson<LandmarkSegmentationPayload>(jsonText);
             if (payload == null) return;
 
+            lastMissingLandmarksSampleName = "";
             lastP1Result = null;
             projectedTargetRegionR2D.Clear();
             projectedSafeRegionRsafe2D.Clear();
             projectedTrajectoryOn2D.Clear();
             projectedTrajectoryOff2D.Clear();
-            loadedLandmarksSampleName = clean;
+            loadedLandmarksSampleName = rawClean;
             landmarks3D = payload.landmarks ?? new List<LandmarkItem3D>();
             landmarksWorldPos.Clear();
             for (int i = 0; i < landmarks3D.Count; i++)
@@ -9690,49 +12430,56 @@ public class DobotCR10AIKController : MonoBehaviour
                 ? payload.detected_size
                 : ClassifyJeansSizeKMeans(detectedInseamMm, detectedOutseamMm);
 
-            bool isMethodActive = (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" ||
-                                   activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4");
+            sizeDetectionSummary = $"[{loadedLandmarksSampleName}] Size {detectedJeansSize} (Inseam {detectedInseamMm:F0}, Outseam {detectedOutseamMm:F0} mm)";
 
-            if (autoSwitchSprayTemplate)
+            if (generateTrajectory)
             {
-                SwitchSprayTemplateToSize(detectedJeansSize);
-            }
-            else if (preserveCustomDrawingAcrossSamples)
-            {
-                if (canonicalPatternStrokes.Count > 0)
+                bool isMethodActive = (activeTrajectoryMethod == "P1" || activeTrajectoryMethod == "P2" ||
+                                       activeTrajectoryMethod == "P3" || activeTrajectoryMethod == "P4");
+
+                if (autoSwitchSprayTemplate)
                 {
-                    if (!isMethodActive)
+                    SwitchSprayTemplateToSize(detectedJeansSize);
+                }
+                else if (preserveCustomDrawingAcrossSamples)
+                {
+                    if (canonicalPatternStrokes.Count > 0)
+                    {
+                        if (!isMethodActive) ReprojectCanonicalPatternOntoCurrentCameraImage();
+                    }
+                    if (isMethodActive)
+                    {
+                        GenerateAndApplyMethodTrajectory(activeTrajectoryMethod);
+                    }
+                    else if ((canonicalPatternStrokes != null && canonicalPatternStrokes.Count > 0) ||
+                             (customDrawnStrokes != null && customDrawnStrokes.Count > 0))
+                    {
+                        ReprojectCanonicalPatternOntoCurrentCameraImage();
+                        InvalidateGeneratedTrajectoryOnEdit();
+                    }
+                }
+            }
+            else
+            {
+                // Chế độ nhận diện / nạp mốc: chỉ cập nhật Size, 12 mốc & đường bao Segment (hiển thị theo công tắc View), KHÔNG tự sinh quỹ đạo
+                // (trừ khi người dùng chủ động bật 'Tự áp dụng mẫu dạy khi đổi phôi mới' trong mục Dạy phun)
+                if (autoSwitchSprayTemplate && !string.IsNullOrEmpty(detectedJeansSize))
+                {
+                    activeSprayTemplateSize = detectedJeansSize;
+                    hasTriggeredSizeAutoSwitch = true;
+                }
+                if (autoApplyTaughtOnNewSample && hasRecordedTeachingRecipe &&
+                    (taughtCanonicalRegions.Count > 0 || canonicalPatternStrokes.Count > 0))
+                {
+                    ApplyTaughtRecipeToCurrentSample();
+                }
+                else
+                {
+                    if (preserveCustomDrawingAcrossSamples && canonicalPatternStrokes.Count > 0)
                     {
                         ReprojectCanonicalPatternOntoCurrentCameraImage();
                     }
-                }
-                else if (!isMethodActive && customDrawnStrokes != null && customDrawnStrokes.Count > 0 &&
-                         strokesReferenceLandmarksUV != null && strokesReferenceLandmarksUV.Length == 12)
-                {
-                    Texture2D camTex = GetActiveRealCameraTexture(out PLYDirectLoader plyForWarp, out int nw, out int nh, out _);
-                    if (camTex != null)
-                    {
-                        Vector2[] newCamLmUV = GetActiveCanvasLandmarks12UV(plyForWarp, nw, nh, true, out bool hasNewLm);
-                        if (hasNewLm && newCamLmUV != null)
-                        {
-                            float camAsp = GetActiveCameraMetricAspect(plyForWarp, nw, nh);
-                            WarpStrokesInPlace(customDrawnStrokes, strokesReferenceLandmarksUV, newCamLmUV, camAsp, camAsp);
-                            strokesReferenceLandmarksUV = (Vector2[])newCamLmUV.Clone();
-                            strokesProjectedSampleName = GetActiveCloudSampleName();
-                            CaptureCurrentStrokesToCanonical();
-                        }
-                    }
-                }
-
-                if (isMethodActive)
-                {
-                    GenerateAndApplyMethodTrajectory(activeTrajectoryMethod);
-                }
-                else if ((canonicalPatternStrokes != null && canonicalPatternStrokes.Count > 0) ||
-                         (customDrawnStrokes != null && customDrawnStrokes.Count > 0))
-                {
-                    ReprojectCanonicalPatternOntoCurrentCameraImage();
-                    InvalidateGeneratedTrajectoryOnEdit();
+                    customDrawStatusMsg = $"Đã nhận diện [{loadedLandmarksSampleName}] Size {detectedJeansSize} ({landmarksWorldPos.Count} mốc, {garmentContourWorld.Count} điểm Segment).";
                 }
             }
 
@@ -9792,7 +12539,7 @@ public class DobotCR10AIKController : MonoBehaviour
     /// </summary>
     public void DetectJeansSizeAndSwitchSprayTemplate(string sampleName)
     {
-        LoadLandmarksAndSegmentationForSample(sampleName, autoSwitchSprayTemplate: true);
+        LoadLandmarksAndSegmentationForSample(sampleName, autoSwitchSprayTemplate: true, exactJsonPath: null, generateTrajectory: false);
     }
 
     public void SwitchSprayTemplateToSize(string size)
@@ -9860,85 +12607,274 @@ public class DobotCR10AIKController : MonoBehaviour
         { 7, 10 }, { 7, 11 }, { 10, 11 } // Gấu quần phải
     };
 
-    private void DrawViewport3DOverlaysInGUI()
+    // =========================================================================
+    // HỆ THỐNG VẼ OVERLAY 3D CÓ KIỂM TRA ĐỘ SÂU Z-BUFFER (BỊ TAY ROBOT CHE THẬT)
+    // =========================================================================
+    private GameObject depthOverlayObj;
+    private Mesh depthOverlayMesh;
+    private Material depthOverlayMaterial;
+    private readonly List<Vector3> overlayVerts = new List<Vector3>(4096);
+    private readonly List<Color> overlayCols = new List<Color>(4096);
+    private readonly List<int> overlayTris = new List<int>(6144);
+    private struct RobotLinkMeshInfo
     {
-        if (Event.current == null || Event.current.type != EventType.Repaint) return;
+        public Transform tr;
+        public Bounds localBounds;
+        public Renderer renderer;
+    }
+    private readonly List<RobotLinkMeshInfo> cachedRobotLinkMeshes = new List<RobotLinkMeshInfo>(32);
+    private Transform cachedRobotLinkRoot = null;
 
-        Camera cam = null;
+    private Camera GetActiveViewportCamera()
+    {
         RobotCameraController rcc = EnsureCameraController();
-        if (rcc != null) cam = rcc.GetComponent<Camera>();
+        Camera cam = rcc != null ? rcc.GetComponent<Camera>() : null;
         if (cam == null) cam = Camera.main;
+        return cam;
+    }
+
+    private void EnsureDepthOverlayRenderer()
+    {
+        if (depthOverlayMesh == null)
+        {
+            depthOverlayMesh = new Mesh
+            {
+                name = "CR10A_DepthTested3DOverlaysMesh",
+                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32,
+                hideFlags = HideFlags.DontSave
+            };
+            depthOverlayMesh.MarkDynamic();
+        }
+        if (depthOverlayMaterial == null)
+        {
+            // Sprites/Default sử dụng ZTest LEqual + Alpha Blending + Vertex Color (bị che chính xác phía sau cánh tay robot Dobot!)
+            Shader sh = Shader.Find("Sprites/Default") ?? Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
+            if (sh != null)
+            {
+                depthOverlayMaterial = new Material(sh)
+                {
+                    name = "CR10A_DepthOverlayMat",
+                    hideFlags = HideFlags.DontSave,
+                    color = Color.white
+                };
+            }
+        }
+        if (depthOverlayObj == null)
+        {
+            depthOverlayObj = new GameObject("CR10A_DepthTested3DOverlays");
+            depthOverlayObj.hideFlags = HideFlags.DontSave;
+            MeshFilter mf = depthOverlayObj.AddComponent<MeshFilter>();
+            mf.sharedMesh = depthOverlayMesh;
+            MeshRenderer mr = depthOverlayObj.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = depthOverlayMaterial;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            mr.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+            mr.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+        }
+    }
+
+    private void EnsureRobotLinkOcclusionCache()
+    {
+        Transform root = robotManual != null ? robotManual.transform : transform;
+        if (root == null) return;
+        if (cachedRobotLinkRoot == root && cachedRobotLinkMeshes.Count > 0) return;
+
+        cachedRobotLinkRoot = root;
+        cachedRobotLinkMeshes.Clear();
+        MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>(true);
+        for (int i = 0; i < mfs.Length; i++)
+        {
+            var mf = mfs[i];
+            if (mf == null || mf.sharedMesh == null) continue;
+            var r = mf.GetComponent<Renderer>();
+            if (r == null) continue;
+            // Bỏ qua các đối tượng overlay hoặc point cloud nếu nằm dưới cùng root
+            if (mf.gameObject == depthOverlayObj) continue;
+            string n = mf.gameObject.name.ToLowerInvariant();
+            if (n.Contains("overlay") || n.Contains("heatmap") || n.Contains("pointcloud") || n.Contains("trail")) continue;
+            cachedRobotLinkMeshes.Add(new RobotLinkMeshInfo
+            {
+                tr = mf.transform,
+                localBounds = mf.sharedMesh.bounds,
+                renderer = r
+            });
+        }
+    }
+
+    private bool IsWorldPointOccludedByRobotArm(Camera cam, Vector3 worldPos)
+    {
+        if (cam == null) return false;
+        EnsureRobotLinkOcclusionCache();
+        if (cachedRobotLinkMeshes.Count == 0) return false;
+
+        Vector3 camPos = cam.transform.position;
+        Vector3 dir = worldPos - camPos;
+        float dist = dir.magnitude;
+        if (dist < 0.04f) return false;
+        Vector3 dirN = dir / dist;
+        float maxDist = dist - 0.012f;
+
+        for (int i = 0; i < cachedRobotLinkMeshes.Count; i++)
+        {
+            var info = cachedRobotLinkMeshes[i];
+            if (info.tr == null || info.renderer == null || !info.renderer.enabled || !info.tr.gameObject.activeInHierarchy) continue;
+
+            // Kiểm tra nhanh bằng World AABB trước
+            Bounds wb = info.renderer.bounds;
+            Ray worldRay = new Ray(camPos, dirN);
+            if (!wb.IntersectRay(worldRay, out float wHit) || wHit >= maxDist) continue;
+
+            // Kiểm tra chính xác theo OBB cục bộ của từng khâu tay robot
+            Matrix4x4 w2l = info.tr.worldToLocalMatrix;
+            Vector3 lOrig = w2l.MultiplyPoint3x4(camPos);
+            Vector3 lEnd = w2l.MultiplyPoint3x4(worldPos);
+            Vector3 lVec = lEnd - lOrig;
+            float lLen = lVec.magnitude;
+            if (lLen < 1e-5f) continue;
+
+            Ray localRay = new Ray(lOrig, lVec / lLen);
+            if (info.localBounds.IntersectRay(localRay, out float lHit) && lHit > 0.001f && lHit < lLen * 0.985f)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void AddDepthOverlaySegment3D(Vector3 camPos, float pxToWorld, Vector3 a, Vector3 b, Color col, float widthPx, float depthBiasM = 0.0025f)
+    {
+        Vector3 ab = b - a;
+        if (ab.sqrMagnitude < 1e-10f) return;
+        Vector3 mid = 0.5f * (a + b);
+        Vector3 toCam = camPos - mid;
+        float dist = toCam.magnitude;
+        if (dist < 0.02f) return;
+        toCam /= dist;
+
+        Vector3 side = Vector3.Cross(ab, toCam);
+        if (side.sqrMagnitude < 1e-10f) return;
+        side.Normalize();
+
+        float halfW = Mathf.Max(0.0005f, widthPx * dist * pxToWorld * 0.5f);
+        Vector3 bias = toCam * depthBiasM;
+        Vector3 pa = a + bias;
+        Vector3 pb = b + bias;
+        Vector3 off = side * halfW;
+
+        int baseIdx = overlayVerts.Count;
+        overlayVerts.Add(pa - off);
+        overlayVerts.Add(pa + off);
+        overlayVerts.Add(pb + off);
+        overlayVerts.Add(pb - off);
+
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+
+        overlayTris.Add(baseIdx);
+        overlayTris.Add(baseIdx + 1);
+        overlayTris.Add(baseIdx + 2);
+        overlayTris.Add(baseIdx);
+        overlayTris.Add(baseIdx + 2);
+        overlayTris.Add(baseIdx + 3);
+    }
+
+    private void AddDepthOverlayDashedSegment3D(Vector3 camPos, float pxToWorld, Vector3 a, Vector3 b, Color col, float widthPx, float dashM = 0.012f, float gapM = 0.008f, float depthBiasM = 0.0025f)
+    {
+        float len = Vector3.Distance(a, b);
+        if (len < 1e-4f) return;
+        float step = Mathf.Max(0.004f, dashM + gapM);
+        int maxDashes = Mathf.Min(120, Mathf.CeilToInt(len / step));
+        for (int i = 0; i < maxDashes; i++)
+        {
+            float d0 = i * step;
+            float d1 = Mathf.Min(len, d0 + dashM);
+            if (d1 - d0 < 0.001f) break;
+            Vector3 p0 = Vector3.Lerp(a, b, d0 / len);
+            Vector3 p1 = Vector3.Lerp(a, b, d1 / len);
+            AddDepthOverlaySegment3D(camPos, pxToWorld, p0, p1, col, widthPx, depthBiasM);
+        }
+    }
+
+    private void AddDepthOverlayLoop3D(Vector3 camPos, float pxToWorld, List<Vector3> pts, Color col, float widthPx, bool closed = true, float depthBiasM = 0.0025f)
+    {
+        if (pts == null || pts.Count < 2) return;
+        int n = pts.Count;
+        for (int i = 0; i < n - 1; i++)
+        {
+            AddDepthOverlaySegment3D(camPos, pxToWorld, pts[i], pts[i + 1], col, widthPx, depthBiasM);
+        }
+        if (closed && n >= 3)
+        {
+            AddDepthOverlaySegment3D(camPos, pxToWorld, pts[n - 1], pts[0], col, widthPx, depthBiasM);
+        }
+    }
+
+    private void AddDepthOverlayDot3D(Camera cam, Vector3 camPos, float pxToWorld, Vector3 worldPos, float radiusPx, Color col, float depthBiasM = 0.0035f)
+    {
+        Vector3 toCam = camPos - worldPos;
+        float dist = toCam.magnitude;
+        if (dist < 0.02f) return;
+        toCam /= dist;
+
+        float r = Mathf.Max(0.0008f, radiusPx * dist * pxToWorld);
+        Vector3 right = cam.transform.right * r;
+        Vector3 up = cam.transform.up * r;
+        Vector3 center = worldPos + toCam * depthBiasM;
+
+        int baseIdx = overlayVerts.Count;
+        overlayVerts.Add(center - right - up);
+        overlayVerts.Add(center - right + up);
+        overlayVerts.Add(center + right + up);
+        overlayVerts.Add(center + right - up);
+
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+        overlayCols.Add(col);
+
+        overlayTris.Add(baseIdx);
+        overlayTris.Add(baseIdx + 1);
+        overlayTris.Add(baseIdx + 2);
+        overlayTris.Add(baseIdx);
+        overlayTris.Add(baseIdx + 2);
+        overlayTris.Add(baseIdx + 3);
+    }
+
+    private void RebuildDepthTested3DOverlayMesh()
+    {
+        Camera cam = GetActiveViewportCamera();
         if (cam == null) return;
 
-        EnsureCanonicalJeansCanvasInitialized();
+        EnsureDepthOverlayRenderer();
+        overlayVerts.Clear();
+        overlayCols.Clear();
+        overlayTris.Clear();
 
-        // Tự động đồng bộ 12 Điểm Mốc & Đường Bao Segment theo đúng mẫu Point Cloud đang hiển thị trên màn hình!
-        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
-        string activeCloudSample = (plyLoader != null && !string.IsNullOrEmpty(plyLoader.currentLoadedSampleName))
-            ? plyLoader.currentLoadedSampleName
-            : selectedSampleName;
-        if (activeCloudSample == "full_cloud_world") activeCloudSample = "pcl_25";
+        Vector3 camPos = cam.transform.position;
+        float pxToWorld = (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad)) / Mathf.Max(200f, Screen.height);
 
-        if (loadedLandmarksSampleName != activeCloudSample || landmarks3D == null || landmarks3D.Count == 0)
-        {
-            LoadLandmarksAndSegmentationForSample(activeCloudSample);
-        }
-
-        // 1. Vẽ Đường Bao Segment Thân Quần 3D (Viền Đen Tương Phản + Lõi Xanh Neon Đậm + Lưới Quét Bề Mặt + Nhãn Segment)
+        // 1. Đường Bao Segment Thân Quần 3D
         if (showSegmentationContour3D && garmentContourWorld != null && garmentContourWorld.Count > 2)
         {
-            // Vẽ các đường đan chéo mờ bên trong vùng Segment để nổi bật rõ diện tích chiếc quần đã được AI tách nền
             int cCount = garmentContourWorld.Count;
             Color hatchCol = new Color(0.05f, 1.0f, 0.50f, 0.22f);
             for (int i = 0; i < cCount / 2; i += 4)
             {
                 int opp = (cCount - 1 - i) % cCount;
-                Vector3 s0 = cam.WorldToScreenPoint(garmentContourWorld[i]);
-                Vector3 s1 = cam.WorldToScreenPoint(garmentContourWorld[opp]);
-                if (s0.z > 0.05f && s1.z > 0.05f)
-                {
-                    DrawGuiLine2D(new Vector2(s0.x, Screen.height - s0.y), new Vector2(s1.x, Screen.height - s1.y), hatchCol, 1.4f);
-                }
+                AddDepthOverlaySegment3D(camPos, pxToWorld, garmentContourWorld[i], garmentContourWorld[opp], hatchCol, 1.4f, 0.0018f);
             }
-
-            // Viền ngoài tối tương phản cao + lõi xanh lá Neon rực rỡ + các nút đỉnh Segment
-            DrawWorldLoopInGUI(cam, garmentContourWorld, new Color(0.01f, 0.14f, 0.06f, 0.95f), 6.0f, true);
-            DrawWorldLoopInGUI(cam, garmentContourWorld, new Color(0.05f, 1.0f, 0.48f, 1.0f), 3.6f, true);
+            AddDepthOverlayLoop3D(camPos, pxToWorld, garmentContourWorld, new Color(0.01f, 0.14f, 0.06f, 0.92f), 5.6f, true, 0.0020f);
+            AddDepthOverlayLoop3D(camPos, pxToWorld, garmentContourWorld, new Color(0.05f, 1.0f, 0.48f, 1.0f), 3.2f, true, 0.0024f);
             for (int i = 0; i < cCount; i += 3)
             {
-                Vector3 sp = cam.WorldToScreenPoint(garmentContourWorld[i]);
-                if (sp.z > 0.05f)
-                {
-                    DrawGuiSolidRect(new Rect(sp.x - 2.5f, Screen.height - sp.y - 2.5f, 5f, 5f), new Color(0.2f, 1.0f, 0.6f, 0.95f));
-                }
-            }
-
-            // Nhãn hiển thị rõ tên Đường Bao Segment ngay trên mép trên của quần
-            Vector3 topSegScreen = cam.WorldToScreenPoint(garmentContourWorld[0]);
-            float minGy = float.MaxValue;
-            Vector2 bestSegPt = Vector2.zero;
-            for (int i = 0; i < cCount; i++)
-            {
-                Vector3 sp = cam.WorldToScreenPoint(garmentContourWorld[i]);
-                if (sp.z > 0.05f)
-                {
-                    float gy = Screen.height - sp.y;
-                    if (gy < minGy)
-                    {
-                        minGy = gy;
-                        bestSegPt = new Vector2(sp.x, gy);
-                    }
-                }
-            }
-            if (minGy < float.MaxValue)
-            {
-                Rect segBadge = new Rect(bestSegPt.x - 85f, bestSegPt.y - 24f, 185f, 19f);
-                DrawGuiSolidRect(segBadge, new Color(0.02f, 0.22f, 0.12f, 0.92f));
-                GUI.Label(new Rect(segBadge.x + 6f, segBadge.y + 1f, segBadge.width, 18f), $"SEGMENT ({loadedLandmarksSampleName})", AntigravityUITheme.StyleLabelGreen);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, garmentContourWorld[i], 2.4f, new Color(0.2f, 1.0f, 0.6f, 0.95f), 0.0028f);
             }
         }
 
-        // 2. Vẽ CHỖ CẦN PHUN (Vùng mục tiêu R màu Vàng Cam & Vùng an toàn R_safe sau co biên e màu Xanh Lá)
+        // 2. CHỖ CẦN PHUN (Vùng R Vàng Cam & Vùng R_safe Xanh Lá)
         if (showSprayZones3D)
         {
             bool drewCustomTarget = false;
@@ -9955,27 +12891,23 @@ public class DobotCR10AIKController : MonoBehaviour
                 {
                     var poly = lastP1Result.rawTargetRegionPolygonsWorld[r];
                     if (poly == null || poly.Count < 3) continue;
-                    // Gạch chéo mờ bên trong vùng R để phân biệt trực quan với đường quỹ đạo
                     int pc = poly.Count;
                     int stride = Mathf.Max(1, pc / 10);
                     for (int k = 0; k < pc / 2; k += stride)
                     {
                         int opp = (pc - 1 - k) % pc;
-                        Vector3 s0 = cam.WorldToScreenPoint(poly[k]);
-                        Vector3 s1 = cam.WorldToScreenPoint(poly[opp]);
-                        if (s0.z > 0.05f && s1.z > 0.05f)
-                            DrawGuiLine2D(new Vector2(s0.x, Screen.height - s0.y), new Vector2(s1.x, Screen.height - s1.y), rawHatch, 1.4f);
+                        AddDepthOverlaySegment3D(camPos, pxToWorld, poly[k], poly[opp], rawHatch, 1.4f, 0.0020f);
                     }
-                    DrawWorldLoopInGUI(cam, poly, rawHalo, 5.2f, true);
-                    DrawWorldLoopInGUI(cam, poly, rawCore, 3.0f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, rawHalo, 5.0f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, rawCore, 2.8f, true, 0.0026f);
                 }
 
                 for (int r = 0; r < lastP1Result.safeErodedRegionPolygonsWorld.Count; r++)
                 {
                     var safePoly = lastP1Result.safeErodedRegionPolygonsWorld[r];
                     if (safePoly == null || safePoly.Count < 3) continue;
-                    DrawWorldLoopInGUI(cam, safePoly, safeHalo, 4.0f, true);
-                    DrawWorldLoopInGUI(cam, safePoly, safeCore, 2.2f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, safePoly, safeHalo, 3.8f, true, 0.0024f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, safePoly, safeCore, 2.1f, true, 0.0028f);
                 }
             }
             else if (activeTrajectoryMethod == "P2" && lastP2Result != null && lastP2Result.targetRegionPolygonsWorld.Count > 0)
@@ -9994,13 +12926,10 @@ public class DobotCR10AIKController : MonoBehaviour
                     for (int k = 0; k < pc / 2; k += stride)
                     {
                         int opp = (pc - 1 - k) % pc;
-                        Vector3 s0 = cam.WorldToScreenPoint(poly[k]);
-                        Vector3 s1 = cam.WorldToScreenPoint(poly[opp]);
-                        if (s0.z > 0.05f && s1.z > 0.05f)
-                            DrawGuiLine2D(new Vector2(s0.x, Screen.height - s0.y), new Vector2(s1.x, Screen.height - s1.y), p2Hatch, 1.4f);
+                        AddDepthOverlaySegment3D(camPos, pxToWorld, poly[k], poly[opp], p2Hatch, 1.4f, 0.0020f);
                     }
-                    DrawWorldLoopInGUI(cam, poly, p2Halo, 5.2f, true);
-                    DrawWorldLoopInGUI(cam, poly, p2Core, 3.0f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p2Halo, 5.0f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p2Core, 2.8f, true, 0.0026f);
                 }
             }
             else if (activeTrajectoryMethod == "P3" && lastP3Result != null && lastP3Result.targetRegionPolygonsWorld.Count > 0)
@@ -10012,8 +12941,8 @@ public class DobotCR10AIKController : MonoBehaviour
                 {
                     var poly = lastP3Result.targetRegionPolygonsWorld[r];
                     if (poly == null || poly.Count < 3) continue;
-                    DrawWorldLoopInGUI(cam, poly, p3Halo, 5.0f, true);
-                    DrawWorldLoopInGUI(cam, poly, p3Core, 2.8f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p3Halo, 4.8f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p3Core, 2.7f, true, 0.0026f);
                 }
             }
             else if (activeTrajectoryMethod == "P4" && lastP4Result != null && lastP4Result.targetRegionPolygonsWorld.Count > 0)
@@ -10025,8 +12954,8 @@ public class DobotCR10AIKController : MonoBehaviour
                 {
                     var poly = lastP4Result.targetRegionPolygonsWorld[r];
                     if (poly == null || poly.Count < 3) continue;
-                    DrawWorldLoopInGUI(cam, poly, p4Halo, 5.0f, true);
-                    DrawWorldLoopInGUI(cam, poly, p4Core, 2.8f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p4Halo, 4.8f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, poly, p4Core, 2.7f, true, 0.0026f);
                 }
             }
 
@@ -10034,18 +12963,18 @@ public class DobotCR10AIKController : MonoBehaviour
             {
                 if (sprayZoneLeftWorld != null && sprayZoneLeftWorld.Count > 2)
                 {
-                    DrawWorldLoopInGUI(cam, sprayZoneLeftWorld, new Color(0.18f, 0.10f, 0.01f, 0.92f), 4.8f, true);
-                    DrawWorldLoopInGUI(cam, sprayZoneLeftWorld, new Color(1.0f, 0.78f, 0.10f, 1.0f), 2.8f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, sprayZoneLeftWorld, new Color(0.18f, 0.10f, 0.01f, 0.92f), 4.6f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, sprayZoneLeftWorld, new Color(1.0f, 0.78f, 0.10f, 1.0f), 2.6f, true, 0.0026f);
                 }
                 if (sprayZoneRightWorld != null && sprayZoneRightWorld.Count > 2)
                 {
-                    DrawWorldLoopInGUI(cam, sprayZoneRightWorld, new Color(0.18f, 0.10f, 0.01f, 0.92f), 4.8f, true);
-                    DrawWorldLoopInGUI(cam, sprayZoneRightWorld, new Color(1.0f, 0.78f, 0.10f, 1.0f), 2.8f, true);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, sprayZoneRightWorld, new Color(0.18f, 0.10f, 0.01f, 0.92f), 4.6f, true, 0.0022f);
+                    AddDepthOverlayLoop3D(camPos, pxToWorld, sprayZoneRightWorld, new Color(1.0f, 0.78f, 0.10f, 1.0f), 2.6f, true, 0.0026f);
                 }
             }
         }
 
-        // 2b. Vẽ TRỤC GIỮA ỐNG QUẦN (SKELETON P2 - Hồng tím) độc lập với Chỗ cần phun & Đường quỹ đạo
+        // 2b. Trục giữa ống quần (Skeleton P2)
         if (showP2SkeletonAxis && activeTrajectoryMethod == "P2" && lastP2Result != null && lastP2Result.skeletonAxesWorld.Count > 0)
         {
             Color skelHalo = new Color(0.18f, 0.02f, 0.22f, 0.90f);
@@ -10056,18 +12985,13 @@ public class DobotCR10AIKController : MonoBehaviour
                 if (axis == null || axis.Count < 2) continue;
                 for (int i = 0; i < axis.Count - 1; i++)
                 {
-                    Vector3 s0 = cam.WorldToScreenPoint(axis[i]);
-                    Vector3 s1 = cam.WorldToScreenPoint(axis[i + 1]);
-                    if (s0.z <= 0.05f || s1.z <= 0.05f) continue;
-                    Vector2 p0 = new Vector2(s0.x, Screen.height - s0.y);
-                    Vector2 p1 = new Vector2(s1.x, Screen.height - s1.y);
-                    DrawGuiLine2D(p0, p1, skelHalo, 4.4f);
-                    DrawGuiDashedLine2D(p0, p1, skelCore, 2.5f, 8f, 4f);
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, axis[i], axis[i + 1], skelHalo, 4.2f, 0.0026f);
+                    AddDepthOverlayDashedSegment3D(camPos, pxToWorld, axis[i], axis[i + 1], skelCore, 2.4f, 0.014f, 0.008f, 0.0030f);
                 }
             }
         }
 
-        // 2c. Vẽ LƯỚI 32 TAM GIÁC BARYCENTRIC (P3 - Xanh ngọc, Đỏ nếu tam giác bị đảo chiều)
+        // 2c. Lưới 32 tam giác Barycentric (P3)
         if (showP3TriangulationMesh && activeTrajectoryMethod == "P3" && lastP3Result != null && lastP3Result.meshTrianglesWorld.Count > 0)
         {
             Color triOkCol = new Color(0.20f, 0.95f, 0.65f, 0.72f);
@@ -10078,13 +13002,10 @@ public class DobotCR10AIKController : MonoBehaviour
                 if (tri == null || tri.Length < 3) continue;
                 bool isFlipped = (t < lastP3Result.meshTriangleFlipped.Count) && lastP3Result.meshTriangleFlipped[t];
                 Color edgeCol = isFlipped ? triBadCol : triOkCol;
-                float width = isFlipped ? 2.6f : 1.5f;
+                float w = isFlipped ? 2.6f : 1.5f;
                 for (int e = 0; e < 3; e++)
                 {
-                    Vector3 s0 = cam.WorldToScreenPoint(tri[e]);
-                    Vector3 s1 = cam.WorldToScreenPoint(tri[(e + 1) % 3]);
-                    if (s0.z <= 0.05f || s1.z <= 0.05f) continue;
-                    DrawGuiLine2D(new Vector2(s0.x, Screen.height - s0.y), new Vector2(s1.x, Screen.height - s1.y), edgeCol, width);
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, tri[e], tri[(e + 1) % 3], edgeCol, w, 0.0024f);
                 }
             }
             if (lastP3Result.detectedLandmarksWorld != null && lastP3Result.detectedLandmarksWorld.Count > 0)
@@ -10092,14 +13013,12 @@ public class DobotCR10AIKController : MonoBehaviour
                 Color lmDotCol = new Color(0.15f, 1.0f, 0.72f, 0.96f);
                 for (int i = 0; i < lastP3Result.detectedLandmarksWorld.Count; i++)
                 {
-                    Vector3 sp = cam.WorldToScreenPoint(lastP3Result.detectedLandmarksWorld[i]);
-                    if (sp.z <= 0.05f) continue;
-                    DrawGuiSolidRect(new Rect(sp.x - 4f, Screen.height - sp.y - 4f, 8f, 8f), lmDotCol);
+                    AddDepthOverlayDot3D(cam, camPos, pxToWorld, lastP3Result.detectedLandmarksWorld[i], 3.8f, lmDotCol, 0.0032f);
                 }
             }
         }
 
-        // 2d. Vẽ ĐÁM MÂY 3D QUẦN MẪU ĐÃ ĐĂNG KÝ LÊN QUẦN MỚI (P4 - Xanh chanh)
+        // 2d. Đám mây 3D quần mẫu đã đăng ký (P4)
         if (showP4RegisteredCloud3D && activeTrajectoryMethod == "P4" && lastP4Result != null && lastP4Result.registeredCloudWorld.Count > 0)
         {
             Color cloudHalo = new Color(0.05f, 0.16f, 0.02f, 0.80f);
@@ -10108,16 +13027,13 @@ public class DobotCR10AIKController : MonoBehaviour
             int step = Mathf.Max(1, total / 420);
             for (int i = 0; i < total; i += step)
             {
-                Vector3 sp = cam.WorldToScreenPoint(lastP4Result.registeredCloudWorld[i]);
-                if (sp.z <= 0.05f) continue;
-                float gx = sp.x;
-                float gy = Screen.height - sp.y;
-                DrawGuiSolidRect(new Rect(gx - 2.6f, gy - 2.6f, 5.2f, 5.2f), cloudHalo);
-                DrawGuiSolidRect(new Rect(gx - 1.7f, gy - 1.7f, 3.4f, 3.4f), cloudCore);
+                Vector3 p = lastP4Result.registeredCloudWorld[i];
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, p, 2.5f, cloudHalo, 0.0022f);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, p, 1.7f, cloudCore, 0.0026f);
             }
         }
 
-        // 3. Vẽ ĐƯỜNG QUỸ ĐẠO (Đứt cam = Quét qua lại / TẮT SÚNG) và ĐƯỜNG PHUN (Cyan nét liền = BẬT SÚNG) ĐỘC LẬP NHAU
+        // 3. ĐƯỜNG QUỸ ĐẠO (Đứt cam = Tắt súng) và ĐƯỜNG PHUN (Cyan nét liền = Bật súng) — BỊ TAY ROBOT CHE THEO ĐÚNG ĐỘ SÂU 3D!
         if ((showGizmos || showTurnaroundConnectors) && waypoints != null && waypoints.Count > 1)
         {
             Color trajHalo = new Color(0.02f, 0.12f, 0.20f, 0.85f);
@@ -10128,36 +13044,30 @@ public class DobotCR10AIKController : MonoBehaviour
                 bool isSameSeg = string.IsNullOrEmpty(waypoints[i].segmentName) || string.IsNullOrEmpty(waypoints[i + 1].segmentName) || waypoints[i].segmentName == waypoints[i + 1].segmentName;
                 bool isSprayOnMove = waypoints[i + 1].sprayOn && isSameSeg && Vector3.Distance(waypoints[i].targetPosGlobal_mm, waypoints[i + 1].targetPosGlobal_mm) <= sprayJumpThresholdMm;
 
-                Vector3 s0 = cam.WorldToScreenPoint(waypoints[i].targetPosWorld_m);
-                Vector3 s1 = cam.WorldToScreenPoint(waypoints[i + 1].targetPosWorld_m);
-                if (s0.z <= 0.05f || s1.z <= 0.05f) continue;
-
-                Vector2 p0 = new Vector2(s0.x, Screen.height - s0.y);
-                Vector2 p1 = new Vector2(s1.x, Screen.height - s1.y);
+                Vector3 w0 = waypoints[i].targetPosWorld_m;
+                Vector3 w1 = waypoints[i + 1].targetPosWorld_m;
                 if (isSprayOnMove)
                 {
                     if (showGizmos)
                     {
-                        DrawGuiLine2D(p0, p1, trajHalo, 4.2f);
-                        DrawGuiLine2D(p0, p1, trajCol, 2.6f);
+                        AddDepthOverlaySegment3D(camPos, pxToWorld, w0, w1, trajHalo, 4.0f, 0.0022f);
+                        AddDepthOverlaySegment3D(camPos, pxToWorld, w0, w1, trajCol, 2.4f, 0.0027f);
                     }
                     else if (showTurnaroundConnectors)
                     {
-                        // Khi người dùng tắt Đường phun và chỉ bật Đường quỹ đạo -> vẫn thấy toàn bộ lộ trình quét liên tục
-                        DrawGuiDashedLine2D(p0, p1, offConnectorCol, 1.8f, 6f, 5f);
+                        AddDepthOverlayDashedSegment3D(camPos, pxToWorld, w0, w1, offConnectorCol, 1.8f, 0.011f, 0.009f, 0.0025f);
                     }
                 }
                 else if (showTurnaroundConnectors)
                 {
-                    DrawGuiDashedLine2D(p0, p1, offConnectorCol, 1.9f, 6f, 5f);
+                    AddDepthOverlayDashedSegment3D(camPos, pxToWorld, w0, w1, offConnectorCol, 1.9f, 0.011f, 0.009f, 0.0025f);
                 }
             }
         }
 
-        // 4. Vẽ 12 Điểm Mốc Giải Phẫu AI (Landmarks 3D) + Khung Xương + Nhãn Tên Không Chồng Lấp
+        // 4. 12 Điểm Mốc Giải Phẫu AI + Khung Xương — BỊ TAY ROBOT CHE THEO ĐÚNG ĐỘ SÂU 3D!
         if (showLandmarks3D && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
         {
-            // Vẽ các đoạn nối khung xương giải phẫu (Viền tối + Lõi Hồng Tím Sáng)
             Color boneHalo = new Color(0.16f, 0.02f, 0.14f, 0.88f);
             Color boneCol = new Color(1.0f, 0.35f, 0.88f, 0.92f);
             int numPairs = LandmarkSkeletonPairs.GetLength(0);
@@ -10167,68 +13077,194 @@ public class DobotCR10AIKController : MonoBehaviour
                 int i1 = LandmarkSkeletonPairs[k, 1];
                 if (i0 < landmarksWorldPos.Count && i1 < landmarksWorldPos.Count)
                 {
-                    Vector3 s0 = cam.WorldToScreenPoint(landmarksWorldPos[i0]);
-                    Vector3 s1 = cam.WorldToScreenPoint(landmarksWorldPos[i1]);
-                    if (s0.z > 0.05f && s1.z > 0.05f)
-                    {
-                        Vector2 p0 = new Vector2(s0.x, Screen.height - s0.y);
-                        Vector2 p1 = new Vector2(s1.x, Screen.height - s1.y);
-                        DrawGuiLine2D(p0, p1, boneHalo, 4.2f);
-                        DrawGuiLine2D(p0, p1, boneCol, 2.4f);
-                    }
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, landmarksWorldPos[i0], landmarksWorldPos[i1], boneHalo, 4.0f, 0.0028f);
+                    AddDepthOverlaySegment3D(camPos, pxToWorld, landmarksWorldPos[i0], landmarksWorldPos[i1], boneCol, 2.3f, 0.0032f);
                 }
             }
-
-            // Vẽ từng điểm mốc và nhãn tọa độ 3D (bố trí lệch thông minh để các nhãn 4/6 và 5/7 không đè lên nhau)
+            Color dotOuter = new Color(0.05f, 0.05f, 0.08f, 0.98f);
+            Color dotInner = new Color(1.0f, 0.88f, 0.12f, 1.0f);
             for (int i = 0; i < landmarksWorldPos.Count; i++)
             {
-                Vector3 sp = cam.WorldToScreenPoint(landmarksWorldPos[i]);
-                if (sp.z <= 0.05f) continue;
-                float gx = sp.x;
-                float gy = Screen.height - sp.y;
-
-                DrawGuiSolidRect(new Rect(gx - 6f, gy - 6f, 12f, 12f), new Color(0.05f, 0.05f, 0.08f, 0.98f));
-                DrawGuiSolidRect(new Rect(gx - 4f, gy - 4f, 8f, 8f), new Color(1.0f, 0.88f, 0.12f, 1.0f));
-
-                if (showLandmarkLabels && i < landmarks3D.Count)
-                {
-                    string lbl = $"{landmarks3D[i].label_vi} (Z:{landmarks3D[i].z_mm:F0})";
-                    float offX = 9f;
-                    float offY = -9f;
-                    // Chống đè nhãn giữa Đùi trái (4) & Gối trái (6), Đùi phải (5) & Gối phải (7), và các mốc gấu quần (8,9,10,11)
-                    if (i == 4) { offX = 9f; offY = -19f; }
-                    else if (i == 6) { offX = -152f; offY = -19f; }
-                    else if (i == 5) { offX = 9f; offY = -19f; }
-                    else if (i == 7) { offX = -152f; offY = 4f; }
-                    else if (i == 8) { offX = -152f; offY = -18f; }
-                    else if (i == 9) { offX = -152f; offY = 3f; }
-                    else if (i == 10) { offX = -152f; offY = -18f; }
-                    else if (i == 11) { offX = -152f; offY = 3f; }
-
-                    Rect bgRect = new Rect(gx + offX, gy + offY, 144f, 18f);
-                    DrawGuiSolidRect(bgRect, new Color(0.04f, 0.08f, 0.15f, 0.90f));
-                    GUI.Label(new Rect(bgRect.x + 3f, bgRect.y, 140f, 18f), lbl, AntigravityUITheme.StyleLabelCyan);
-                }
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, landmarksWorldPos[i], 5.6f, dotOuter, 0.0034f);
+                AddDepthOverlayDot3D(cam, camPos, pxToWorld, landmarksWorldPos[i], 3.8f, dotInner, 0.0038f);
             }
         }
 
-        // 5. Vẽ ĐƯỜNG VIỀN MÀU ĐỎ BAO QUANH TỪNG VÙNG CẦN VÁ trực tiếp lên GAME VIEW
+        // 5. Đường viền màu đỏ vùng cần vá + tia bù góc
         if (showHoleRegionOutlines3D && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
         {
             Color redOutlineHalo = new Color(0.24f, 0.01f, 0.01f, 0.94f);
             Color redOutlineCore = new Color(1.00f, 0.10f, 0.08f, 1.00f);
-
-            float topGy = float.MaxValue;
-            Vector2 badgeAnchor = Vector2.zero;
-
             for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
             {
                 List<Vector3> loop = holeRegionOutlinesWorld[r];
                 if (loop == null || loop.Count < 3) continue;
+                AddDepthOverlayLoop3D(camPos, pxToWorld, loop, redOutlineHalo, 4.6f, true, 0.0024f);
+                AddDepthOverlayLoop3D(camPos, pxToWorld, loop, redOutlineCore, 2.6f, true, 0.0028f);
+            }
+        }
+        if (showGunTiltVectors3D && interfaceTab == 7 &&
+            compensatedSurfacePointsWorld != null && compensatedSurfacePointsWorld.Count > 0)
+        {
+            int cCount = compensatedSurfacePointsWorld.Count;
+            int drawStep = Mathf.Max(1, cCount / 400);
+            Color tiltYellow = new Color(1.00f, 0.88f, 0.15f, 0.90f);
+            for (int i = 0; i < cCount; i += drawStep)
+            {
+                if (i >= gunTiltNormalsWorld.Count || (i % (drawStep * 5) != 0)) continue;
+                Vector3 wp = compensatedSurfacePointsWorld[i];
+                AddDepthOverlaySegment3D(camPos, pxToWorld, wp, wp + gunTiltNormalsWorld[i] * 0.032f, tiltYellow, 1.8f, 0.0025f);
+            }
+        }
 
-                DrawWorldLoopInGUI(cam, loop, redOutlineHalo, 4.8f, true);
-                DrawWorldLoopInGUI(cam, loop, redOutlineCore, 2.8f, true);
+        depthOverlayMesh.Clear();
+        if (overlayVerts.Count > 0)
+        {
+            depthOverlayMesh.SetVertices(overlayVerts);
+            depthOverlayMesh.SetColors(overlayCols);
+            depthOverlayMesh.SetTriangles(overlayTris, 0, true);
+        }
+    }
 
+    private void DrawViewportTrajectoryProgressHud()
+    {
+        bool showHud = isPlaying || isMovingToHome || (waypoints != null && waypoints.Count > 0 && currentWaypointIndex > 0);
+        if (!showHud) return;
+
+        float dockW = WorkbenchDockVisible ? WorkbenchDockWidth : 0f;
+        float viewW = Mathf.Max(220f, Screen.width - dockW);
+        float hudW = Mathf.Min(300f, viewW - 24f);
+        float hudH = 36f;
+        float hudX = 12f;
+        // Đặt gọn ngay phía trên thanh công cụ viewport đáy (cao 32px + 8px lề = 40px)
+        float hudY = Mathf.Max(WorkbenchHeaderHeight + 48f, Screen.height - 40f - hudH - 6f);
+
+        Rect box = new Rect(hudX, hudY, hudW, hudH);
+        DraggableUIManager.RegisterBlockingRect(box);
+        DrawGuiSolidRect(box, new Color(0.06f, 0.08f, 0.12f, 0.90f));
+        DrawGuiRectOutline2D(box, new Color(0.24f, 0.56f, 0.78f, 0.78f), 1f);
+
+        int wpTotal = waypoints != null ? Mathf.Max(1, waypoints.Count) : 1;
+        int wpCur = waypoints != null && waypoints.Count > 0 ? Mathf.Clamp(currentWaypointIndex, 0, waypoints.Count - 1) : 0;
+        float ratio = isMovingToHome ? 1f : (waypoints != null && waypoints.Count > 1 ? (float)wpCur / (waypoints.Count - 1) : 0f);
+        int pct = Mathf.RoundToInt(ratio * 100f);
+        float distMm = (waypoints != null && waypoints.Count > 0) ? waypoints[wpCur].distance_mm : 0f;
+
+        string leftText = isMovingToHome
+            ? "Đang tự động về Home (0°)..."
+            : $"Điểm: {wpCur + 1}/{wpTotal} ({pct}%) | {distMm:F0} mm";
+        string tagText = isMovingToHome ? "HOME" : (isSprayingNow ? "PHUN" : (isPlaying ? "CHẠY" : "TẠM DỪNG"));
+        GUIStyle tagStyle = isMovingToHome
+            ? AntigravityUITheme.StyleLabelYellow
+            : (isSprayingNow ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelCyan);
+
+        GUI.Label(new Rect(box.x + 8f, box.y + 3f, box.width - 74f, 16f), leftText, AntigravityUITheme.StyleLabelCyan);
+        GUI.Label(new Rect(box.xMax - 64f, box.y + 3f, 58f, 16f), tagText, tagStyle);
+
+        Rect track = new Rect(box.x + 8f, box.y + 22f, box.width - 16f, 8f);
+        DrawGuiSolidRect(track, new Color(0.14f, 0.18f, 0.24f, 1f));
+        Color fillCol = isMovingToHome
+            ? new Color(1.0f, 0.78f, 0.18f, 0.95f)
+            : (isSprayingNow ? new Color(0.18f, 0.90f, 0.52f, 0.95f) : new Color(0.15f, 0.76f, 0.98f, 0.95f));
+        DrawGuiSolidRect(new Rect(track.x + 1f, track.y + 1f, Mathf.Max(0f, (track.width - 2f) * Mathf.Clamp01(ratio)), track.height - 2f), fillCol);
+    }
+
+    private void DrawViewport3DOverlaysInGUI()
+    {
+        if (Event.current == null || Event.current.type != EventType.Repaint) return;
+
+        Camera cam = GetActiveViewportCamera();
+        if (cam == null) return;
+
+        EnsureCanonicalJeansCanvasInitialized();
+
+        // Tự động đồng bộ 12 Điểm Mốc & Đường Bao Segment theo đúng mẫu Point Cloud đang hiển thị trên màn hình!
+        PLYDirectLoader plyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        string activeCloudSample = (plyLoader != null && !string.IsNullOrEmpty(plyLoader.currentLoadedSampleName))
+            ? plyLoader.currentLoadedSampleName
+            : selectedSampleName;
+        if (activeCloudSample == "full_cloud_world") activeCloudSample = "pcl_25";
+
+        if (!string.IsNullOrEmpty(activeCloudSample) &&
+            activeCloudSample != lastMissingLandmarksSampleName &&
+            (loadedLandmarksSampleName != activeCloudSample || landmarks3D == null || landmarks3D.Count == 0))
+        {
+            LoadLandmarksAndSegmentationForSample(activeCloudSample, autoSwitchSprayTemplate: false, exactJsonPath: null, generateTrajectory: false);
+        }
+
+        // Lưu ý: Toàn bộ đường hình học 3D (Segment, Vùng phun, Quỹ đạo, 12 Mốc & Khung xương, Vùng vá) đã được vẽ bằng
+        // Mesh 3D có kiểm tra Z-Buffer trong RebuildDepthTested3DOverlayMesh() để bị tay robot che chính xác!
+        // Hàm OnGUI này chỉ vẽ các NHÃN CHỮ 2D (tự ẩn khi điểm neo bị cánh tay robot che khuất).
+
+        // 1. Nhãn tên Đường Bao Segment (ẩn nếu bị tay robot che)
+        if (showSegmentationContour3D && garmentContourWorld != null && garmentContourWorld.Count > 2)
+        {
+            int cCount = garmentContourWorld.Count;
+            float minGy = float.MaxValue;
+            Vector2 bestSegPt = Vector2.zero;
+            Vector3 bestSegWorld = Vector3.zero;
+            for (int i = 0; i < cCount; i++)
+            {
+                Vector3 sp = cam.WorldToScreenPoint(garmentContourWorld[i]);
+                if (sp.z > 0.05f)
+                {
+                    float gy = Screen.height - sp.y;
+                    if (gy < minGy)
+                    {
+                        minGy = gy;
+                        bestSegPt = new Vector2(sp.x, gy);
+                        bestSegWorld = garmentContourWorld[i];
+                    }
+                }
+            }
+            if (minGy < float.MaxValue && !IsWorldPointOccludedByRobotArm(cam, bestSegWorld))
+            {
+                Rect segBadge = new Rect(bestSegPt.x - 85f, bestSegPt.y - 24f, 185f, 19f);
+                DrawGuiSolidRect(segBadge, new Color(0.02f, 0.22f, 0.12f, 0.92f));
+                GUI.Label(new Rect(segBadge.x + 6f, segBadge.y + 1f, segBadge.width, 18f), $"SEGMENT ({loadedLandmarksSampleName})", AntigravityUITheme.StyleLabelGreen);
+            }
+        }
+
+        // 2. Nhãn tên 12 Điểm Mốc Giải Phẫu AI (tự ẩn khi bị cánh tay robot che!)
+        if (showLandmarks3D && showLandmarkLabels && landmarksWorldPos != null && landmarksWorldPos.Count >= 12)
+        {
+            for (int i = 0; i < landmarksWorldPos.Count && i < landmarks3D.Count; i++)
+            {
+                Vector3 wPos = landmarksWorldPos[i];
+                Vector3 sp = cam.WorldToScreenPoint(wPos);
+                if (sp.z <= 0.05f) continue;
+                if (IsWorldPointOccludedByRobotArm(cam, wPos)) continue;
+
+                float gx = sp.x;
+                float gy = Screen.height - sp.y;
+                string lbl = $"{landmarks3D[i].label_vi} (Z:{landmarks3D[i].z_mm:F0})";
+                float offX = 9f;
+                float offY = -9f;
+                if (i == 4) { offX = 9f; offY = -19f; }
+                else if (i == 6) { offX = -152f; offY = -19f; }
+                else if (i == 5) { offX = 9f; offY = -19f; }
+                else if (i == 7) { offX = -152f; offY = 4f; }
+                else if (i == 8) { offX = -152f; offY = -18f; }
+                else if (i == 9) { offX = -152f; offY = 3f; }
+                else if (i == 10) { offX = -152f; offY = -18f; }
+                else if (i == 11) { offX = -152f; offY = 3f; }
+
+                Rect bgRect = new Rect(gx + offX, gy + offY, 144f, 18f);
+                DrawGuiSolidRect(bgRect, new Color(0.04f, 0.08f, 0.15f, 0.90f));
+                GUI.Label(new Rect(bgRect.x + 3f, bgRect.y, 140f, 18f), lbl, AntigravityUITheme.StyleLabelCyan);
+            }
+        }
+
+        // 3. Nhãn vùng cần vá khi mở Tab Vá lỗ
+        if (showHoleRegionOutlines3D && interfaceTab == 7 && holeRegionOutlinesWorld != null && holeRegionOutlinesWorld.Count > 0)
+        {
+            float topGy = float.MaxValue;
+            Vector2 badgeAnchor = Vector2.zero;
+            Vector3 badgeWorld = Vector3.zero;
+            for (int r = 0; r < holeRegionOutlinesWorld.Count; r++)
+            {
+                List<Vector3> loop = holeRegionOutlinesWorld[r];
+                if (loop == null || loop.Count < 3) continue;
                 for (int k = 0; k < loop.Count; k += Mathf.Max(1, loop.Count / 6))
                 {
                     Vector3 sp = cam.WorldToScreenPoint(loop[k]);
@@ -10238,11 +13274,11 @@ public class DobotCR10AIKController : MonoBehaviour
                     {
                         topGy = gy;
                         badgeAnchor = new Vector2(sp.x, gy);
+                        badgeWorld = loop[k];
                     }
                 }
             }
-
-            if (interfaceTab == 7 && topGy < float.MaxValue)
+            if (topGy < float.MaxValue && !IsWorldPointOccludedByRobotArm(cam, badgeWorld))
             {
                 string[] algoBadges = { "K-NN MLS", "TPS RBF", "Laplacian PDE", "Gun Tilt", "Đối xứng" };
                 string aTag = algoBadges[Mathf.Clamp(selectedOcclusionAlgorithm, 0, algoBadges.Length - 1)];
@@ -10253,30 +13289,7 @@ public class DobotCR10AIKController : MonoBehaviour
             }
         }
 
-        // 5b. Tia hướng súng phun bù góc (Vàng) khi mở Tab Vá lỗ
-        if (showGunTiltVectors3D && interfaceTab == 7 &&
-            compensatedSurfacePointsWorld != null && compensatedSurfacePointsWorld.Count > 0)
-        {
-            int cCount = compensatedSurfacePointsWorld.Count;
-            int drawStep = Mathf.Max(1, cCount / 400);
-            Color tiltYellow = new Color(1.00f, 0.88f, 0.15f, 0.90f);
-
-            for (int i = 0; i < cCount; i += drawStep)
-            {
-                if (i >= gunTiltNormalsWorld.Count || (i % (drawStep * 5) != 0)) continue;
-                Vector3 wp = compensatedSurfacePointsWorld[i];
-                Vector3 sp = cam.WorldToScreenPoint(wp);
-                if (sp.z <= 0.05f) continue;
-                Vector3 tipW = wp + gunTiltNormalsWorld[i] * 0.032f;
-                Vector3 spTip = cam.WorldToScreenPoint(tipW);
-                if (spTip.z > 0.05f)
-                {
-                    DrawGuiLine2D(new Vector2(sp.x, Screen.height - sp.y), new Vector2(spTip.x, Screen.height - spTip.y), tiltYellow, 1.8f);
-                }
-            }
-        }
-
-        // 6. Khi đang ở bảng Hiệu chuẩn Camera: vẽ hệ trục XYZ của Camera (X Đỏ, Y Xanh lá, Z Xanh dương) + trục chiếu xuống bàn
+        // 4. Khi đang ở bảng Hiệu chuẩn Camera: vẽ hệ trục XYZ của Camera (X Đỏ, Y Xanh lá, Z Xanh dương)
         if (ShouldDrawCameraAxes3D())
         {
             DrawCameraCalibrationAxesInGUI(cam);
@@ -10966,6 +13979,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (!p1ConfigInitializedFromTech)
         {
             p1ConfigInitializedFromTech = true;
+            p1Config.zHeightMode = TrajectoryEvaluationEngine.P1ZHeightMode.Flat2DPlane;
             p1Config.sprayDistanceDMm = customDrawZOffsetMm;
             // Giữ co biên mặc định 6 mm (an toàn cho cả vùng vẽ nhỏ lẫn 2 ống quần) và chồng lấn 50%
             p1Config.erosionEMm = 6f;
@@ -11205,29 +14219,9 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        // 8. Phân tách ô lồi Boustrophedon (Bước 5), 3 lớp hiển thị độc lập & Tự sinh lại
+        // 8. Phân tách ô lồi Boustrophedon (Bước 5) & Tự sinh lại
         bool newBoust = GUILayout.Toggle(p1Config.useBoustrophedonSplit, " Phân tách vùng lõm thành ô lồi (Boustrophedon)", AntigravityUITheme.StyleToggle);
         if (newBoust != p1Config.useBoustrophedonSplit) { p1Config.useBoustrophedonSplit = newBoust; changed = true; }
-
-        GUILayout.Label("Tách lớp hiển thị (bật/tắt độc lập):", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(showSprayZones3D ? "Chỗ phun: BẬT" : "Chỗ phun: TẮT",
-            showSprayZones3D ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showSprayZones3D = !showSprayZones3D;
-        }
-        if (GUILayout.Button(showTurnaroundConnectors ? "Quỹ đạo: BẬT" : "Quỹ đạo: TẮT",
-            showTurnaroundConnectors ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showTurnaroundConnectors = !showTurnaroundConnectors;
-        }
-        if (GUILayout.Button(showGizmos ? "Đường phun: BẬT" : "Đường phun: TẮT",
-            showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showGizmos = !showGizmos;
-            MarkSettingsDirty();
-        }
-        GUILayout.EndHorizontal();
 
         p1AutoRegenerateOnChange = GUILayout.Toggle(p1AutoRegenerateOnChange, " Tự sinh lại đường quỹ đạo khi chỉnh thông số", AntigravityUITheme.StyleToggle);
 
@@ -11277,6 +14271,7 @@ public class DobotCR10AIKController : MonoBehaviour
         if (!p2ConfigInitializedFromTech)
         {
             p2ConfigInitializedFromTech = true;
+            p2Config.gunOrientation = TrajectoryEvaluationEngine.P2GunOrientationMode.FlatPlane2D;
             p2Config.sprayDistanceDMm = customDrawZOffsetMm;
             if (sprayTechParams != null)
             {
@@ -11480,31 +14475,7 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        // 7. Công tắc phân biệt & bật/tắt độc lập trong View: Chỗ cần phun vs Đường quỹ đạo (Tắt súng) vs Đường phun (Bật súng)
-        GUILayout.Space(3);
-        GUILayout.Label("Phân biệt hiển thị (Chỗ cần phun / Đường quỹ đạo / Đường phun):", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(showSprayZones3D ? "Chỗ phun: BẬT" : "Chỗ phun: TẮT",
-            showSprayZones3D ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showSprayZones3D = !showSprayZones3D;
-            MarkSettingsDirty();
-        }
-        if (GUILayout.Button(showTurnaroundConnectors ? "Đường quỹ đạo: BẬT" : "Đường quỹ đạo: TẮT",
-            showTurnaroundConnectors ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showTurnaroundConnectors = !showTurnaroundConnectors;
-        }
-        if (GUILayout.Button(showGizmos ? "Đường phun: BẬT" : "Đường phun: TẮT",
-            showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showGizmos = !showGizmos;
-            MarkSettingsDirty();
-        }
-        GUILayout.EndHorizontal();
-        showP2SkeletonAxis = GUILayout.Toggle(showP2SkeletonAxis, " Hiện trục giữa ống quần Skeleton (Hồng tím)", AntigravityUITheme.StyleToggle);
-
-        // 8. Tự cập nhật & Nút sinh lại quỹ đạo P2
+        // 7. Tự cập nhật & Nút sinh lại quỹ đạo P2
         p2AutoRegenerateOnChange = GUILayout.Toggle(p2AutoRegenerateOnChange, " Tự sinh lại đường quỹ đạo khi chỉnh thông số", AntigravityUITheme.StyleToggle);
 
         GUILayout.BeginHorizontal();
@@ -11646,35 +14617,14 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.EndHorizontal();
 
         // 6. Tùy chọn vùng kín & cắt biên quần
-        bool newFill3 = GUILayout.Toggle(p3Config.fillClosedDrawnRegions, " Phủ lượt phun trong hình kín (Tròn/Vuông/Đa giác)", AntigravityUITheme.StyleToggle);
+        float p3BrushStep = Mathf.Clamp(sprayWidthMm * 0.75f, 2f, 55f);
+        bool newFill3 = GUILayout.Toggle(p3Config.fillClosedDrawnRegions, $" Phủ kín hình kín theo cỡ cọ ({sprayWidthMm:F0}mm -> bước {p3BrushStep:F1}mm)", AntigravityUITheme.StyleToggle);
         if (newFill3 != p3Config.fillClosedDrawnRegions) { p3Config.fillClosedDrawnRegions = newFill3; changed = true; }
 
         bool newClip3 = GUILayout.Toggle(p3Config.clipToGarmentContour, " Cắt điểm tràn ngoài đường bao quần (chống phun bàn)", AntigravityUITheme.StyleToggle);
         if (newClip3 != p3Config.clipToGarmentContour) { p3Config.clipToGarmentContour = newClip3; changed = true; }
 
-        // 7. 3 lớp hiển thị độc lập + Lưới 32 tam giác Barycentric
-        GUILayout.Label("Tách lớp hiển thị (bật/tắt độc lập):", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(showSprayZones3D ? "Chỗ phun: BẬT" : "Chỗ phun: TẮT",
-            showSprayZones3D ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showSprayZones3D = !showSprayZones3D;
-        }
-        if (GUILayout.Button(showTurnaroundConnectors ? "Quỹ đạo: BẬT" : "Quỹ đạo: TẮT",
-            showTurnaroundConnectors ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showTurnaroundConnectors = !showTurnaroundConnectors;
-        }
-        if (GUILayout.Button(showGizmos ? "Đường phun: BẬT" : "Đường phun: TẮT",
-            showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showGizmos = !showGizmos;
-            MarkSettingsDirty();
-        }
-        GUILayout.EndHorizontal();
-        showP3TriangulationMesh = GUILayout.Toggle(showP3TriangulationMesh, " Hiện lưới 32 tam giác Barycentric (Xanh ngọc / Đỏ nếu đảo)", AntigravityUITheme.StyleToggle);
-
-        // 8. Tự cập nhật & Nút sinh lại quỹ đạo P3
+        // 7. Tự cập nhật & Nút sinh lại quỹ đạo P3
         p3AutoRegenerateOnChange = GUILayout.Toggle(p3AutoRegenerateOnChange, " Tự sinh lại đường quỹ đạo khi chỉnh thông số", AntigravityUITheme.StyleToggle);
 
         GUILayout.BeginHorizontal();
@@ -11891,35 +14841,14 @@ public class DobotCR10AIKController : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
-        bool newFill4 = GUILayout.Toggle(p4Config.fillClosedDrawnRegions, " Phủ lượt phun trong hình kín (Tròn/Vuông/Đa giác)", AntigravityUITheme.StyleToggle);
+        float p4BrushStep = Mathf.Clamp(sprayWidthMm * 0.75f, 2f, 55f);
+        bool newFill4 = GUILayout.Toggle(p4Config.fillClosedDrawnRegions, $" Phủ kín hình kín theo cỡ cọ ({sprayWidthMm:F0}mm -> bước {p4BrushStep:F1}mm)", AntigravityUITheme.StyleToggle);
         if (newFill4 != p4Config.fillClosedDrawnRegions) { p4Config.fillClosedDrawnRegions = newFill4; changed = true; }
 
         bool newClip4 = GUILayout.Toggle(p4Config.clipToGarmentContour, " Cắt điểm tràn ngoài đường bao quần", AntigravityUITheme.StyleToggle);
         if (newClip4 != p4Config.clipToGarmentContour) { p4Config.clipToGarmentContour = newClip4; changed = true; }
 
-        // 7. 3 lớp hiển thị độc lập + Đám mây đăng ký P4
-        GUILayout.Label("Tách lớp hiển thị (bật/tắt độc lập):", AntigravityUITheme.StyleLabelMuted);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(showSprayZones3D ? "Chỗ phun: BẬT" : "Chỗ phun: TẮT",
-            showSprayZones3D ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showSprayZones3D = !showSprayZones3D;
-        }
-        if (GUILayout.Button(showTurnaroundConnectors ? "Quỹ đạo: BẬT" : "Quỹ đạo: TẮT",
-            showTurnaroundConnectors ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showTurnaroundConnectors = !showTurnaroundConnectors;
-        }
-        if (GUILayout.Button(showGizmos ? "Đường phun: BẬT" : "Đường phun: TẮT",
-            showGizmos ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton, GUILayout.Height(22)))
-        {
-            showGizmos = !showGizmos;
-            MarkSettingsDirty();
-        }
-        GUILayout.EndHorizontal();
-        showP4RegisteredCloud3D = GUILayout.Toggle(showP4RegisteredCloud3D, " Hiện đám mây 3D đã đăng ký (Xanh chanh)", AntigravityUITheme.StyleToggle);
-
-        // 8. Tự cập nhật & Nút sinh lại quỹ đạo P4
+        // 7. Tự cập nhật & Nút sinh lại quỹ đạo P4
         p4AutoRegenerateOnChange = GUILayout.Toggle(p4AutoRegenerateOnChange, " Tự sinh lại đường quỹ đạo khi chỉnh thông số", AntigravityUITheme.StyleToggle);
 
         GUILayout.BeginHorizontal();
@@ -12617,9 +15546,8 @@ public class DobotCR10AIKController : MonoBehaviour
 
     public void ImportGroundTruthCsvWithDialog()
     {
-#if UNITY_EDITOR
         string defaultDir = Path.Combine(Application.dataPath, "..", "output_drawing");
-        string path = UnityEditor.EditorUtility.OpenFilePanel("Chọn file Ground Truth (.csv chứa X_mm, Y_mm, Z_mm)", defaultDir, "csv");
+        string path = NativeFileDialog.OpenFile("Chọn file Ground Truth (.csv chứa X_mm, Y_mm, Z_mm)", defaultDir, "csv");
         if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
         try
         {
@@ -12665,9 +15593,6 @@ public class DobotCR10AIKController : MonoBehaviour
         {
             comparisonStatusMsg = $"Lỗi đọc Ground Truth CSV: {ex.Message}";
         }
-#else
-        comparisonStatusMsg = "Hộp thoại nạp file Ground Truth chỉ hỗ trợ trong Unity Editor.";
-#endif
     }
 
     public void ClearGroundTruth()
@@ -12717,7 +15642,8 @@ public class DobotCR10AIKController : MonoBehaviour
         }
 
         List<List<Vector2>> canonicalStrokes = GetCanonicalTemplateStrokesForMethods();
-        if (canonicalPatternStrokes.Count == 0 && canonicalStrokes != null && canonicalStrokes.Count > 0)
+        // KHÔNG copy nét viền tạm của customDrawnRegions vào canonicalPatternStrokes (gây mất fill & lệch hình khi đổi phôi!)
+        if (!HasCustomDrawnRegions2D && canonicalPatternStrokes.Count == 0 && canonicalStrokes != null && canonicalStrokes.Count > 0)
         {
             for (int s = 0; s < canonicalStrokes.Count; s++)
             {
@@ -12758,6 +15684,11 @@ public class DobotCR10AIKController : MonoBehaviour
             if (regRes > resLimit && !forceBypassSafetyInterlock)
             {
                 if (lastP4Result != null) lastP4Result.rejectedByResidualGate = true;
+                isPlaying = false;
+                SetSprayState(false);
+                ClearInkTrail();
+                if (waypoints != null) waypoints.Clear();
+                currentWaypointIndex = 0;
                 ProjectWaypointsOntoActiveCameraCanvas(null, activeSample);
                 comparisonStatusMsg = $"[CHẶN AN TOÀN P4] Sai số dư đăng ký = {regRes:F2} mm > ngưỡng {resLimit:F1} mm. Dừng nạp & báo kỹ sư!";
                 return;
@@ -13024,22 +15955,6 @@ public class DobotCR10AIKController : MonoBehaviour
             showFullscreenEvaluationReport = true;
         }
 
-        bool prevHm = showDepositionHeatmap3D;
-        showDepositionHeatmap3D = GUILayout.Toggle(showDepositionHeatmap3D, " Hiện Heatmap phun Gauss 3D", AntigravityUITheme.StyleToggle);
-        if (showDepositionHeatmap3D != prevHm)
-        {
-            PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
-            if (showDepositionHeatmap3D && waypoints.Count >= 2)
-            {
-                TrajectoryEvaluationEngine.SimulateGaussianDepositionAndHeatmap(
-                    waypoints, this, pl, sprayTechParams, true, ref depositionHeatmapObj, out _, out _, out _);
-            }
-            else if (depositionHeatmapObj != null)
-            {
-                depositionHeatmapObj.SetActive(false);
-            }
-        }
-
         GUILayout.Label(comparisonStatusMsg, AntigravityUITheme.StyleLabelCyan);
 
         if (comparisonResults.Count > 0)
@@ -13099,21 +16014,6 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.Space(6);
         GUILayout.Label("3. KIỂM CHỨNG 3D", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
-
-        bool prevTbl = showPhysicalWorktable;
-        showPhysicalWorktable = GUILayout.Toggle(showPhysicalWorktable, " Hiện bàn thao tác (Collider)", AntigravityUITheme.StyleToggle);
-        if (showPhysicalWorktable != prevTbl)
-        {
-            if (showPhysicalWorktable)
-            {
-                PLYDirectLoader pl = FindAnyObjectByType<PLYDirectLoader>();
-                worktableObj = TrajectoryEvaluationEngine.EnsurePhysicalWorktable(null, pl != null ? pl.estimatedTableY : 0f);
-            }
-            else if (worktableObj != null)
-            {
-                worktableObj.SetActive(false);
-            }
-        }
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Bật khuôn đứng 3D", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(28)))
@@ -13545,7 +16445,7 @@ public class DobotCR10AIKController : MonoBehaviour
         GUILayout.Label(calib.calibrationStatus, calib.isCalibrationValid ? AntigravityUITheme.StyleLabelGreen : AntigravityUITheme.StyleLabelYellow);
 
         GUILayout.Space(6);
-        GUILayout.Label("0. GÓC NHÌN & MÔ PHỎNG CAMERA ZIVID", AntigravityUITheme.StyleSectionLabel);
+        GUILayout.Label("0. GÓC NHÌN & ỐNG KÍNH CAMERA ZIVID", AntigravityUITheme.StyleSectionLabel);
         GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle());
         GUILayout.BeginHorizontal();
         GUIStyle povBtnSt = (rcc != null && rcc.isZividCameraView) ? AntigravityUITheme.StylePrimaryButton : AntigravityUITheme.StyleButton;
@@ -13555,24 +16455,12 @@ public class DobotCR10AIKController : MonoBehaviour
         if (GUILayout.Button("Về 3/4", AntigravityUITheme.StyleButton, GUILayout.Width(64), GUILayout.Height(26))) { if (rcc != null) rcc.SetPresetPerspective(); }
         GUILayout.EndHorizontal();
 
-        showCameraAxesInCalibration = GUILayout.Toggle(showCameraAxesInCalibration, " Hiện trục XYZ Camera (X: Đỏ, Y: Xanh lá, Z: Xanh dương)", AntigravityUITheme.StyleToggle);
-
         if (rigCam != null)
         {
-            bool prevRigVis = rigCam.showRuntimeRigVisual;
-            bool prevFovVis = rigCam.showRuntimeFovFrustum;
-            rigCam.showRuntimeRigVisual = GUILayout.Toggle(rigCam.showRuntimeRigVisual, " Hiện mô hình Camera Zivid & giá treo 3D", AntigravityUITheme.StyleToggle);
-            if (rigCam.showRuntimeRigVisual)
-            {
-                rigCam.showRuntimeFovFrustum = GUILayout.Toggle(rigCam.showRuntimeFovFrustum, " Hiện vùng nhìn FOV & trục quang học", AntigravityUITheme.StyleToggle);
-            }
             bool fovChanged = DrawCalibNumericSliderRow("FOV ống kính", ref rigCam.cameraFovDeg, 25f, 75f, 1f, 5f, "°");
             if (fovChanged)
             {
                 rigCam.ApplyTransform();
-            }
-            if (fovChanged || rigCam.showRuntimeRigVisual != prevRigVis || rigCam.showRuntimeFovFrustum != prevFovVis)
-            {
                 rigCam.SaveRigVisualSettings();
             }
         }

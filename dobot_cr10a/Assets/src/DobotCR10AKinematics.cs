@@ -43,6 +43,27 @@ public static class DobotCR10AKinematics
         }
     }
 
+    /// <summary>
+    /// Nhánh nghiệm IK ưu tiên do người dùng chọn gần nhất (ví dụ: "Vai Phải, Cổ tay Úp, Khuỷu Dưới").
+    /// Khi được thiết lập, SolveTcpPose tự động đưa nhánh này lên đầu danh sách (index 0) nếu hợp lệ.
+    /// </summary>
+    public static string PreferredBranchName = "";
+
+    public static IKSolution SelectPreferredSolution(List<IKSolution> solutions, string overrideBranchName = null)
+    {
+        if (solutions == null || solutions.Count == 0) return null;
+        string targetBranch = !string.IsNullOrEmpty(overrideBranchName) ? overrideBranchName : PreferredBranchName;
+        if (!string.IsNullOrEmpty(targetBranch))
+        {
+            for (int i = 0; i < solutions.Count; i++)
+            {
+                if (string.Equals(solutions[i].branchName, targetBranch, StringComparison.Ordinal))
+                    return solutions[i];
+            }
+        }
+        return solutions[0];
+    }
+
     // =========================================================================
     // 1. BẢNG THÔNG SỐ DENAVIT - HARTENBERG (STANDARD D-H) CỦA DOBOT CR10A (mm & rad)
     // =========================================================================
@@ -370,33 +391,63 @@ public static class DobotCR10AKinematics
              targetUnityPositionMm.z
         };
 
-        // Thuật toán tiếp cận thích ứng (Adaptive Approach Angle) nếu được bật
-        if (useAdaptiveTilt)
-        {
-            double r = Math.Sqrt(PtargetDH[0] * PtargetDH[0] + PtargetDH[1] * PtargetDH[1]);
-            if (r > 680.0)
-            {
-                double[] tiltCandidates = { 0.0, 10.0, 18.0, 25.0, maxTiltDeg };
-                foreach (double tiltDeg in tiltCandidates)
-                {
-                    double alpha = tiltDeg * Math.PI / 180.0;
-                    double[,] RdhTilt = (double[,])Rdh.Clone();
-                    double sinA = Math.Sin(alpha);
-                    double cosA = Math.Cos(alpha);
-                    // z6 nghiêng về phía tâm đế
-                    double z6x = (PtargetDH[0] / r) * sinA;
-                    double z6y = (PtargetDH[1] / r) * sinA;
-                    double z6z = -cosA;
-                    RdhTilt[0, 2] = z6x; RdhTilt[1, 2] = z6y; RdhTilt[2, 2] = z6z;
+        // 2. Luôn thử giải chính xác đúng góc hướng RPY yêu cầu trước
+        List<IKSolution> exactSols = SolveInternal(PtargetDH, Rdh, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
+        if (exactSols.Count > 0 || !useAdaptiveTilt)
+            return exactSols;
 
-                    List<IKSolution> candidateSols = SolveInternal(PtargetDH, RdhTilt, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
-                    if (candidateSols.Count > 0)
-                        return candidateSols;
+        // 3. Nếu góc yêu cầu không có nghiệm và useAdaptiveTilt = true -> nghiêng trục z6 về phía tâm đế để cứu điểm xa
+        double r = Math.Sqrt(PtargetDH[0] * PtargetDH[0] + PtargetDH[1] * PtargetDH[1]);
+        if (r > 680.0)
+        {
+            double[] tiltCandidates = { 10.0, 18.0, 25.0, maxTiltDeg };
+            double refXx = Rdh[0, 0], refXy = Rdh[1, 0], refXz = Rdh[2, 0];
+
+            foreach (double tiltDeg in tiltCandidates)
+            {
+                if (tiltDeg <= 0.0 || tiltDeg > maxTiltDeg + 1e-3) continue;
+                double alpha = tiltDeg * Math.PI / 180.0;
+                double sinA = Math.Sin(alpha);
+                double cosA = Math.Cos(alpha);
+
+                // Trục z6 nghiêng về phía tâm đế
+                double z6x = (PtargetDH[0] / r) * sinA;
+                double z6y = (PtargetDH[1] / r) * sinA;
+                double z6z = -cosA;
+
+                // Trực chuẩn hóa Gram-Schmidt để ma trận quay RdhTilt thuộc SO(3) (det = +1)
+                double dot = refXx * z6x + refXy * z6y + refXz * z6z;
+                double x6x = refXx - dot * z6x;
+                double x6y = refXy - dot * z6y;
+                double x6z = refXz - dot * z6z;
+                double xLen = Math.Sqrt(x6x * x6x + x6y * x6y + x6z * x6z);
+                if (xLen < 1e-6)
+                {
+                    x6x = 1.0 - z6x * z6x;
+                    x6y = -z6x * z6y;
+                    x6z = -z6x * z6z;
+                    xLen = Math.Sqrt(x6x * x6x + x6y * x6y + x6z * x6z);
                 }
+                x6x /= xLen; x6y /= xLen; x6z /= xLen;
+
+                double y6x = z6y * x6z - z6z * x6y;
+                double y6y = z6z * x6x - z6x * x6z;
+                double y6z = z6x * x6y - z6y * x6x;
+
+                double[,] RdhTilt = new double[3, 3]
+                {
+                    { x6x, y6x, z6x },
+                    { x6y, y6y, z6y },
+                    { x6z, y6z, z6z }
+                };
+
+                List<IKSolution> candidateSols = SolveInternal(PtargetDH, RdhTilt, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
+                if (candidateSols.Count > 0)
+                    return candidateSols;
             }
         }
 
-        return SolveInternal(PtargetDH, Rdh, currentJointsRad, dtoolMm, toolOffsetX, toolOffsetY);
+        return exactSols;
     }
 
     /// <summary>
@@ -593,8 +644,22 @@ public static class DobotCR10AKinematics
             }
         }
 
-        // Sắp xếp các nghiệm theo chi phí tối ưu (nghiệm Q* tốt nhất ở vị trí đầu tiên index 0)
+        // Sắp xếp các nghiệm theo chi phí tối ưu (khoảng cách góc khớp gần currentJointsRad nhất ở index 0)
         solutions.Sort((a, b) => a.selectionCost.CompareTo(b.selectionCost));
+
+        // Khi chưa có góc khớp mồi liên tục (waypoint đầu tiên / giải mới), ưu tiên đưa nhánh người dùng chọn gần nhất lên index 0.
+        // Khi ĐANG bám liên tục (currentJointsRad != null), giữ thứ tự gần curQ nhất để robot KHÔNG bao giờ bị nháy qua lại giữa 2 tư thế!
+        bool hasContinuousSeed = (currentJointsRad != null && currentJointsRad.Length >= 6);
+        if (!hasContinuousSeed && !string.IsNullOrEmpty(PreferredBranchName) && solutions.Count > 1)
+        {
+            int prefIdx = solutions.FindIndex(s => string.Equals(s.branchName, PreferredBranchName, StringComparison.Ordinal));
+            if (prefIdx > 0)
+            {
+                var prefSol = solutions[prefIdx];
+                solutions.RemoveAt(prefIdx);
+                solutions.Insert(0, prefSol);
+            }
+        }
 
         return solutions;
     }
