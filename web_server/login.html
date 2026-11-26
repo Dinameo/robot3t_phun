@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập · Robot3T AI Server</title>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <script src="/dashboard/login.js" defer></script>
+</head>
+<body class="login">
+  <main class="login-panel" aria-labelledby="login-title">
+    <header class="login-header">
+      <p class="product">Robot phun sơn</p>
+      <h1 id="login-title">Đăng nhập</h1>
+      <p class="login-description">Truy cập AI Server để nạp model YOLO và xem log máy chủ.</p>
+    </header>
+    <form id="login-form" method="post" action="/dashboard/api/login">
+      <label for="username">Tài khoản</label>
+      <input id="username" name="username" type="text" value="admin" required autocomplete="username" autocapitalize="none" spellcheck="false">
+      <label for="password">Mật khẩu AI Server</label>
+      <div class="password-field">
+        <input id="password" name="password" type="password" required autocomplete="current-password" maxlength="512" autofocus>
+        <button id="show-password" class="secondary" type="button" aria-controls="password" aria-pressed="false">Hiện</button>
+      </div>
+      <p class="feedback" id="login-feedback" role="alert"></p>
+      <button id="login-submit" class="primary" type="submit">Đăng nhập</button>
+    </form>
+  </main>
+</body>
+</html>

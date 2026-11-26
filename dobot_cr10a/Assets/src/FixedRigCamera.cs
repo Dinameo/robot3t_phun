@@ -141,7 +141,7 @@ public class FixedRigCamera : MonoBehaviour
         {
             cam.nearClipPlane = 0.03f;
             cam.farClipPlane = 50.0f;
-            cam.fieldOfView = Mathf.Clamp(cameraFovDeg, 20f, 90f);
+            ApplyCaptureProjection(cam);
         }
         CalibrationManager calibMgr = FindAnyObjectByType<CalibrationManager>();
         if (calibMgr != null)
@@ -245,7 +245,7 @@ public class FixedRigCamera : MonoBehaviour
         if (cam == null) cam = GetComponent<Camera>();
         if (cam != null)
         {
-            cam.fieldOfView = Mathf.Clamp(cameraFovDeg, 20f, 90f);
+            ApplyCaptureProjection(cam);
         }
 
         UpdateRuntimeVisual();
@@ -305,7 +305,7 @@ public class FixedRigCamera : MonoBehaviour
         if (cam == null) cam = GetComponent<Camera>();
         if (cam != null)
         {
-            cam.fieldOfView = Mathf.Clamp(cameraFovDeg, 20f, 90f);
+            ApplyCaptureProjection(cam);
         }
 
         UpdateRuntimeVisual();
@@ -413,6 +413,59 @@ public class FixedRigCamera : MonoBehaviour
         opticalAxisRenderer.receiveShadows = false;
     }
 
+    public float CaptureAspect
+    {
+        get
+        {
+            if (cachedPlyLoader == null) cachedPlyLoader = FindAnyObjectByType<PLYDirectLoader>();
+            if (cachedPlyLoader != null && cachedPlyLoader.hasOrganizedCameraFrame &&
+                cachedPlyLoader.cameraImageWidth > 1 && cachedPlyLoader.cameraImageHeight > 1)
+                return (float)cachedPlyLoader.cameraImageWidth / cachedPlyLoader.cameraImageHeight;
+            return 1944f / 1200f;
+        }
+    }
+
+    public bool GetCaptureRayBounds(out Vector4 bounds)
+    {
+        if (cachedPlyLoader == null) cachedPlyLoader = FindAnyObjectByType<PLYDirectLoader>();
+        if (cachedPlyLoader != null && cachedPlyLoader.TryGetSensorRayBounds(out bounds)) return true;
+
+        float halfHeight = Mathf.Tan(Mathf.Clamp(cameraFovDeg, 20f, 90f) * Mathf.Deg2Rad * 0.5f);
+        float halfWidth = halfHeight * CaptureAspect;
+        bounds = new Vector4(-halfWidth, halfWidth, -halfHeight, halfHeight);
+        return false;
+    }
+
+    public float CaptureVerticalFovDeg
+    {
+        get
+        {
+            GetCaptureRayBounds(out Vector4 bounds);
+            return (Mathf.Atan(bounds.w) - Mathf.Atan(bounds.z)) * Mathf.Rad2Deg;
+        }
+    }
+
+    public Vector2 CaptureOpticalCenterUV
+    {
+        get
+        {
+            GetCaptureRayBounds(out Vector4 bounds);
+            return new Vector2(-bounds.x / (bounds.y - bounds.x), -bounds.z / (bounds.w - bounds.z));
+        }
+    }
+
+    public void ApplyCaptureProjection(Camera target)
+    {
+        if (target == null) return;
+        GetCaptureRayBounds(out Vector4 bounds);
+        float near = target.nearClipPlane;
+        target.aspect = CaptureAspect;
+        target.fieldOfView = (Mathf.Atan(bounds.w) - Mathf.Atan(bounds.z)) * Mathf.Rad2Deg;
+        // PLY rows run downward; Unity camera Y runs upward.
+        target.projectionMatrix = Matrix4x4.Frustum(
+            bounds.x * near, bounds.y * near, -bounds.w * near, -bounds.z * near, near, target.farClipPlane);
+    }
+
     private bool TryComputeGeometricCameraFootprintWorld(out Vector3 cTL, out Vector3 cTR, out Vector3 cBR, out Vector3 cBL)
     {
         cTL = cTR = cBR = cBL = Vector3.zero;
@@ -421,17 +474,13 @@ public class FixedRigCamera : MonoBehaviour
             ? cachedPlyLoader.estimatedTableY + 0.004f
             : 0.005f;
 
-        float vFovRad = Mathf.Clamp(cameraFovDeg, 15f, 120f) * Mathf.Deg2Rad;
-        float halfH = Mathf.Tan(vFovRad * 0.5f);
-        float aspect = (cam != null && cam.aspect > 0.2f) ? cam.aspect : (1944f / 1200f);
-        float halfW = halfH * aspect;
-
+        GetCaptureRayBounds(out Vector4 bounds);
         Vector3[] localDirs =
         {
-            new Vector3(-halfW,  halfH, 1f).normalized, // TL
-            new Vector3( halfW,  halfH, 1f).normalized, // TR
-            new Vector3( halfW, -halfH, 1f).normalized, // BR
-            new Vector3(-halfW, -halfH, 1f).normalized  // BL
+            new Vector3(bounds.x, -bounds.z, 1f),
+            new Vector3(bounds.y, -bounds.z, 1f),
+            new Vector3(bounds.y, -bounds.w, 1f),
+            new Vector3(bounds.x, -bounds.w, 1f)
         };
 
         Vector3[] hits = new Vector3[4];

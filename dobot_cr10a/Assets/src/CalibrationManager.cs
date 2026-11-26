@@ -61,7 +61,7 @@ public class CalibrationManager : MonoBehaviour
     [Header("4. Phương trình mặt bàn trong hệ Robot (Z_table)")]
     public Vector3 tableNormalRobot = new Vector3(0f, 0f, 1f);
     public float tableHeightMm = 0.0f;
-    public float robotGlobalOriginZ_mm = 1100.0f; // Vị trí Z gốc Robot trong Unity World (SampleScene Global.z = 1.1m)
+    public float robotGlobalOriginZ_mm = 1100.0f; // Vị trí Z gốc Robot trong Unity World (phunson.unity Global.z = 1.1m)
 
     [Header("5. Kiểm chứng chạm mốc & Hiệu chuẩn đa điểm (Touch-Point & Multi-Point SVD)")]
     public Vector3 verifyCameraPointMm = new Vector3(0f, 0f, 1650f);

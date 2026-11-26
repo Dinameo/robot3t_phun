@@ -13,12 +13,11 @@ public static class AntigravityUITheme
 
     // Bảng màu chuẩn Antigravity
     public static readonly Color ColorBgDarkest    = new Color(0.06f, 0.07f, 0.09f, 1.00f); // #0f1217
-    public static readonly Color ColorBgHeader     = new Color(0.09f, 0.10f, 0.13f, 1.00f); // #171a21
+    public static readonly Color ColorBgHeader     = new Color(0.09f, 0.10f, 0.13f, 0.95f); // #171a21
     public static readonly Color ColorBgStrip      = new Color(0.11f, 0.12f, 0.16f, 1.00f); // #1c1f29
-    public static readonly Color ColorBgDock       = new Color(0.08f, 0.09f, 0.12f, 1.00f); // #14171f
-    public static readonly Color ColorBgCard       = new Color(0.13f, 0.15f, 0.20f, 0.98f); // #212633
-    public static readonly Color ColorBgCardInner  = new Color(0.09f, 0.10f, 0.14f, 0.92f); // #171a24
-    public static readonly Color ColorBgTitleBar   = new Color(0.12f, 0.15f, 0.22f, 1.00f);
+    public static readonly Color ColorBgDock       = new Color(0.08f, 0.09f, 0.12f, 0.90f); // #14171f
+    public static readonly Color ColorBgCard       = new Color(0.13f, 0.15f, 0.20f, 0.84f); // #212633
+    public static readonly Color ColorBgCardInner  = new Color(0.09f, 0.10f, 0.14f, 0.76f); // #171a24
 
     public static readonly Color ColorBorder       = new Color(0.20f, 0.23f, 0.31f, 1.00f); // #333b4f
     public static readonly Color ColorBorderCard   = new Color(0.25f, 0.29f, 0.39f, 0.85f); // #404a63
@@ -37,7 +36,6 @@ public static class AntigravityUITheme
     public static Texture2D TexBgDock;
     public static Texture2D TexBgCard;
     public static Texture2D TexBgCardInner;
-    public static Texture2D TexBgTitleBar;
     public static Texture2D TexBorder;
     public static Texture2D TexBorderActive;
     public static Texture2D TexBtnNormal;
@@ -65,13 +63,21 @@ public static class AntigravityUITheme
     public static GUIStyle StyleCloseButton;
     public static GUIStyle StyleCardHeader;
     public static GUIStyle StyleProgressLabel;
+    public static GUIStyle StyleProgressStatus;
     public static GUIStyle StyleSprayColorButton;
     public static GUIStyle StyleSelectedSprayColorButton;
     public static GUIStyle StyleSectionLabel;
     public static GUIStyle StyleBadgeGreen;
     public static GUIStyle StyleBadgeBlue;
     public static GUIStyle StyleTextField;
-    public static GUIStyle StyleToggle;
+    private const int SurfaceRadius = 6;
+    private static GUIStyle styleToggle;
+    private static GUIStyle roundedCardBackground;
+    private static GUIStyle roundedDockBackground;
+    private static Texture2D checkboxOff;
+    private static Texture2D checkboxHover;
+    private static Texture2D checkboxOn;
+    private static Texture2D checkboxOnHover;
     public static GUIStyle StyleLabelMuted;
     public static GUIStyle StyleLabelCyan;
     public static GUIStyle StyleLabelGreen;
@@ -89,27 +95,26 @@ public static class AntigravityUITheme
         // 1. Tạo Textures phẳng
         TexBgHeader         = MakeTex(2, 2, ColorBgHeader);
         TexBgStrip          = MakeTex(2, 2, ColorBgStrip);
-        TexBgDock           = MakeTex(2, 2, ColorBgDock);
-        TexBgCard           = MakeTex(2, 2, ColorBgCard);
-        TexBgCardInner      = MakeTex(2, 2, ColorBgCardInner);
-        TexBgTitleBar       = MakeTex(2, 2, ColorBgTitleBar);
+        TexBgDock           = MakeRoundedTexture(ColorBgDock, SurfaceRadius, ColorBorderCard);
+        TexBgCard           = MakeRoundedTexture(ColorBgCard, SurfaceRadius);
+        TexBgCardInner      = MakeRoundedTexture(ColorBgCardInner, SurfaceRadius);
         TexBorder           = MakeTex(2, 2, ColorBorder);
         TexBorderActive     = MakeTex(2, 2, ColorBorderActive);
 
-        TexBtnNormal        = MakeTex(2, 2, new Color(0.16f, 0.18f, 0.24f, 1.0f));
-        TexBtnHover         = MakeTex(2, 2, new Color(0.22f, 0.26f, 0.35f, 1.0f));
-        TexBtnActive        = MakeTex(2, 2, new Color(0.12f, 0.45f, 0.85f, 1.0f));
+        TexBtnNormal        = MakeRoundedTexture(new Color(0.16f, 0.18f, 0.24f, 0.91f), SurfaceRadius);
+        TexBtnHover         = MakeRoundedTexture(new Color(0.22f, 0.26f, 0.35f, 0.91f), SurfaceRadius);
+        TexBtnActive        = MakeRoundedTexture(new Color(0.12f, 0.45f, 0.85f, 0.91f), SurfaceRadius);
 
-        TexBtnPrimaryNormal = MakeTex(2, 2, new Color(0.10f, 0.40f, 0.66f, 1.0f));
-        TexBtnPrimaryHover  = MakeTex(2, 2, new Color(0.15f, 0.51f, 0.80f, 1.0f));
+        TexBtnPrimaryNormal = MakeRoundedTexture(new Color(0.10f, 0.40f, 0.66f, 0.91f), SurfaceRadius);
+        TexBtnPrimaryHover  = MakeRoundedTexture(new Color(0.15f, 0.51f, 0.80f, 0.91f), SurfaceRadius);
 
-        TexTabActive        = MakeTex(2, 2, new Color(0.15f, 0.28f, 0.46f, 1.0f));
-        TexTabInactive      = MakeTex(2, 2, new Color(0.10f, 0.11f, 0.15f, 0.85f));
+        TexTabActive        = MakeRoundedTexture(new Color(0.15f, 0.28f, 0.46f, 0.91f), SurfaceRadius);
+        TexTabInactive      = MakeRoundedTexture(new Color(0.10f, 0.11f, 0.15f, 0.85f), SurfaceRadius);
 
-        TexBadgeGreen       = MakeTex(2, 2, new Color(0.06f, 0.28f, 0.16f, 0.85f));
-        TexBadgeBlue        = MakeTex(2, 2, new Color(0.08f, 0.24f, 0.45f, 0.85f));
+        TexBadgeGreen       = MakeRoundedTexture(new Color(0.06f, 0.28f, 0.16f, 0.85f), SurfaceRadius);
+        TexBadgeBlue        = MakeRoundedTexture(new Color(0.08f, 0.24f, 0.45f, 0.85f), SurfaceRadius);
 
-        TexInput            = MakeTex(2, 2, new Color(0.07f, 0.08f, 0.11f, 1.0f));
+        TexInput            = MakeRoundedTexture(new Color(0.07f, 0.08f, 0.11f, 0.84f), SurfaceRadius);
         TexSliderTrack      = MakeTex(2, 2, new Color(0.18f, 0.21f, 0.28f, 1.0f));
         TexSliderThumb      = MakeTex(2, 2, new Color(0.24f, 0.75f, 1.00f, 1.0f));
 
@@ -138,6 +143,7 @@ public static class AntigravityUITheme
 
         StyleTabActive = new GUIStyle(GUI.skin.button)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
@@ -150,6 +156,7 @@ public static class AntigravityUITheme
 
         StyleTabInactive = new GUIStyle(GUI.skin.button)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             fontStyle = FontStyle.Normal,
             alignment = TextAnchor.MiddleCenter,
@@ -162,6 +169,7 @@ public static class AntigravityUITheme
 
         StyleButton = new GUIStyle(GUI.skin.button)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             alignment = TextAnchor.MiddleCenter,
             wordWrap = false,
@@ -174,6 +182,7 @@ public static class AntigravityUITheme
 
         StylePrimaryButton = new GUIStyle(GUI.skin.button)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
@@ -198,12 +207,13 @@ public static class AntigravityUITheme
 
         StyleCloseButton = new GUIStyle(GUI.skin.button)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
             normal = { background = TexBtnNormal, textColor = ColorTextMuted },
-            hover = { background = MakeTex(2, 2, new Color(0.7f, 0.15f, 0.15f, 1f)), textColor = Color.white },
-            active = { background = MakeTex(2, 2, new Color(0.9f, 0.2f, 0.2f, 1f)), textColor = Color.white },
+            hover = { background = MakeRoundedTexture(new Color(0.7f, 0.15f, 0.15f, 0.93f), SurfaceRadius), textColor = Color.white },
+            active = { background = MakeRoundedTexture(new Color(0.9f, 0.2f, 0.2f, 0.96f), SurfaceRadius), textColor = Color.white },
             margin = new RectOffset(2, 2, 2, 2),
             padding = new RectOffset(2, 2, 2, 2)
         };
@@ -225,6 +235,13 @@ public static class AntigravityUITheme
             padding = new RectOffset()
         };
 
+        StyleProgressStatus = new GUIStyle(StyleProgressLabel)
+        {
+            alignment = TextAnchor.MiddleRight,
+            padding = new RectOffset(3, 3, 0, 0),
+            normal = { textColor = Color.white }
+        };
+
         StyleSectionLabel = new GUIStyle(GUI.skin.label)
         {
             fontSize = 11,
@@ -236,6 +253,7 @@ public static class AntigravityUITheme
 
         StyleBadgeGreen = new GUIStyle(GUI.skin.box)
         {
+            border = RoundedBorder(),
             fontSize = 10,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
@@ -245,6 +263,7 @@ public static class AntigravityUITheme
 
         StyleBadgeBlue = new GUIStyle(GUI.skin.box)
         {
+            border = RoundedBorder(),
             fontSize = 10,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
@@ -254,6 +273,7 @@ public static class AntigravityUITheme
 
         StyleTextField = new GUIStyle(GUI.skin.textField)
         {
+            border = RoundedBorder(),
             fontSize = 12,
             alignment = TextAnchor.MiddleLeft,
             normal = { background = TexInput, textColor = ColorTextPrimary },
@@ -261,15 +281,26 @@ public static class AntigravityUITheme
             padding = new RectOffset(6, 6, 3, 3)
         };
 
-        StyleToggle = new GUIStyle(GUI.skin.toggle)
+        styleToggle = new GUIStyle
         {
+            font = GUI.skin.font,
             fontSize = 12,
             wordWrap = true,
+            alignment = TextAnchor.MiddleLeft,
+            padding = new RectOffset(26, 5, 4, 4),
+            margin = new RectOffset(0, 0, 1, 1),
             normal = { textColor = ColorTextPrimary },
             hover = { textColor = Color.white },
             onNormal = { textColor = ColorTextCyan },
             onHover = { textColor = Color.white }
         };
+        checkboxOff = MakeCheckboxTexture(false, false);
+        checkboxHover = MakeCheckboxTexture(false, true);
+        checkboxOn = MakeCheckboxTexture(true, false);
+        checkboxOnHover = MakeCheckboxTexture(true, true);
+
+        roundedCardBackground = new GUIStyle { border = RoundedBorder(), normal = { background = TexBgCard } };
+        roundedDockBackground = new GUIStyle { border = RoundedBorder(), normal = { background = TexBgDock } };
 
         StyleLabelMuted  = new GUIStyle(GUI.skin.label) { fontSize = 12, wordWrap = true, normal = { textColor = ColorTextMuted } };
         StyleLabelCyan   = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, wordWrap = true, normal = { textColor = ColorTextCyan } };
@@ -321,6 +352,116 @@ public static class AntigravityUITheme
         GUI.skin.horizontalScrollbarRightButton = GUIStyle.none;
     }
 
+    private static RectOffset RoundedBorder()
+    {
+        const int border = SurfaceRadius + 1;
+        return new RectOffset(border, border, border, border);
+    }
+
+    private static float RoundedEdgeDistance(Vector2 point, float size, float radius)
+    {
+        float half = size * 0.5f;
+        Vector2 q = new Vector2(Mathf.Abs(point.x - half), Mathf.Abs(point.y - half)) - Vector2.one * (half - radius);
+        return new Vector2(Mathf.Max(q.x, 0f), Mathf.Max(q.y, 0f)).magnitude + Mathf.Min(Mathf.Max(q.x, q.y), 0f) - radius;
+    }
+
+    private static Texture2D MakeRoundedTexture(Color fill, int radius, Color? border = null)
+    {
+        int size = radius * 2 + 4;
+        var pixels = new Color[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                float distance = RoundedEdgeDistance(new Vector2(x + 0.5f, y + 0.5f), size, radius);
+                Color color = border.HasValue ? Color.Lerp(border.Value, fill, Mathf.Clamp01(-distance - 0.35f)) : fill;
+                color.a *= Mathf.Clamp01(0.5f - distance);
+                pixels[y * size + x] = color;
+            }
+        }
+        return CreateUiTexture(size, pixels);
+    }
+
+    private static Texture2D MakeCheckboxTexture(bool ticked, bool hover)
+    {
+        const int size = 18;
+        var pixels = new Color[size * size];
+        Color fill = ticked
+            ? (hover ? new Color(0.38f, 0.79f, 1f) : new Color(0.29f, 0.68f, 0.98f))
+            : new Color(0.10f, 0.13f, 0.19f, 0.94f);
+        Color rim = hover || ticked ? ColorBorderActive : new Color(0.40f, 0.48f, 0.60f);
+        var a = new Vector2(4.8f, 9.2f);
+        var b = new Vector2(7.7f, 6.4f);
+        var c = new Vector2(13.3f, 12.4f);
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                var p = new Vector2(x + 0.5f, y + 0.5f);
+                float edge = RoundedEdgeDistance(p, size, 4f);
+                Color color = Color.Lerp(rim, fill, Mathf.Clamp01(-edge - 0.55f));
+                if (ticked)
+                {
+                    float distance = Mathf.Min(DistanceToLineSegment(p, a, b), DistanceToLineSegment(p, b, c));
+                    color = Color.Lerp(color, new Color(0.04f, 0.12f, 0.21f), Mathf.Clamp01(1.55f - distance));
+                }
+                color.a *= Mathf.Clamp01(0.5f - edge);
+                pixels[y * size + x] = color;
+            }
+        }
+        return CreateUiTexture(size, pixels);
+    }
+
+    private static float DistanceToLineSegment(Vector2 point, Vector2 start, Vector2 end)
+    {
+        Vector2 delta = end - start;
+        float t = Mathf.Clamp01(Vector2.Dot(point - start, delta) / delta.sqrMagnitude);
+        return Vector2.Distance(point, start + delta * t);
+    }
+
+    private static Texture2D CreateUiTexture(int size, Color[] pixels)
+    {
+        var texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+        {
+            hideFlags = HideFlags.DontSave,
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Bilinear
+        };
+        texture.SetPixels(pixels);
+        texture.Apply(false, true);
+        return texture;
+    }
+
+    public static bool Checkbox(bool value, string label, params GUILayoutOption[] options)
+    {
+        EnsureInitialized();
+        var content = new GUIContent(label.TrimStart());
+        Rect rect = GUILayoutUtility.GetRect(content, styleToggle, options);
+        bool result = GUI.Toggle(rect, value, content, styleToggle);
+        if (Event.current.type == EventType.Repaint)
+        {
+            bool hover = GUI.enabled && rect.Contains(Event.current.mousePosition);
+            Texture2D texture = result ? (hover ? checkboxOnHover : checkboxOn) : (hover ? checkboxHover : checkboxOff);
+            Color previous = GUI.color;
+            if (!GUI.enabled) GUI.color = new Color(previous.r, previous.g, previous.b, previous.a * 0.45f);
+            GUI.DrawTexture(new Rect(rect.x + 3f, rect.center.y - 8f, 16f, 16f), texture);
+            GUI.color = previous;
+        }
+        return result;
+    }
+
+    public static void DrawSoftCard(Rect rect)
+    {
+        EnsureInitialized();
+        GUI.Box(rect, GUIContent.none, roundedCardBackground);
+    }
+
+    public static void DrawSoftDock(Rect rect)
+    {
+        EnsureInitialized();
+        GUI.Box(rect, GUIContent.none, roundedDockBackground);
+    }
+
     private static Texture2D MakeTex(int width, int height, Color col)
     {
         Color[] pix = new Color[width * height];
@@ -340,6 +481,7 @@ public static class AntigravityUITheme
         if (cachedCardStyle != null) return cachedCardStyle;
         cachedCardStyle = new GUIStyle(GUI.skin.box)
         {
+            border = RoundedBorder(),
             normal = { background = TexBgCard },
             margin = new RectOffset(0, 0, 2, 2),
             padding = new RectOffset(12, 12, 10, 10)
@@ -353,6 +495,7 @@ public static class AntigravityUITheme
         if (cachedInnerStyle != null) return cachedInnerStyle;
         cachedInnerStyle = new GUIStyle(GUI.skin.box)
         {
+            border = RoundedBorder(),
             normal = { background = TexBgCardInner },
             margin = new RectOffset(0, 0, 3, 3),
             padding = new RectOffset(8, 8, 6, 6)

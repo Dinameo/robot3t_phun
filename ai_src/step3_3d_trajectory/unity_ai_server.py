@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -69,7 +69,7 @@ CANONICAL_LANDMARKS_12 = [
 # ==============================================================================
 class UnityDobotKinematicsBridge:
     """
-    Đồng bộ chính xác hệ quy chiếu với `PLYDirectLoader.cs`, `SampleScene.unity`
+    Đồng bộ chính xác hệ quy chiếu với `PLYDirectLoader.cs`, `phunson.unity`
     (`Global` Transform) và `DobotCR10AKinematics.cs` trong project Unity:
     
     1. Trong `PLYDirectLoader.cs` (dòng 335-336):
@@ -78,7 +78,7 @@ class UnityDobotKinematicsBridge:
          Y_world = cameraOrigin.y - vz * 0.001   (cameraOrigin.y = 1.685 m)
          Z_world = cameraOrigin.z - vy * 0.001   (cameraOrigin.z = 0.335 m)
 
-    2. Trong `SampleScene.unity` (dòng 1834-1835):
+    2. Trong `phunson.unity` (dòng 1834-1835):
        GameObject `Global` (gốc tọa độ Robot Dobot CR10A) đặt tại:
          localPosition = (0.0, 0.0, 1.1) m
          localRotation = Quaternion(-0.5, 0.5, 0.5, 0.5)  (Euler: X=-90°, Y=90°, Z=0°)
@@ -303,6 +303,8 @@ class DobotUnityAIServer:
         udp_port=5005,
         http_port=5000,
         auto_push_port=5006,
+        seg_weight=None,
+        pose_weight=None,
     ):
         self.unity_project_dir = Path(unity_project_dir) if unity_project_dir else AI_SRC_DIR.parent / "dobot_cr10a"
         self.unity_output_dir = self.unity_project_dir / "output_drawing"
@@ -317,19 +319,18 @@ class DobotUnityAIServer:
         print("=" * 76)
         print("🚀 ĐANG KHỞI ĐỘNG MÁY CHỦ AI DOBOT CR10A (YOLO11-SEG + YOLO11-POSE + 3D IK)")
         print("=" * 76)
-        self.pipeline = Step3TrajectoryPipeline3D()
+        self.pipeline = Step3TrajectoryPipeline3D(seg_weight=seg_weight, pose_weight=pose_weight)
         self.lock = threading.Lock()
-        print("✓ Đã nạp thành công 2 model AI (YOLO11s-seg & YOLO11s-pose)!")
+        print(f"✓ Đã nạp model {self.pipeline.seg_weight_path.name} và {self.pipeline.pose_weight_path.name}.")
 
-    def _export_landmarks_and_segmentation_3d(self, clean_sample: str):
+    def _export_landmarks_and_segmentation_3d(self, clean_sample: str, *, ply_path=None, save_outputs=True):
         """
         Trích xuất 12 Điểm Mốc Giải Phẫu 3D (Landmarks) + Đường Bao Segment Quần 3D (Garment Contour)
         + Đường Bao Vùng Cho Phép Phun 3D (Sprayable Zones) trong hệ tọa độ Robot Global (mm) của Unity.
         Lưu file nhẹ `<sample>_landmarks_seg.json` (~14 KB) để Unity hiển thị trực tiếp ở Tab Camera Trên Xuống.
         """
-        ply_path = self.pipeline.core_3d.dataset_3d_dir / f"{clean_sample}.ply"
-        sample_num = clean_sample.replace("pcl_", "")
-        img_path = self.pipeline.core_3d.dataset_2d_dir / f"image_{sample_num}.png"
+        if ply_path is None:
+            ply_path = self.pipeline.core_3d.dataset_3d_dir / f"{clean_sample}.ply"
 
         xyz, bgr_ply, _ = self.pipeline.core_3d.load_organized_ply(ply_path)
         bgr = bgr_ply
@@ -339,7 +340,9 @@ class DobotUnityAIServer:
         if table_normal[2] > 0:
             table_normal = -table_normal
 
-        spray_able_mask, _, _ = self.pipeline.build_spray_and_keepout_masks(mask_bin, keypoints_2d)
+        spray_able_mask, _, _ = self.pipeline.build_spray_and_keepout_masks(
+            mask_bin, keypoints_2d, include_density=False
+        )
 
         # 1. 12 Điểm mốc giải phẫu 3D (khớp chính xác 100% với đỉnh 3D trong PLYDirectLoader.cs)
         landmarks_list = []
@@ -443,6 +446,9 @@ class DobotUnityAIServer:
             "spray_zone_left_3d": spray_loops[0] if len(spray_loops) > 0 else [],
             "spray_zone_right_3d": spray_loops[1] if len(spray_loops) > 1 else [],
         }
+
+        if not save_outputs:
+            return seg_payload, xyz, mask_bin, spray_able_mask, keypoints_2d, table_normal
 
         json_text = json.dumps(seg_payload, ensure_ascii=False, indent=2)
         ubuntu_seg_path = self.ubuntu_output_dir / f"{clean_sample}_landmarks_seg.json"

@@ -18,18 +18,25 @@ ROOT=Path(__file__).resolve().parents[2]
 STEP2_DIR=ROOT/'ai_src/step2_train_yolo'
 if str(STEP2_DIR) not in sys.path:
     sys.path.insert(0,str(STEP2_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from web_server.dashboard import Dashboard
+from cloud_detection import CloudDetection, JOB_PREFIX, POST_PATH
 import retrain_pose_feedback as pose_fb
 os.environ.setdefault('YOLO_CONFIG_DIR',str(ROOT/'runtime/ultralytics'))
 (ROOT/'runtime/ultralytics').mkdir(parents=True,exist_ok=True)
 LOG=logging.getLogger('cr10a')
 
 class Service:
-    def __init__(self,root=ROOT,settings_file=None,serial=None,file_camera=None,calibration_file=None):
+    def __init__(self,root=ROOT,settings_file=None,serial=None,file_camera=None,calibration_file=None,weight_suffix=".pt"):
         self.root=Path(root)
+        self.weight_suffix=weight_suffix
         self.dataset=self.root/'ai_src/dataset'
         for folder in ('_2D','_3D'): (self.dataset/folder).mkdir(parents=True,exist_ok=True)
         self.backend=None; self.loading=True; self.model_error=''
         self.lock=threading.Lock()
+        self.model_state_lock=threading.Lock()
+        self.weights_dir=self.root/'ai_src/step2_train_yolo/weights'
         self.capture_progress=None
         self.calibration=None
         if calibration_file:
@@ -39,8 +46,23 @@ class Service:
         self.capture=ZividCapture(self.dataset,settings_file,serial,file_camera)
         self.output=self.root/'dobot_cr10a/output_drawing'; self.output.mkdir(parents=True,exist_ok=True)
 
-    def load_models(self):
+    def reload_models_async(self, seg_weight, pose_weight):
+        with self.model_state_lock:
+            if self.loading:
+                return False
+            self.loading = True
+            self.model_error = ''
+        threading.Thread(target=self.load_models, args=(seg_weight, pose_weight),
+                         daemon=True, name='ReloadYOLO').start()
+        return True
+
+    def load_models(self, seg_weight=None, pose_weight=None):
         try:
+            if seg_weight is None:
+                seg_weight = self.weights_dir / f'best_yolo11_seg{self.weight_suffix}'
+            if pose_weight is None:
+                pose_weight = self.weights_dir / f'best_yolo11_pose{self.weight_suffix}'
+            LOG.info('Loading YOLO weights: segmentation=%s | pose=%s', seg_weight.name, pose_weight.name)
             from unity_ai_server import DobotUnityAIServer, UnityDobotKinematicsBridge
             if self.calibration is not None:
                 from calibration import camera_to_robot
@@ -48,19 +70,41 @@ class Service:
                     p=camera_to_robot([vx,vy,vz],self.calibration)
                     return float(p[0]),float(p[1]),float(p[2]+z_contact_offset_mm)
                 UnityDobotKinematicsBridge.zivid_mm_to_robot_global_mm=staticmethod(calibrated_transform)
-            self.backend=DobotUnityAIServer(unity_project_dir=self.root/'dobot_cr10a')
-            LOG.info('Models ready. Real YOLO segmentation and pose enabled.')
+            with self.lock:
+                backend = DobotUnityAIServer(unity_project_dir=self.root/'dobot_cr10a',
+                                             seg_weight=seg_weight, pose_weight=pose_weight)
+                with self.model_state_lock:
+                    self.backend = backend
+                    self.model_error = ''
+            LOG.info('Models ready: segmentation=%s | pose=%s', seg_weight.name, pose_weight.name)
         except Exception as ex:
-            self.model_error=str(ex); LOG.exception('Model initialization failed')
-        finally: self.loading=False
+            with self.model_state_lock:
+                self.model_error = str(ex)
+            LOG.exception('Model load failed')
+        finally:
+            with self.model_state_lock:
+                self.loading = False
+
+    def model_status(self):
+        with self.model_state_lock:
+            pipeline = self.backend.pipeline if self.backend is not None else None
+            return {
+                'model_ready': pipeline is not None,
+                'loading': self.loading,
+                'model_error': self.model_error,
+                'segmentation': pipeline.seg_weight_path.name if pipeline is not None else '',
+                'pose': pipeline.pose_weight_path.name if pipeline is not None else '',
+            }
 
     def status(self):
         return {'status':'ONLINE','service':'CR10A_Windows_AI','version':'3.0',
-                'model_ready':self.backend is not None,'loading':self.loading,'model_error':self.model_error,
+                **self.model_status(),
                 'project_root':str(self.root),'camera_preview_supported':True,'simulation_only':True,'calibrated':self.calibration is not None,'camera':self.capture.status(),
                 'feedback':pose_fb.get_feedback_status()}
 
     def start_pose_retrain_async(self,force=False,min_samples=10,epochs=25):
+        if self.weight_suffix == ".onnx":
+            return {"status":"ERROR","message":"Hãy huấn luyện trên máy cục bộ rồi xuất model ONNX để chạy trên máy chủ cloud.","is_retraining":False}
         st=pose_fb.get_feedback_status(threshold=min_samples)
         if st.get('is_retraining'):
             return {'status':'BUSY','message':'Đang train lại YOLO11-pose ở nền.','is_retraining':True,
@@ -78,8 +122,13 @@ class Service:
             if ok and self.backend is not None:
                 try:
                     with self.lock:
-                        reloaded=self.backend.pipeline.reload_pose_model()
-                    LOG.info('Hot-reloaded YOLO11-pose weights: %s',reloaded)
+                        pipeline = self.backend.pipeline
+                        if pipeline.pose_weight_path.resolve() != pose_fb.DEFAULT_WEIGHTS_PATH.resolve():
+                            LOG.info('Training updated the default pose; the selected pose remains %s.',
+                                     pipeline.pose_weight_path.name)
+                        else:
+                            reloaded = pipeline.reload_pose_model()
+                            LOG.info('Hot-reloaded YOLO11-pose weights: %s', reloaded)
                 except Exception as ex:
                     LOG.exception('Failed to hot-reload YOLO11-pose: %s',ex)
             LOG.info('Pose retraining finished (ok=%s): %s',ok,msg)
@@ -213,10 +262,13 @@ class Service:
             LOG.warning('Request rejected (%s): %s',command,ex)
             return {'status':'ERROR','message':str(ex),'error_code':422,'simulation_only':True}
 
-def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
+def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000, *,
+          dashboard=None, http_guard=None, udp_host=None, allow_cloud_detection=False):
+    dashboard = dashboard if dashboard is not None else Dashboard(service, password=os.getenv('DASHBOARD_PASSWORD') or None)
+    cloud = CloudDetection(service) if allow_cloud_detection and http_guard is not None else None
     udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
     # Bind synchronously; a port conflict must fail startup clearly.
-    udp.bind((host,udp_port))
+    udp.bind((udp_host or host,udp_port))
     executor=ThreadPoolExecutor(max_workers=4,thread_name_prefix='cr10a-request')
     def respond(req,addr):
         result=service.handle(req)
@@ -237,12 +289,29 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
                     udp.sendto(b'{"status":"ERROR","message":"Invalid JSON request","error_code":400}',addr)
             except OSError: break
     class Handler(BaseHTTPRequestHandler):
-        def reply(self,obj,code=200):
+        def reply(self,obj,code=200,headers=None):
             body=json.dumps(obj,ensure_ascii=False,allow_nan=False).encode('utf-8')
             self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8')
-            self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            self.send_header('Content-Length',str(len(body)))
+            self.send_header('Cache-Control','no-store')
+            for name,value in (headers or {}).items():
+                self.send_header(name,value)
+            self.end_headers(); self.wfile.write(body)
+        def read_json(self, max_length):
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 0 < length <= max_length:
+                raise ValueError('Invalid request size')
+            req = json.loads(self.rfile.read(length))
+            if not isinstance(req, dict):
+                raise ValueError('JSON object required')
+            return req
         def do_GET(self):
-            if self.path=='/api/status': self.reply(service.status())
+            if http_guard is not None and not http_guard(self): return
+            if cloud is not None and self.path.startswith(JOB_PREFIX):
+                cloud.status(self, self.path[len(JOB_PREFIX):])
+            elif dashboard.is_dashboard_path(self.path.partition('?')[0]):
+                dashboard.get(self)
+            elif self.path=='/api/status': self.reply(service.status())
             elif self.path=='/api/camera/status': self.reply(service.handle({'command':'CAMERA_STATUS'}))
             elif self.path.startswith('/api/capture/progress/'):
                 request_id=self.path.rsplit('/',1)[-1]
@@ -251,6 +320,13 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
             elif self.path.startswith('/api/feedback/status'): self.reply(service.handle({'command':'FEEDBACK_STATUS'}))
             else: self.reply({'status':'ERROR','message':'Unknown endpoint'},404)
         def do_POST(self):
+            if http_guard is not None and not http_guard(self): return
+            if cloud is not None and self.path == POST_PATH:
+                cloud.submit(self)
+                return
+            if dashboard.is_dashboard_path(self.path.partition('?')[0]):
+                dashboard.post(self, self.read_json)
+                return
             commands={
                 '/api/detect':'TRIGGER_DETECT',
                 '/api/custom_draw_3d':'CUSTOM_DRAW_3D',
@@ -260,20 +336,21 @@ def serve(service,host='127.0.0.1',udp_port=5005,http_port=5000):
             }
             if self.path not in commands: self.reply({'status':'ERROR','message':'Unknown endpoint'},404); return
             try:
-                length=int(self.headers.get('Content-Length','0'))
-                if length<=0 or length>15000000: raise ValueError('Invalid request size')
-                req=json.loads(self.rfile.read(length))
-                if not isinstance(req,dict): raise ValueError('JSON object required')
+                req = self.read_json(15000000)
                 req.setdefault('command',commands[self.path]); self.reply(service.handle(req))
-            except (ValueError,TypeError): self.reply({'status':'ERROR','message':'Invalid JSON request'},400)
+            except (ValueError,TypeError,UnicodeError): self.reply({'status':'ERROR','message':'Invalid JSON request'},400)
         def log_message(self,*args): pass
     try: http=ThreadingHTTPServer((host,http_port),Handler)
     except Exception:
         udp.close(); executor.shutdown(wait=False); raise
-    threading.Thread(target=udp_worker,daemon=True,name='UDP5005').start()
-    threading.Thread(target=service.load_models,daemon=True,name='LoadYOLO').start()
-    LOG.info('UDP %s:%s | HTTP http://%s:%s | simulation only',host,udp_port,host,http_port)
-    try: http.serve_forever()
+    try:
+        dashboard.show_local_credentials()
+        with dashboard.capture_logs():
+            threading.Thread(target=udp_worker,daemon=True,name='UDP5005').start()
+            threading.Thread(target=service.load_models,daemon=True,name='LoadYOLO').start()
+            LOG.info('UDP %s:%s | HTTP http://%s:%s | simulation only',host,udp_port,host,http_port)
+            LOG.info('Dashboard: http://127.0.0.1:%s/dashboard',http.server_port)
+            http.serve_forever()
     finally:
         http.server_close(); udp.close(); executor.shutdown(wait=False); service.capture.close()
 

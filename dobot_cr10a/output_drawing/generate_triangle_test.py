@@ -145,7 +145,7 @@ def solve_flange(target):
 
 def solve_tcp(xyz, rpy):
     tcp_local = np.eye(4)
-    # SampleScene's tcp child has a -90 degree local Y rotation and a 100 mm Z offset.
+    # phunson.unity's tcp child has a -90 degree local Y rotation and a 100 mm Z offset.
     tcp_local[:3, :3] = S @ rpy_matrix(0.0, -90.0, 0.0) @ S
     tcp_local[2, 3] = 100.0
     target_flange = pose_dh(xyz, rpy) @ inverse_rigid(tcp_local)

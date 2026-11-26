@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Server · Robot phun sơn</title>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <script src="/dashboard/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header">
+      <div>
+        <p class="product">Robot phun sơn</p>
+        <h1>AI Server</h1>
+      </div>
+      <div class="header-actions">
+        <p class="status" id="status" role="status" data-state="waiting">Đang kết nối</p>
+        <button id="logout" class="secondary" type="button">Đăng xuất</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <section class="panel" aria-labelledby="models-title">
+        <div class="panel-header"><h2 id="models-title">Model YOLO</h2></div>
+        <div class="panel-body">
+          <dl class="active-models">
+            <div><dt>Segmentation đang dùng</dt><dd id="active-seg">—</dd></div>
+            <div><dt>Pose đang dùng</dt><dd id="active-pose">—</dd></div>
+          </dl>
+          <form id="models">
+            <label for="segmentation">Trọng số Segmentation</label>
+            <select id="segmentation" required></select>
+            <label for="pose">Trọng số Pose</label>
+            <select id="pose" required></select>
+            <button id="load" class="primary" type="submit" disabled>Nạp model</button>
+            <p id="feedback" class="feedback" role="status"></p>
+          </form>
+          <p class="hint">Đặt tệp model đúng định dạng vào <code>ai_src/step2_train_yolo/weights</code> để tệp xuất hiện trong danh sách.</p>
+        </div>
+      </section>
+
+      <section class="panel log-panel" aria-labelledby="logs-title">
+        <div class="panel-header">
+          <h2 id="logs-title">Log máy chủ</h2>
+          <div class="log-actions">
+            <label class="follow"><input id="follow" type="checkbox" checked> Tự cuộn</label>
+            <button id="clear" class="secondary" type="button">Xóa hiển thị</button>
+          </div>
+        </div>
+        <ul id="logs" class="logs" aria-label="Các dòng log máy chủ" tabindex="0"></ul>
+        <p id="empty" class="log-empty">Đang chờ log từ server.</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

@@ -270,24 +270,14 @@ public static class DraggableUIManager
         drawRect = new Rect(panel.rect.x, panel.rect.y, panel.rect.width, visibleH);
 
         // 1. Nền bảng + Viền kéo giãn cạnh trái nổi bật khi rê chuột hoặc kéo
-        GUI.DrawTexture(drawRect, AntigravityUITheme.TexBgDock);
-        Texture2D borderTex = AntigravityUITheme.TexBorder;
+        AntigravityUITheme.DrawSoftDock(drawRect);
         bool leftHot = panel.isResizingLeft || hoverLeftEdge;
-        GUI.DrawTexture(new Rect(drawRect.x, drawRect.y, drawRect.width, 1f), borderTex);
-        GUI.DrawTexture(new Rect(drawRect.x, drawRect.yMax - 1f, drawRect.width, 1f), borderTex);
-        GUI.DrawTexture(new Rect(drawRect.x, drawRect.y, leftHot ? 3f : 2f, drawRect.height), leftHot ? AntigravityUITheme.TexBorderActive : borderTex);
-        if (!panel.isDockedRight)
-        {
-            GUI.DrawTexture(new Rect(drawRect.xMax - 1f, drawRect.y, 1f, drawRect.height), borderTex);
-        }
+        if (leftHot)
+            GUI.DrawTexture(new Rect(drawRect.x + 1f, drawRect.y + 7f, 2f, drawRect.height - 14f), AntigravityUITheme.TexBorderActive);
 
-        // Vạch tay nắm kéo giãn ở giữa cạnh trái
         float midY = drawRect.y + drawRect.height * 0.5f;
-        GUI.DrawTexture(new Rect(drawRect.x + 1f, midY - 18f, 2f, 36f), AntigravityUITheme.TexBorderActive);
-
-        // 2. Thanh tiêu đề
-        GUI.DrawTexture(new Rect(drawRect.x + 2f, drawRect.y + 1f, drawRect.width - 2f, TitleBarHeight - 1f), AntigravityUITheme.TexBgTitleBar);
-        GUI.DrawTexture(new Rect(drawRect.x + 2f, drawRect.y + TitleBarHeight - 1f, drawRect.width - 2f, 1f), AntigravityUITheme.TexBorder);
+        GUI.DrawTexture(new Rect(drawRect.x + 2f, midY - 12f, 2f, 24f), AntigravityUITheme.TexBorderActive);
+        GUI.DrawTexture(new Rect(drawRect.x + 8f, drawRect.y + TitleBarHeight - 1f, drawRect.width - 16f, 1f), AntigravityUITheme.TexBorder);
 
         GUI.Label(
             new Rect(drawRect.x + 10f, drawRect.y + 2f, drawRect.width - (panel.isDockedRight ? 44f : 76f), TitleBarHeight - 4f),

@@ -25,7 +25,6 @@ import time
 from pathlib import Path
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "step1_auto_label"))
@@ -57,8 +56,16 @@ class Step3TrajectoryPipeline3D:
         self.seg_weight_path = Path(seg_weight)
         self.pose_weight_path = Path(pose_weight)
         self.core_3d = AutoLabeling3D()
-        self.model_seg = YOLO(str(self.seg_weight_path))
-        self.model_pose = YOLO(str(self.pose_weight_path))
+        self.onnx_perception = None
+        suffixes = {seg_weight.suffix.lower(), pose_weight.suffix.lower()}
+        if suffixes == {".onnx"}:
+            from onnx_perception import OnnxPerception
+            self.onnx_perception = OnnxPerception(seg_weight, pose_weight, self.LANDMARK_NAMES)
+        elif suffixes == {".pt"}:
+            self.model_seg = self._load_weight(seg_weight, "segment")
+            self.model_pose = self._load_weight(pose_weight, "pose")
+        else:
+            raise ValueError("Hai model phải cùng định dạng .pt hoặc .onnx.")
 
         self.standoff_mm = float(standoff_mm)
         self.sigma_mm = float(spray_cone_sigma_mm)
@@ -68,13 +75,22 @@ class Step3TrajectoryPipeline3D:
         self.out_dir = Path(__file__).resolve().parent / "outputs"
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _load_weight(path, expected_task):
+        from ultralytics import YOLO
+        model = YOLO(str(path))
+        if model.task != expected_task:
+            raise ValueError(f"{path.name}: model loại '{model.task}', yêu cầu '{expected_task}'.")
+        return model
+
     def reload_pose_model(self, pose_weight=None):
         """Nạp lại trọng số YOLO11-pose sau khi fine-tune bằng các mẫu sửa mốc."""
         target = Path(pose_weight) if pose_weight else self.pose_weight_path
         if not target.is_file():
             raise FileNotFoundError(f"Pose weight missing: {target}")
+        model = self._load_weight(target, "pose")
         self.pose_weight_path = target
-        self.model_pose = YOLO(str(target))
+        self.model_pose = model
         return str(target)
 
     # ------------------------------------------------------------------
@@ -83,6 +99,9 @@ class Step3TrajectoryPipeline3D:
     def run_ai_perception(self, bgr):
         h, w = bgr.shape[:2]
         t0 = time.perf_counter()
+        if self.onnx_perception is not None:
+            mask, keypoints = self.onnx_perception.predict(bgr)
+            return mask, keypoints, (time.perf_counter() - t0) * 1000.0
         res_seg = self.model_seg.predict(bgr, imgsz=640, conf=0.5, verbose=False)[0]
         res_pose = self.model_pose.predict(bgr, imgsz=640, conf=0.5, verbose=False)[0]
         ai_ms = (time.perf_counter() - t0) * 1000.0
@@ -198,7 +217,7 @@ class Step3TrajectoryPipeline3D:
     # ------------------------------------------------------------------
     # 3. XÂY DỰNG VÙNG PHUN HỢP LỆ & VÙNG CẤM PHUN (KEEP-OUT ZONES)
     # ------------------------------------------------------------------
-    def build_spray_and_keepout_masks(self, mask_bin, keypoints_2d):
+    def build_spray_and_keepout_masks(self, mask_bin, keypoints_2d, *, include_density=True):
         """
         Tự động phân vùng:
         - eroded_garment_mask: Co lề an toàn biên vải 22 px (~15 mm) để không phun tràn ra bàn.
@@ -215,7 +234,6 @@ class Step3TrajectoryPipeline3D:
         spray_able_mask = safe_garment_mask.copy()
 
         crotch_uv = np.array([keypoints_2d["crotch"]["pixel_u"], keypoints_2d["crotch"]["pixel_v"]], dtype=np.float32)
-        waist_c_uv = np.array([keypoints_2d["waist_center"]["pixel_u"], keypoints_2d["waist_center"]["pixel_v"]], dtype=np.float32)
 
         cuff_l_mid = 0.5 * (
             np.array([keypoints_2d["cuff_left_outer"]["pixel_u"], keypoints_2d["cuff_left_outer"]["pixel_v"]]) +
@@ -233,9 +251,10 @@ class Step3TrajectoryPipeline3D:
         v_leg_unit = v_leg / leg_len_px
 
         # Lưới tọa độ pixel
-        yy, xx = np.mgrid[0:h, 0:w]
-        pts_rel = np.stack([xx - crotch_uv[0], yy - crotch_uv[1]], axis=-1)
-        proj_along_leg = pts_rel[:, :, 0] * v_leg_unit[0] + pts_rel[:, :, 1] * v_leg_unit[1]
+        xx = np.arange(w, dtype=np.float64)[None, :]
+        yy = np.arange(h, dtype=np.float64)[:, None]
+        proj_along_leg = ((xx - crotch_uv[0]) * v_leg_unit[0]
+                          + (yy - crotch_uv[1]) * v_leg_unit[1])
 
         # Vùng cấm 1: Toàn bộ vùng Cạp, Khóa kéo, Túi quần & Đinh tán Rivet (proj < 5% chiều dài ống)
         upper_keepout = (proj_along_leg < 0.06 * leg_len_px) & (mask_bin > 0)
@@ -249,6 +268,9 @@ class Step3TrajectoryPipeline3D:
 
         keepout_mask[upper_keepout | cuff_keepout | crotch_keepout | border_keepout] = 255
         spray_able_mask[keepout_mask > 0] = 0
+
+        if not include_density:
+            return spray_able_mask, keepout_mask, None
 
         # Xây dựng Bản đồ mật độ mục tiêu T*(u, v) có ĐÁNH NHÃ (Gaussian Feathering)
         # Tâm đậm nhất dọc theo đoạn nối Thigh -> Knee của từng ống quần, nhạt dần ra biên

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Text;
 using System.Net;
@@ -36,7 +36,7 @@ public class AiServerClient : MonoBehaviour
     [Tooltip("Chọn giao thức kết nối: UDP (Nhanh < 1ms) hoặc HTTP (REST)")]
     public ProtocolType protocol = ProtocolType.UDP;
 
-    [Tooltip("Địa chỉ IP máy chủ AI (Ví dụ: 127.0.0.1 hoặc IP mạng LAN 192.168.1.x)")]
+    [Tooltip("Địa chỉ IP hoặc URL đầy đủ của máy chủ AI, ví dụ 127.0.0.1 hoặc https://ai.example.com")]
     public string serverIp = "127.0.0.1";
 
     [Tooltip("Cổng máy chủ: 5005 cho UDP, 5000 cho HTTP")]
@@ -338,6 +338,90 @@ public class AiServerClient : MonoBehaviour
         SaveSettings();
     }
 
+    public bool UsesHttpUrl => serverIp != null && serverIp.Trim().Contains("://");
+    public bool UsesHttps => GetHttpsOrigin(serverIp) != null;
+
+    private string httpPassword = "";
+    private string httpPasswordOrigin;
+
+    public string HttpPassword
+    {
+        get => string.Equals(httpPasswordOrigin, GetHttpsOrigin(serverIp), StringComparison.OrdinalIgnoreCase)
+            ? httpPassword : "";
+        set
+        {
+            httpPasswordOrigin = GetHttpsOrigin(serverIp);
+            httpPassword = httpPasswordOrigin != null ? (value ?? "") : "";
+        }
+    }
+
+    private static string GetHttpsOrigin(string address)
+    {
+        return Uri.TryCreate((address ?? "").Trim(), UriKind.Absolute, out Uri uri) &&
+            uri.Scheme == Uri.UriSchemeHttps && !string.IsNullOrEmpty(uri.Host) &&
+            string.IsNullOrEmpty(uri.UserInfo)
+            ? uri.GetLeftPart(UriPartial.Authority) : null;
+    }
+
+    private void ApplyHttpAuthentication(UnityWebRequest request, string url)
+    {
+        if (string.IsNullOrEmpty(HttpPassword) ||
+            !string.Equals(httpPasswordOrigin, GetHttpsOrigin(url), StringComparison.OrdinalIgnoreCase)) return;
+
+        string authorization = Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:" + httpPassword));
+        request.SetRequestHeader("Authorization", "Basic " + authorization);
+        request.redirectLimit = 0;
+    }
+
+    private string DescribeHttpError(UnityWebRequest request)
+    {
+        if (request.responseCode == 503)
+        {
+            if (string.Equals(request.GetResponseHeader("X-Wake-Page"), "true", StringComparison.OrdinalIgnoreCase))
+                return "503: Container đang ngủ hoặc đang khởi động. Mở trang SnapDeploy rồi chờ Ping báo sẵn sàng.";
+            return "503: Dịch vụ AI tạm thời chưa sẵn sàng. Kiểm tra Ping và log container.";
+        }
+        if (request.responseCode == 502)
+            return "502 Bad Gateway: máy chủ trung gian chưa kết nối được AI Server. Kiểm tra trạng thái và log container.";
+        if (request.responseCode != 401) return request.error;
+        if (!UsesHttps) return "Server yêu cầu xác thực. Hãy dùng URL HTTPS.";
+        return string.IsNullOrEmpty(HttpPassword)
+            ? "Server yêu cầu xác thực (401). Nhập Mật khẩu AI trong tab Phôi."
+            : "Server từ chối xác thực (401). Kiểm tra mật khẩu dashboard.";
+    }
+
+    private bool TryGetHttpUrl(string endpoint, out string url)
+    {
+        string address = (serverIp ?? "").Trim();
+        int port = protocol == ProtocolType.HTTP ? serverPort : 5000;
+        string candidate = UsesHttpUrl ? address : $"http://{address}:{port}";
+        if (Uri.TryCreate(candidate, UriKind.Absolute, out Uri uri) &&
+            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
+            !string.IsNullOrEmpty(uri.Host) && string.IsNullOrEmpty(uri.UserInfo) &&
+            string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment) &&
+            (uri.AbsolutePath == "/" || uri.AbsolutePath.TrimEnd('/') == "/dashboard"))
+        {
+            url = uri.GetLeftPart(UriPartial.Authority) + endpoint;
+            return true;
+        }
+
+        url = null;
+        lastStatusMessage = "Địa chỉ AI không hợp lệ. Nhập IP và cổng hoặc URL http:// / https://.";
+        return false;
+    }
+
+    private bool CanSendLocalPaths()
+    {
+        return !UsesHttpUrl || (Uri.TryCreate(serverIp.Trim(), UriKind.Absolute, out Uri uri) && uri.IsLoopback);
+    }
+
+    private string GetLocalSamplePath()
+    {
+        if (!CanSendLocalPaths()) return "";
+        return ikController != null && File.Exists(ikController.customPlyPath)
+            ? Path.GetFullPath(ikController.customPlyPath) : "";
+    }
+
     // =========================================================================
     // 1. KIỂM TRA TRẠNG THÁI SERVER (PING STATUS)
     // =========================================================================
@@ -345,6 +429,13 @@ public class AiServerClient : MonoBehaviour
     public void CheckServerStatus(Action<bool, string> onComplete = null)
     {
         SaveSettings();
+        if (protocol == ProtocolType.UDP && UsesHttpUrl)
+        {
+            isServerOnline = false;
+            lastStatusMessage = "Chọn HTTP / HTTPS khi dùng URL đầy đủ của AI Server.";
+            onComplete?.Invoke(false, lastStatusMessage);
+            return;
+        }
         if (protocol == ProtocolType.UDP)
         {
             StartCoroutine(PingUdpRoutine(onComplete));
@@ -414,10 +505,15 @@ public class AiServerClient : MonoBehaviour
 
     private IEnumerator PingHttpRoutine(Action<bool, string> onComplete)
     {
-        string url = $"http://{serverIp.Trim()}:{serverPort}/api/status";
+        if (!TryGetHttpUrl("/api/status", out string url))
+        {
+            isServerOnline = false;
+            onComplete?.Invoke(false, lastStatusMessage);
+            yield break;
+        }
         using (UnityWebRequest req = UnityWebRequest.Get(url))
         {
-            req.timeout = 2;
+            req.timeout = UsesHttpUrl ? 10 : 2;
             yield return req.SendWebRequest();
 
             if (req.result == UnityWebRequest.Result.Success)
@@ -425,13 +521,13 @@ public class AiServerClient : MonoBehaviour
                 AiStatusResponse status = null;
                 try { status = JsonUtility.FromJson<AiStatusResponse>(req.downloadHandler.text); } catch { }
                 isServerOnline = status != null && status.model_ready;
-                lastStatusMessage = !isServerOnline ? "Server chưa sẵn sàng: " + (status != null ? status.model_error : "JSON không hợp lệ") : $"Server HTTP trực tuyến ({serverIp}:{serverPort})";
+                lastStatusMessage = !isServerOnline ? "Server chưa sẵn sàng: " + (status != null ? status.model_error : "JSON không hợp lệ") : $"AI Server trực tuyến ({new Uri(url).GetLeftPart(UriPartial.Authority)})";
                 onComplete?.Invoke(isServerOnline, lastStatusMessage);
             }
             else
             {
                 isServerOnline = false;
-                lastStatusMessage = $"Lỗi kết nối HTTP {serverIp}:{serverPort} ({req.error})";
+                lastStatusMessage = $"Ping AI Server: {DescribeHttpError(req)}";
                 onComplete?.Invoke(false, lastStatusMessage);
             }
         }
@@ -469,11 +565,16 @@ public class AiServerClient : MonoBehaviour
         string progressId = Guid.NewGuid().ToString("N");
         string command = previewOnly ? "CAPTURE_PREVIEW" : "CAPTURE_DETECT";
         string payload = $"{{\"command\":\"{command}\",\"progress_id\":\"{progressId}\",\"preview_nominal_rig\":true}}";
-        activeCaptureProgressId = previewOnly ? null : progressId;
         // Camera capture uses HTTP for clear errors and the longer acquisition timeout.
-        string url = $"http://{serverIp.Trim()}:5000/api/capture";
+        if (!TryGetHttpUrl("/api/capture", out string url))
+        {
+            FinishPipelineProgress(false);
+            yield break;
+        }
+        activeCaptureProgressId = previewOnly ? null : progressId;
         using (UnityWebRequest request = new UnityWebRequest(url, "POST"))
         {
+            ApplyHttpAuthentication(request, url);
             request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
@@ -484,7 +585,7 @@ public class AiServerClient : MonoBehaviour
             activeCaptureProgressId = null;
             if (request.result != UnityWebRequest.Result.Success)
             {
-                lastStatusMessage = "Không kết nối được camera server: " + request.error;
+                lastStatusMessage = DescribeHttpError(request);
                 FinishPipelineProgress(false);
                 yield break;
             }
@@ -510,8 +611,10 @@ public class AiServerClient : MonoBehaviour
     {
         while (activeCaptureProgressId == progressId)
         {
-            using (var request = UnityWebRequest.Get($"{url}/progress/{progressId}"))
+            string progressUrl = $"{url}/progress/{progressId}";
+            using (var request = UnityWebRequest.Get(progressUrl))
             {
+                ApplyHttpAuthentication(request, progressUrl);
                 request.timeout = 2;
                 yield return request.SendWebRequest();
                 if (activeCaptureProgressId != progressId || request.responseCode == 404) yield break;
@@ -625,6 +728,12 @@ public class AiServerClient : MonoBehaviour
         SaveSettings();
 
         if (string.IsNullOrEmpty(sample)) sample = "pcl_101";
+        if (protocol == ProtocolType.UDP && UsesHttpUrl)
+        {
+            lastStatusMessage = "Chọn HTTP / HTTPS khi dùng URL đầy đủ của AI Server.";
+            onComplete?.Invoke(null);
+            return;
+        }
 
         if (protocol == ProtocolType.UDP)
         {
@@ -643,12 +752,18 @@ public class AiServerClient : MonoBehaviour
     public void SendCustomDraw3D(string sample, List<List<Vector2>> strokesNorm, float zOffsetMm = 22.0f, Action<AiDetectionResult> onComplete = null)
     {
         if (isProcessing || strokesNorm == null || strokesNorm.Count == 0) return;
+        if (protocol == ProtocolType.UDP && UsesHttpUrl)
+        {
+            lastStatusMessage = "Chọn HTTP / HTTPS khi dùng URL đầy đủ của AI Server.";
+            onComplete?.Invoke(null);
+            return;
+        }
         SaveSettings();
         if (string.IsNullOrEmpty(sample)) sample = ikController != null ? ikController.selectedSampleName : "pcl_101";
 
         StringBuilder sb = new StringBuilder();
         string baseJson = JsonUtility.ToJson(new DetectionRequest { command = "CUSTOM_DRAW_3D", sample = sample,
-            sample_path = ikController != null && File.Exists(ikController.customPlyPath) ? Path.GetFullPath(ikController.customPlyPath) : "" });
+            sample_path = GetLocalSamplePath() });
         sb.Append(baseJson.Substring(0, baseJson.Length - 1)).Append(",");
         sb.Append("\"z_offset_mm\":").Append(zOffsetMm.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)).Append(",\"strokes\":[");
         for (int s = 0; s < strokesNorm.Count; s++)
@@ -679,8 +794,15 @@ public class AiServerClient : MonoBehaviour
 
         if (protocol == ProtocolType.HTTP)
         {
-            using (UnityWebRequest request = new UnityWebRequest($"http://{host}:{port}/api/custom_draw_3d", "POST"))
+            if (!TryGetHttpUrl("/api/custom_draw_3d", out string url))
             {
+                isProcessing = false;
+                onComplete?.Invoke(null);
+                yield break;
+            }
+            using (UnityWebRequest request = new UnityWebRequest(url, "POST"))
+            {
+                ApplyHttpAuthentication(request, url);
                 request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(jsonPayload));
                 request.downloadHandler = new DownloadHandlerBuffer();
                 request.SetRequestHeader("Content-Type", "application/json");
@@ -689,7 +811,7 @@ public class AiServerClient : MonoBehaviour
                 isProcessing = false;
                 if (request.result != UnityWebRequest.Result.Success)
                 {
-                    lastStatusMessage = "Lỗi HTTP: " + request.error;
+                    lastStatusMessage = "Lỗi HTTP: " + DescribeHttpError(request);
                     onComplete?.Invoke(null);
                     yield break;
                 }
@@ -751,7 +873,7 @@ public class AiServerClient : MonoBehaviour
         int port = serverPort;
         string jsonCmd = JsonUtility.ToJson(new DetectionRequest {
             command = "TRIGGER_DETECT", size = size, sample = sample,
-            sample_path = ikController != null && File.Exists(ikController.customPlyPath) ? Path.GetFullPath(ikController.customPlyPath) : ""
+            sample_path = GetLocalSamplePath()
         });
 
         Task<string> udpTask = Task.Run(() =>
@@ -810,17 +932,30 @@ public class AiServerClient : MonoBehaviour
 
     private IEnumerator TriggerHttpRoutine(string size, string sample, Action<AiDetectionResult> onComplete)
     {
+        if (!CanSendLocalPaths())
+        {
+            yield return TriggerCloudPlyDetection(onComplete);
+            yield break;
+        }
+
         BeginPipelineProgress(capture: false, detect: true);
         lastStatusMessage = $"[HTTP] Đang nhận diện {sample} (Size {size})...";
 
-        string url = $"http://{serverIp.Trim()}:{serverPort}/api/detect";
+        if (!TryGetHttpUrl("/api/detect", out string url))
+        {
+            isServerOnline = false;
+            FinishPipelineProgress(false);
+            onComplete?.Invoke(null);
+            yield break;
+        }
         string jsonBody = JsonUtility.ToJson(new DetectionRequest {
             command = "TRIGGER_DETECT", size = size, sample = sample,
-            sample_path = ikController != null && File.Exists(ikController.customPlyPath) ? Path.GetFullPath(ikController.customPlyPath) : ""
+            sample_path = GetLocalSamplePath()
         });
 
         using (UnityWebRequest req = new UnityWebRequest(url, "POST"))
         {
+            ApplyHttpAuthentication(req, url);
             byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonBody);
             req.uploadHandler = new UploadHandlerRaw(bodyRaw);
             req.downloadHandler = new DownloadHandlerBuffer();
@@ -846,11 +981,175 @@ public class AiServerClient : MonoBehaviour
             else
             {
                 isServerOnline = false;
-                lastStatusMessage = $"Lỗi HTTP: {req.error}";
+                lastStatusMessage = $"Lỗi HTTP: {DescribeHttpError(req)}";
                 FinishPipelineProgress(false);
                 onComplete?.Invoke(null);
             }
         }
+    }
+
+    [Serializable]
+    private sealed class CloudDetectionResponse
+    {
+        public string state = "";
+        public string job_id = "";
+        public string message = "";
+        public string garment_size = "";
+        public string landmarks_json = "";
+        public float time_generation_s = 0f;
+    }
+
+    private string FindActivePlyPath()
+    {
+        if (ikController == null) return null;
+
+        var loader = FindAnyObjectByType<PLYDirectLoader>();
+        string path = ikController.customPlyPath;
+        if (loader != null && !string.IsNullOrEmpty(loader.plyFilePath))
+            path = loader.plyFilePath;
+        if (string.IsNullOrEmpty(path)) return null;
+        if (!File.Exists(path) && loader != null)
+            path = loader.ResolvePath(path);
+        return File.Exists(path) ? Path.GetFullPath(path) : null;
+    }
+
+    private static CloudDetectionResponse ReadCloudDetectionResponse(UnityWebRequest request)
+    {
+        try
+        {
+            return JsonUtility.FromJson<CloudDetectionResponse>(request.downloadHandler.text);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private void FailCloudDetection(string message, Action<AiDetectionResult> onComplete)
+    {
+        lastStatusMessage = message;
+        FinishPipelineProgress(false);
+        onComplete?.Invoke(null);
+    }
+
+    private IEnumerator TriggerCloudPlyDetection(Action<AiDetectionResult> onComplete)
+    {
+        BeginPipelineProgress(capture: false, detect: true);
+        if (!TryGetHttpUrl("/api/detect/ply", out string uploadUrl))
+        {
+            FailCloudDetection(lastStatusMessage, onComplete);
+            yield break;
+        }
+
+        string ply = FindActivePlyPath();
+        if (string.IsNullOrEmpty(ply))
+        {
+            FailCloudDetection("Chưa có file PLY của phôi đang mở. Chọn file PLY rồi nhận diện lại.", onComplete);
+            yield break;
+        }
+
+        const long maxUploadBytes = 80L * 1024 * 1024;
+        if (new FileInfo(ply).Length > maxUploadBytes)
+        {
+            FailCloudDetection("File PLY vượt giới hạn 80 MiB của AI Server cloud.", onComplete);
+            yield break;
+        }
+
+        string sample = ikController.GetActiveCloudSampleName();
+        lastStatusMessage = $"Đang gửi PLY [{Path.GetFileName(ply)}] lên AI Server...";
+        string jobId;
+        using (var request = new UnityWebRequest(uploadUrl, "POST"))
+        {
+            request.uploadHandler = new UploadHandlerFile(ply);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/octet-stream");
+            ApplyHttpAuthentication(request, uploadUrl);
+            request.timeout = 180;
+            yield return request.SendWebRequest();
+
+            CloudDetectionResponse response = ReadCloudDetectionResponse(request);
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                string message = request.responseCode == 404
+                    ? "AI Server chưa có API nhận file PLY. Hãy dùng bản SnapDeploy v4."
+                    : (!string.IsNullOrEmpty(response?.message) ? response.message : DescribeHttpError(request));
+                FailCloudDetection($"Gửi PLY (HTTP {request.responseCode}): {message}", onComplete);
+                yield break;
+            }
+            if (response == null || !Guid.TryParseExact(response.job_id, "N", out _))
+            {
+                FailCloudDetection("AI Server trả mã nhận diện không hợp lệ.", onComplete);
+                yield break;
+            }
+            jobId = response.job_id;
+        }
+
+        lastStatusMessage = $"Đã gửi PLY. Đang nhận diện [{sample}]...";
+        string jobUrl = uploadUrl + "/" + jobId;
+        float deadline = Time.realtimeSinceStartup + 420f;
+        int temporaryFailures = 0;
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            yield return new WaitForSecondsRealtime(3f);
+            using (var request = UnityWebRequest.Get(jobUrl))
+            {
+                ApplyHttpAuthentication(request, jobUrl);
+                request.timeout = 15;
+                yield return request.SendWebRequest();
+
+                CloudDetectionResponse response = ReadCloudDetectionResponse(request);
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    bool wakePage = string.Equals(request.GetResponseHeader("X-Wake-Page"), "true", StringComparison.OrdinalIgnoreCase);
+                    if (request.responseCode == 503 && !wakePage && temporaryFailures++ < 3)
+                    {
+                        lastStatusMessage = "AI Server trả 503 khi đọc kết quả. Đang thử lại...";
+                        continue;
+                    }
+                    string message = !string.IsNullOrEmpty(response?.message) ? response.message : DescribeHttpError(request);
+                    FailCloudDetection($"Chờ kết quả AI (HTTP {request.responseCode}): {message}", onComplete);
+                    yield break;
+                }
+                temporaryFailures = 0;
+                if (response?.state == "processing") continue;
+                if (response?.state != "done" || string.IsNullOrEmpty(response.landmarks_json))
+                {
+                    FailCloudDetection(response?.message ?? "AI Server không trả 12 mốc và đường bao.", onComplete);
+                    yield break;
+                }
+                if (!string.Equals(FindActivePlyPath(), ply, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(ikController.GetActiveCloudSampleName(), sample, StringComparison.Ordinal))
+                {
+                    FailCloudDetection("Phôi đã thay đổi trong khi nhận diện. Hãy bấm Nhận diện trên phôi đang mở.", onComplete);
+                    yield break;
+                }
+
+                string landmarksPath;
+                try
+                {
+                    string directory = Path.Combine(Application.persistentDataPath, "cloud_landmarks");
+                    Directory.CreateDirectory(directory);
+                    landmarksPath = Path.Combine(directory, jobId + "_landmarks_seg.json");
+                    File.WriteAllText(landmarksPath, response.landmarks_json, Encoding.UTF8);
+                }
+                catch (IOException ex)
+                {
+                    FailCloudDetection("Không lưu được kết quả nhận diện: " + ex.Message, onComplete);
+                    yield break;
+                }
+                yield return ApplyPipelineResult(new AiDetectionResult
+                {
+                    status = "SUCCESS",
+                    sample = sample,
+                    garment_size = response.garment_size,
+                    landmarks_json = landmarksPath,
+                    time_generation_s = response.time_generation_s,
+                    simulation_only = true
+                }, onComplete);
+                yield break;
+            }
+        }
+        FailCloudDetection("AI Server chưa nhận diện xong trong thời gian chờ. Kiểm tra log container.", onComplete);
     }
 
     private void ProcessAiResult(AiDetectionResult result, Action<AiDetectionResult> onComplete)
@@ -1072,9 +1371,14 @@ public class AiServerClient : MonoBehaviour
 
     private IEnumerator RefreshFeedbackStatusRoutine(Action<bool> onComplete)
     {
-        string url = $"http://{serverIp.Trim()}:5000/api/feedback/status";
+        if (!TryGetHttpUrl("/api/feedback/status", out string url))
+        {
+            onComplete?.Invoke(false);
+            yield break;
+        }
         using (UnityWebRequest req = UnityWebRequest.Get(url))
         {
+            ApplyHttpAuthentication(req, url);
             req.timeout = 2;
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success)
@@ -1139,7 +1443,7 @@ public class AiServerClient : MonoBehaviour
         sb.Append("{\"command\":\"SAVE_LANDMARK_FEEDBACK\",\"sample\":\"").Append(EscapeJsonString(safeSample)).Append("\"");
         sb.Append(",\"threshold\":").Append(Mathf.Max(1, feedbackRetrainThreshold));
         sb.Append(",\"auto_retrain\":").Append(autoRetrain ? "true" : "false");
-        if (!string.IsNullOrEmpty(knownImagePath) && File.Exists(knownImagePath))
+        if (CanSendLocalPaths() && !string.IsNullOrEmpty(knownImagePath) && File.Exists(knownImagePath))
         {
             sb.Append(",\"image_path\":\"").Append(EscapeJsonString(Path.GetFullPath(knownImagePath))).Append("\"");
         }
@@ -1156,15 +1460,26 @@ public class AiServerClient : MonoBehaviour
         }
         sb.Append("]}");
 
-        string url = $"http://{serverIp.Trim()}:5000/api/feedback/landmarks";
+        if (!TryGetHttpUrl("/api/feedback/landmarks", out string url))
+        {
+            SaveFeedbackOfflineAndMaybeRetrain(safeSample, landmarksUV12, knownImagePath, jpgBytes, autoRetrain, onComplete);
+            yield break;
+        }
         using (UnityWebRequest req = new UnityWebRequest(url, "POST"))
         {
+            ApplyHttpAuthentication(req, url);
             req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(sb.ToString()));
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
             req.timeout = 15;
             yield return req.SendWebRequest();
 
+            if (req.responseCode == 401 && UsesHttps)
+            {
+                feedbackStatusMessage = DescribeHttpError(req);
+                onComplete?.Invoke(false, feedbackStatusMessage);
+                yield break;
+            }
             if (req.result == UnityWebRequest.Result.Success)
             {
                 try
@@ -1307,15 +1622,27 @@ public class AiServerClient : MonoBehaviour
     private IEnumerator TriggerRetrainPoseRoutine(bool force, Action<bool, string> onComplete)
     {
         string payload = $"{{\"command\":\"RETRAIN_POSE\",\"force\":{(force ? "true" : "false")},\"threshold\":{Mathf.Max(1, feedbackRetrainThreshold)},\"epochs\":25}}";
-        string url = $"http://{serverIp.Trim()}:5000/api/feedback/retrain";
+        if (!TryGetHttpUrl("/api/feedback/retrain", out string url))
+        {
+            bool started = LaunchOfflineRetrainProcess(force);
+            onComplete?.Invoke(started, feedbackStatusMessage);
+            yield break;
+        }
         using (UnityWebRequest req = new UnityWebRequest(url, "POST"))
         {
+            ApplyHttpAuthentication(req, url);
             req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
             req.timeout = 8;
             yield return req.SendWebRequest();
 
+            if (req.responseCode == 401 && UsesHttps)
+            {
+                feedbackStatusMessage = DescribeHttpError(req);
+                onComplete?.Invoke(false, feedbackStatusMessage);
+                yield break;
+            }
             if (req.result == UnityWebRequest.Result.Success)
             {
                 try

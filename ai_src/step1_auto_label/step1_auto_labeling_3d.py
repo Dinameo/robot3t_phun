@@ -35,7 +35,6 @@ if sys.platform.startswith('win'):
 
 import numpy as np
 import cv2
-from sklearn.linear_model import RANSACRegressor, LinearRegression
 
 
 class AutoLabeling3D:
@@ -110,6 +109,8 @@ class AutoLabeling3D:
 
         n_samples = min(40000, len(pts_xy))
         idx = np.random.default_rng(42).choice(len(pts_xy), size=n_samples, replace=False)
+
+        from sklearn.linear_model import RANSACRegressor, LinearRegression
 
         ransac = RANSACRegressor(LinearRegression(), min_samples=3, residual_threshold=2.5, max_trials=100, random_state=42)
         ransac.fit(pts_xy[idx], pts_z[idx])
