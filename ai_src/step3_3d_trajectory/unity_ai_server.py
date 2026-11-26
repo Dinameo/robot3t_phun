@@ -367,9 +367,13 @@ class DobotUnityAIServer:
                 "nz": round(float(normal_3d[2]), 4),
             })
 
-        # 2. Đường bao ngoài Segment thân quần 3D (Garment Contour)
+        # Export only contour vertices backed by measured XYZ. The RGB mask
+        # can include pixels beyond the depth image's usable surface.
+        valid_xyz = np.isfinite(xyz).all(axis=-1) & (xyz[:, :, 2] > 10.0)
+
         def extract_contour_3d(binary_mask, max_pts=160):
-            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            measured_mask = np.where(valid_xyz, binary_mask, 0)
+            contours, _ = cv2.findContours(measured_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
             if not contours:
                 return []
             contours_sorted = sorted(contours, key=cv2.contourArea, reverse=True)
@@ -382,9 +386,7 @@ class DobotUnityAIServer:
                 sampled = pts[::step]
                 loop_3d = []
                 for u_px, v_px in sampled:
-                    p3d, _ = self.pipeline.project_point_and_normal_3d(
-                        xyz, int(u_px), int(v_px), table_normal, radius_px=10
-                    )
+                    p3d = xyz[v_px, u_px]
                     gx = 765.0 + float(p3d[1])
                     gy = -float(p3d[0])
                     gz = (1685.0 - float(p3d[2])) + 2.0
@@ -398,6 +400,8 @@ class DobotUnityAIServer:
             return result_loops
 
         garment_loops = extract_contour_3d(mask_bin, max_pts=140)
+        if not garment_loops:
+            raise ValueError("Không đủ điểm 3D đo được trong vùng quần để xuất đường bao. Hãy chụp lại phôi.")
         spray_loops = extract_contour_3d(spray_able_mask, max_pts=90)
 
         # 3. Tính kích thước vật lý từ 12 mốc và phân loại Size Quần (S / M / L) theo ngưỡng K-Means (K=3)
