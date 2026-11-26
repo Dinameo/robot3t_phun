@@ -590,7 +590,7 @@ public class manual : MonoBehaviour
         DrawPoseRow(3, 4, 5);
 
         GUILayout.BeginHorizontal();
-        useAdaptiveTilt = GUILayout.Toggle(useAdaptiveTilt, " Adaptive Tilt (Tiếp cận thích ứng)", AntigravityUITheme.StyleToggle);
+        useAdaptiveTilt = AntigravityUITheme.Checkbox(useAdaptiveTilt, " Adaptive Tilt (Tiếp cận thích ứng)");
         GUILayout.EndHorizontal();
 
         GUILayout.BeginHorizontal();
@@ -865,9 +865,9 @@ public class manual : MonoBehaviour
                 // TAB 2: XEM (VIEW) - BẬT TẮT CÁC BẢNG PANEL
                 GUILayout.BeginVertical(AntigravityUITheme.InnerBoxStyle(), GUILayout.Width(460));
                 GUILayout.BeginHorizontal();
-                showJointsPanel = GUILayout.Toggle(showJointsPanel, " Bảng Khớp q1-q6", AntigravityUITheme.StyleToggle);
-                showFkMonitorPanel = GUILayout.Toggle(showFkMonitorPanel, " Giám Sát FK TCP", AntigravityUITheme.StyleToggle);
-                showIkTargetPanel = GUILayout.Toggle(showIkTargetPanel, " Mục Tiêu IK", AntigravityUITheme.StyleToggle);
+                showJointsPanel = AntigravityUITheme.Checkbox(showJointsPanel, " Bảng Khớp q1-q6");
+                showFkMonitorPanel = AntigravityUITheme.Checkbox(showFkMonitorPanel, " Giám Sát FK TCP");
+                showIkTargetPanel = AntigravityUITheme.Checkbox(showIkTargetPanel, " Mục Tiêu IK");
                 GUILayout.EndHorizontal();
                 GUILayout.BeginHorizontal();
                 if (GUILayout.Button("Hiện Tất Cả Bảng", AntigravityUITheme.StylePrimaryButton, GUILayout.Height(20)))
@@ -912,7 +912,7 @@ public class manual : MonoBehaviour
             float dockH = Screen.height - totalRibbonH - 16f;
             Rect dockRect = new Rect(screenW - dockW - 12f, totalRibbonH + 8f, dockW, dockH);
 
-            GUI.DrawTexture(dockRect, AntigravityUITheme.TexBgDock);
+            AntigravityUITheme.DrawSoftDock(dockRect);
             GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, 1, dockRect.height), AntigravityUITheme.TexBorder);
             GUI.DrawTexture(new Rect(dockRect.x, dockRect.y, dockRect.width, 1), AntigravityUITheme.TexBorder);
             GUI.DrawTexture(new Rect(dockRect.x, dockRect.y + dockRect.height - 1, dockRect.width, 1), AntigravityUITheme.TexBorder);

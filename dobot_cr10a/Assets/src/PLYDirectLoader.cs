@@ -99,7 +99,7 @@ public class PLYDirectLoader : MonoBehaviour
 
     private void DisableLegacyRootMeshOnSelf()
     {
-        // Vô hiệu hóa MeshFilter/MeshRenderer tĩnh gắn trực tiếp trên root Garment_PLY_Model trong SampleScene.unity
+        // Vô hiệu hóa MeshFilter/MeshRenderer tĩnh gắn trực tiếp trên root Garment_PLY_Model trong phunson.unity
         // (m_Mesh: full_cloud_world), tránh hiện đè mẫu phôi cũ nằm dưới phôi mới!
         MeshRenderer rootMr = GetComponent<MeshRenderer>();
         if (rootMr != null) rootMr.enabled = false;
@@ -286,6 +286,55 @@ public class PLYDirectLoader : MonoBehaviour
     private float topDownCropMaxZ = 0.95f;
     private readonly Vector3[] actualCaptureFootprintWorld = new Vector3[4];
     private bool hasActualCaptureFootprint = false;
+    private bool hasSensorRayBounds;
+    private Vector4 sensorRayBounds;
+    private bool hasSensorWorldBasis;
+    private Vector3 sensorWorldOrigin;
+    private Vector3 sensorWorldRight;
+    private Vector3 sensorWorldDown;
+    private Vector3 sensorWorldForward;
+
+    private struct SensorRayAxisFit
+    {
+        private int count;
+        private double sumU, sumRay, sumUU, sumURay, sumRayRay;
+
+        public void Add(double u, double ray)
+        {
+            if (double.IsNaN(ray) || double.IsInfinity(ray)) return;
+            count++;
+            sumU += u;
+            sumRay += ray;
+            sumUU += u * u;
+            sumURay += u * ray;
+            sumRayRay += ray * ray;
+        }
+
+        public bool TryGetBounds(out float min, out float max)
+        {
+            min = max = 0f;
+            if (count < 32) return false;
+            double variance = sumUU - sumU * sumU / count;
+            if (variance < count * 0.005) return false;
+
+            double covariance = sumURay - sumU * sumRay / count;
+            double slope = covariance / variance;
+            double intercept = (sumRay - slope * sumU) / count;
+            double residual = (sumRayRay - sumRay * sumRay / count - slope * covariance) / count;
+            if (slope < 0.1 || slope > 4.0 || residual > 0.0004 ||
+                intercept >= 0.0 || intercept + slope <= 0.0) return false;
+
+            min = (float)intercept;
+            max = (float)(intercept + slope);
+            return true;
+        }
+    }
+
+    public bool TryGetSensorRayBounds(out Vector4 bounds)
+    {
+        bounds = sensorRayBounds;
+        return hasOrganizedCameraFrame && hasSensorRayBounds;
+    }
 
     [Serializable]
     private class FrameMetaJson
@@ -566,6 +615,8 @@ public class PLYDirectLoader : MonoBehaviour
                 hasOrganizedCameraFrame = false;
                 hasTopDownCameraTexture = false;
                 hasActualCaptureFootprint = false;
+                hasSensorRayBounds = false;
+                hasSensorWorldBasis = false;
                 camGridW = 0;
                 camGridH = 0;
                 camGridWorldPos = null;
@@ -586,6 +637,25 @@ public class PLYDirectLoader : MonoBehaviour
                     Color32[] camPixels = new Color32[texW * texH];
                     Vector3[] gridPos = new Vector3[texW * texH];
                     bool[] gridValid = new bool[texW * texH];
+                    int fitStep = texStep * 6;
+                    var fitX = new SensorRayAxisFit();
+                    var fitY = new SensorRayAxisFit();
+
+                    Vector3 CameraPointToLoaderLocal(Vector3 cameraMm)
+                    {
+                        if (useCalib) return calibMgr.CameraMmToUnityWorld(cameraMm, robotGlobalRef);
+                        if (!alignWithCameraRig) return cameraMm * 0.001f;
+                        return cameraOrigin + new Vector3(cameraMm.x, -cameraMm.z, -cameraMm.y) * 0.001f;
+                    }
+
+                    if (useCalib || alignWithCameraRig)
+                    {
+                        sensorWorldOrigin = transform.TransformPoint(CameraPointToLoaderLocal(Vector3.zero));
+                        sensorWorldRight = transform.TransformPoint(CameraPointToLoaderLocal(Vector3.right * 1000f)) - sensorWorldOrigin;
+                        sensorWorldDown = transform.TransformPoint(CameraPointToLoaderLocal(Vector3.up * 1000f)) - sensorWorldOrigin;
+                        sensorWorldForward = transform.TransformPoint(CameraPointToLoaderLocal(Vector3.forward * 1000f)) - sensorWorldOrigin;
+                        hasSensorWorldBasis = true;
+                    }
 
                     for (int y = 0; y < h; y++)
                     {
@@ -601,18 +671,19 @@ public class PLYDirectLoader : MonoBehaviour
                             byte b = br.ReadByte();
 
                             bool validDepth = !float.IsNaN(vz) && vz > 400f && vz < 2500f;
+                            if (validDepth && y % fitStep == 0 && x % fitStep == 0)
+                            {
+                                // Organized PLY gives a measured optical ray for each valid pixel.
+                                fitX.Add((x + 0.5) / w, vx / (double)vz);
+                                fitY.Add((y + 0.5) / h, vy / (double)vz);
+                            }
                             bool sampleCloud = (y % step == 0 && x % step == 0);
                             bool sampleTex = sampleTexY && (x % texStep == 0);
 
                             Vector3 pos = Vector3.zero;
                             if (validDepth && (sampleCloud || sampleTex))
                             {
-                                if (useCalib)
-                                    pos = calibMgr.CameraMmToUnityWorld(new Vector3(vx, vy, vz), robotGlobalRef);
-                                else if (alignWithCameraRig)
-                                    pos = new Vector3(cameraOrigin.x + vx * 0.001f, cameraOrigin.y - vz * 0.001f, cameraOrigin.z - vy * 0.001f);
-                                else
-                                    pos = new Vector3(vx * 0.001f, vy * 0.001f, vz * 0.001f);
+                                pos = CameraPointToLoaderLocal(new Vector3(vx, vy, vz));
                             }
 
                             if (sampleTex)
@@ -659,6 +730,12 @@ public class PLYDirectLoader : MonoBehaviour
                     cameraImageWidth = w;
                     cameraImageHeight = h;
                     hasOrganizedCameraFrame = true;
+                    if (fitX.TryGetBounds(out float xMin, out float xMax) &&
+                        fitY.TryGetBounds(out float yMin, out float yMax))
+                    {
+                        sensorRayBounds = new Vector4(xMin, xMax, yMin, yMax);
+                        hasSensorRayBounds = true;
+                    }
                 }
                 else
                 {
@@ -892,6 +969,11 @@ public class PLYDirectLoader : MonoBehaviour
     {
         hasActualCaptureFootprint = false;
         float planeY = estimatedTableY + 0.005f;
+        if (TryProjectSensorFootprintToTable(estimatedTableY, planeY))
+        {
+            hasActualCaptureFootprint = true;
+            return;
+        }
 
         if (hasOrganizedCameraFrame && camGridWorldPos != null && camGridWorldValid != null && camGridW > 1 && camGridH > 1)
         {
@@ -960,6 +1042,23 @@ public class PLYDirectLoader : MonoBehaviour
             actualCaptureFootprintWorld[3] = new Vector3(topDownCropMinX, planeY, topDownCropMinZ);
             hasActualCaptureFootprint = true;
         }
+    }
+
+    private bool TryProjectSensorFootprintToTable(float tableY, float displayY)
+    {
+        if (!hasSensorWorldBasis || !TryGetSensorRayBounds(out Vector4 rays)) return false;
+        for (int i = 0; i < actualCaptureFootprintWorld.Length; i++)
+        {
+            float x = i == 0 || i == 3 ? rays.x : rays.y;
+            float y = i < 2 ? rays.z : rays.w;
+            Vector3 direction = sensorWorldForward + sensorWorldRight * x + sensorWorldDown * y;
+            if (Mathf.Abs(direction.y) < 1e-4f) return false;
+            float distance = (tableY - sensorWorldOrigin.y) / direction.y;
+            if (distance <= 0f || distance > 10f) return false;
+            Vector3 point = sensorWorldOrigin + direction * distance;
+            actualCaptureFootprintWorld[i] = new Vector3(point.x, displayY, point.z);
+        }
+        return true;
     }
 
     public bool TryGetActualCameraCaptureFootprintWorld(out Vector3 cTL, out Vector3 cTR, out Vector3 cBR, out Vector3 cBL)

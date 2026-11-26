@@ -59,7 +59,7 @@ Nếu PowerShell báo không tìm thấy `py`, cài Python hoặc dùng đườn
 ## Chạy thử trong Unity
 
 1. Mở **Unity Hub**, chọn **Add project from disk** và trỏ tới thư mục `dobot_cr10a`. Chờ Unity nhập assets, tải packages và biên dịch C#.
-2. Trong cửa sổ **Project**, mở scene chính trong `Assets/Scenes/`. Nhánh `main` dùng [SampleScene.unity](dobot_cr10a/Assets/Scenes/SampleScene.unity). Nếu bản đang mở đã đổi tên scene thành `phunson.unity`, dùng scene đó. Bấm **Play** và chuyển sang cửa sổ **Game**.
+2. Trong cửa sổ **Project**, mở scene chính [phunson.unity](dobot_cr10a/Assets/Scenes/phunson.unity) trong `Assets/Scenes/`. Bấm **Play** và chuyển sang cửa sổ **Game**.
 3. Vào **1. Phôi → Nạp phôi → Chọn file .PLY…**. Chọn [full_cloud_world.ply](dobot_cr10a/Assets/PointCloud/full_cloud_world.ply) trong `dobot_cr10a/Assets/PointCloud/`. Dùng **2. Views → Focus Phôi** nếu cần đưa phôi vào giữa khung nhìn.
 4. Vào **5. Xuất → Nạp file CSV**, chọn [pants_outline_cr10a.csv](dobot_cr10a/output_drawing/pants_outline_cr10a.csv) trong `dobot_cr10a/output_drawing/`. Nút **Mẫu mặc định** trong tab Phôi cũng nạp đường bao mẫu này.
 5. Mở **7. ĐG & An toàn → Kiểm tra an toàn → Quét lại quỹ đạo**. Kiểm tra các điểm báo lỗi trong **4. Chỉnh điểm**.
@@ -166,7 +166,7 @@ Tại thư mục gốc của kho lưu trữ, khởi động tiến trình AI c�
 | **5. Xuất** | Xuất Dobot Python, CSV quỹ đạo 6-DOF và YAML ROS 2/MoveIt 2. Xem trước nội dung, mở thư mục xuất hoặc nạp CSV để kiểm tra. |
 | **6. Cấu hình** | **Robot & Đầu phun** chỉnh các trục, ưu tiên nghiệm IK, thông số chuyển động, offset TCP và vệt phun. **Hiệu chuẩn Camera** chỉnh pose camera, kiểm tra sai số và quản lý ma trận biến đổi 4×4. |
 | **7. ĐG & An toàn** | So sánh P1–P4 theo bộ chỉ tiêu, hiển thị heatmap Gauss, chọn dữ liệu tham chiếu, xuất CSV đánh giá và quét lỗi quỹ đạo trước khi mô phỏng hoặc xuất. |
-| **8. Giới thiệu** (bản có tab này) | Thông tin ứng dụng, Robot 3T và các nhóm sản phẩm của Công ty Cổ phần Chế tạo máy 3C. |
+| **8. Giới thiệu** | Thông tin ứng dụng, Robot 3T và các nhóm sản phẩm của Công ty Cổ phần Chế tạo máy 3C. |
 
 Thanh trên cùng có các thao tác nhanh để chạy/tạm dừng, về Home, bật/tắt quỹ đạo, ẩn hoặc mở bảng bên phải và lưu setup. Kéo mép bảng để chỉnh chiều rộng. **Lưu setup** lưu cấu hình Workbench vào `dobot_cr10a/UserSettings/CR10A_WorkbenchSetup.json`. Cấu hình hiệu chuẩn có tệp `CR10A_CalibrationSetup.json` trong cùng thư mục.
 

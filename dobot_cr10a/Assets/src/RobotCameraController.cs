@@ -77,7 +77,6 @@ public class RobotCameraController : MonoBehaviour
     private bool isInitialized = false;
     private RenderTexture zividPipRT;
     private const int ZividPipTexWidth = 384;
-    private const int ZividPipTexHeight = 256;
 
     private void OnValidate()
     {
@@ -172,6 +171,7 @@ public class RobotCameraController : MonoBehaviour
 
     private void OnDisable()
     {
+        workbenchKeyboardFocused = false;
         if (Application.isPlaying && isInitialized)
         {
             PlayerPrefs.SetInt("CR10A_Camera_InvertScroll", invertScroll ? 1 : 0);
@@ -234,9 +234,18 @@ public class RobotCameraController : MonoBehaviour
         bool needPip = showZividPipWindow && !isZividCameraView;
         if (needPip)
         {
+            int pipHeight = Mathf.Max(1, Mathf.RoundToInt(ZividPipTexWidth / rig.CaptureAspect));
+            if (zividPipRT != null && zividPipRT.height != pipHeight)
+            {
+                rigUnityCam.targetTexture = null;
+                zividPipRT.Release();
+                if (Application.isPlaying) Destroy(zividPipRT);
+                else DestroyImmediate(zividPipRT);
+                zividPipRT = null;
+            }
             if (zividPipRT == null)
             {
-                zividPipRT = new RenderTexture(ZividPipTexWidth, ZividPipTexHeight, 16, RenderTextureFormat.ARGB32)
+                zividPipRT = new RenderTexture(ZividPipTexWidth, pipHeight, 16, RenderTextureFormat.ARGB32)
                 {
                     name = "ZividCameraPiP_RT",
                     hideFlags = HideFlags.DontSave
@@ -247,7 +256,7 @@ public class RobotCameraController : MonoBehaviour
                 rigUnityCam.targetTexture = zividPipRT;
             rigUnityCam.rect = new Rect(0f, 0f, 1f, 1f);
             rigUnityCam.depth = -2f;
-            rigUnityCam.fieldOfView = Mathf.Clamp(rig.cameraFovDeg, 20f, 90f);
+            rig.ApplyCaptureProjection(rigUnityCam);
             if (!rigUnityCam.enabled) rigUnityCam.enabled = true;
         }
         else
@@ -371,8 +380,13 @@ public class RobotCameraController : MonoBehaviour
         UpdateCameraTransform();
     }
 
+    // Read IMGUI focus during OnGUI, then use it from Update for either input backend.
+    private bool workbenchKeyboardFocused;
+
     private void HandleKeyboardShortcuts()
     {
+        if (workbenchKeyboardFocused || DobotCR10AIKController.WorkbenchAboutVisible) return;
+
 #if ENABLE_INPUT_SYSTEM
         Keyboard kb = Keyboard.current;
         if (kb != null)
@@ -683,6 +697,15 @@ public class RobotCameraController : MonoBehaviour
 
     private void OnGUI()
     {
+        if (Event.current.type == EventType.Repaint)
+            workbenchKeyboardFocused = GUIUtility.keyboardControl != 0;
+
+        if (DobotCR10AIKController.WorkbenchAboutVisible)
+        {
+            isDraggingGui = false;
+            return;
+        }
+
         AntigravityUITheme.EnsureInitialized();
 
         // Vẽ khung ngắm Camera Zivid (khi đang ở Góc nhìn Camera) hoặc khung PiP trực tiếp ở góc viewport
@@ -707,6 +730,8 @@ public class RobotCameraController : MonoBehaviour
             {
                 if (!IsMouseOverUI(e.mousePosition) && (e.button == 0 || e.button == 1 || e.button == 2))
                 {
+                    GUIUtility.keyboardControl = 0;
+                    workbenchKeyboardFocused = false;
                     isDraggingGui = true;
                     e.Use();
                 }
@@ -770,23 +795,25 @@ public class RobotCameraController : MonoBehaviour
         float dockW = DobotCR10AIKController.WorkbenchDockVisible ? DobotCR10AIKController.WorkbenchDockWidth : 0f;
         float topH = DobotCR10AIKController.WorkbenchHeaderHeight;
         float viewW = Mathf.Max(220f, Screen.width - dockW);
-        float viewH = Mathf.Max(180f, Screen.height - topH);
-
-        // Vẽ dấu chữ thập tâm quang học + 4 góc khung ngắm Camera Zivid
+        if (cam == null) return;
+        FixedRigCamera rig = EnsureFixedRigCamera(createIfMissing: false);
+        Rect rendered = cam.pixelRect;
+        Rect viewport = new Rect(rendered.x, Screen.height - rendered.yMax, rendered.width, rendered.height);
         Color prevColor = GUI.color;
         GUI.color = new Color(0.15f, 0.90f, 1.0f, 0.55f);
-        float cx = viewW * 0.5f;
-        float cy = topH + viewH * 0.5f;
+        float cx = viewport.center.x;
+        float cy = viewport.center.y;
         GUI.DrawTexture(new Rect(cx - 14f, cy - 1f, 28f, 2f), Texture2D.whiteTexture);
         GUI.DrawTexture(new Rect(cx - 1f, cy - 14f, 2f, 28f), Texture2D.whiteTexture);
 
-        float m = 18f;
-        float bLen = 22f;
-        float bThick = 2f;
-        float yTop = topH + m;
-        float yBot = Screen.height - 48f - m;
-        float xLeft = m;
-        float xRight = viewW - m;
+        const float m = 18f;
+        const float bLen = 22f;
+        const float bThick = 2f;
+        const float toolbarClearance = 48f;
+        float yTop = viewport.y + m;
+        float yBot = viewport.yMax - toolbarClearance - m;
+        float xLeft = viewport.x + m;
+        float xRight = viewport.xMax - m;
         if (yBot > yTop + 60f && xRight > xLeft + 80f)
         {
             GUI.DrawTexture(new Rect(xLeft, yTop, bLen, bThick), Texture2D.whiteTexture);
@@ -801,10 +828,9 @@ public class RobotCameraController : MonoBehaviour
         GUI.color = prevColor;
 
         // Thanh nhãn trạng thái Góc nhìn Camera Zivid ở góc trên bên trái vùng 3D (tự co giãn theo chiều rộng, không tràn chữ)
-        FixedRigCamera rig = EnsureFixedRigCamera(createIfMissing: false);
         float hCm = rig != null ? rig.heightFromGround_cm : 168.5f;
         float dCm = rig != null ? rig.distanceFromAxis_cm : 33.5f;
-        float fov = rig != null ? rig.cameraFovDeg : 45.0f;
+        float fov = cam.fieldOfView;
 
         string fullLabel = $"CAMERA ZIVID  |  Cao {hCm:F1}cm  |  Trục {dCm:F1}cm  |  FOV {fov:F0}°";
         string shortLabel = $"CAMERA ZIVID | H:{hCm:F0}cm | D:{dCm:F0}cm | FOV {fov:F0}°";
@@ -846,7 +872,7 @@ public class RobotCameraController : MonoBehaviour
         float viewW = Mathf.Max(220f, Screen.width - dockW);
 
         float boxW = Mathf.Min(292f, Mathf.Max(200f, viewW * 0.34f));
-        float imgH = boxW * (2f / 3f);
+        float imgH = (boxW - 8f) * zividPipRT.height / zividPipRT.width;
         float headerH = 24f;
         float footerH = 18f;
         float boxH = headerH + imgH + footerH + 6f;
@@ -882,13 +908,14 @@ public class RobotCameraController : MonoBehaviour
 
         // Ảnh trực tiếp từ Camera Zivid
         Rect imgRect = new Rect(boxX + 4f, boxY + headerH + 2f, boxW - 8f, imgH);
-        GUI.DrawTexture(imgRect, zividPipRT, ScaleMode.StretchToFill, false);
+        GUI.DrawTexture(imgRect, zividPipRT, ScaleMode.ScaleToFit, false);
 
         // Chữ thập tâm nhỏ trên khung PiP
         Color prev = GUI.color;
         GUI.color = new Color(0.15f, 0.92f, 1f, 0.65f);
-        float cx = imgRect.center.x;
-        float cy = imgRect.center.y;
+        Vector2 opticalCenter = fixedRigCamera != null ? fixedRigCamera.CaptureOpticalCenterUV : new Vector2(0.5f, 0.5f);
+        float cx = imgRect.x + imgRect.width * opticalCenter.x;
+        float cy = imgRect.y + imgRect.height * opticalCenter.y;
         GUI.DrawTexture(new Rect(cx - 8f, cy - 0.5f, 16f, 1f), Texture2D.whiteTexture);
         GUI.DrawTexture(new Rect(cx - 0.5f, cy - 8f, 1f, 16f), Texture2D.whiteTexture);
         GUI.color = prev;
@@ -904,7 +931,7 @@ public class RobotCameraController : MonoBehaviour
         FixedRigCamera rig = fixedRigCamera;
         float hCm = rig != null ? rig.heightFromGround_cm : 168.5f;
         float dCm = rig != null ? rig.distanceFromAxis_cm : 33.5f;
-        float fov = rig != null ? rig.cameraFovDeg : 45.0f;
+        float fov = rig != null ? rig.CaptureVerticalFovDeg : 45.0f;
         GUIStyle pipFooterStyle = new GUIStyle(AntigravityUITheme.StyleLabelMuted)
         {
             wordWrap = false,

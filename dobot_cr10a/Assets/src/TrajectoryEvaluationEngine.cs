@@ -251,7 +251,7 @@ public static class TrajectoryEvaluationEngine
         public float tpsLambda = 0.012f;           // Tham số điều chuẩn TPS
         public float residualThresholdMm = 12.0f;  // Ngưỡng sai số dư đăng ký -> vượt ngưỡng thì dừng & báo kỹ sư
         public float sprayDistanceDMm = 20f;       // Khoảng lùi súng d dọc pháp tuyến (mm)
-        public bool fillClosedDrawnRegions = true; // Với vùng Tròn/Vuông/Đa giác: phủ kín hay chỉ viền
+        public bool fillClosedDrawnRegions = true; // Phủ vùng kín và dải nét cọ rộng
         public bool clipToGarmentContour = true;
     }
 
@@ -1883,7 +1883,7 @@ public static class TrajectoryEvaluationEngine
     /// Bước 6 P1: Cắt chính xác đa giác kín `poly` (đã chuyển sang hệ tọa độ (u, v) theo majorAxis/minorAxis)
     /// bằng đường thẳng quét song song tại `v = vLine`. Trả về danh sách các giao đoạn hợp lệ `[uStart, uEnd]`.
     /// </summary>
-    private static List<Vector2> IntersectPolygonWithScanlineUV(List<Vector2> polyUV, float vLine)
+    private static List<Vector2> IntersectPolygonWithScanlineUV(List<Vector2> polyUV, float vLine, float minSpanM = 0.004f)
     {
         var hitsU = new List<float>(8);
         int n = polyUV.Count;
@@ -1904,7 +1904,7 @@ public static class TrajectoryEvaluationEngine
         {
             float u0 = hitsU[i];
             float u1 = hitsU[i + 1];
-            if (u1 - u0 >= 0.004f) // bỏ các đoạn vi mô < 4 mm
+            if (u1 - u0 >= minSpanM)
             {
                 intervals.Add(new Vector2(u0, u1));
             }
@@ -1979,7 +1979,7 @@ public static class TrajectoryEvaluationEngine
             var projected = new List<Vector2>(stroke.Count);
             foreach (Vector2 point in stroke)
                 projected.Add(projectCanonical(point));
-            strokes.Add(projected);
+            strokes.Add(ctrl.CopyCanvasStrokeWithBrushWidth(stroke, projected));
         }
         return strokes;
     }
@@ -3610,7 +3610,8 @@ public static class TrajectoryEvaluationEngine
 
         // Bước 1: Tách đầy đủ 2 vùng Mask ống quần trái/phải từ toàn bộ `garmentContourWorld` (đùi -> gấu, KHÔNG bị bó vào ô đùi nhỏ!)
         var legMaskPolys = ExtractLegMaskPolygonsFromMask2D(ctrl, 0.004f, preferFullGarmentSplit: true);
-        var drawnRegionPolys = p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion && ctrl.HasCustomDrawnRegions2D
+        bool usePatternScope = p2Cfg.regionScope != P2RegionScopeMode.FullLegMask;
+        var drawnRegionPolys = usePatternScope && ctrl.HasCustomDrawnRegions2D
             ? ctrl.GetCustomDrawnRegionPolygonsWorldXZ(plyLoader)
             : null;
         if (legMaskPolys.Count == 0 && has12Landmarks)
@@ -3627,7 +3628,7 @@ public static class TrajectoryEvaluationEngine
             if (drawnRegionPolys != null)
                 legMaskPolys.AddRange(drawnRegionPolys);
         }
-        bool canUseDrawnStrokes = p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion &&
+        bool canUseDrawnStrokes = usePatternScope &&
             (ctrl.HasCustomDrawnStrokes2D || (has12Landmarks && templateStrokesUV != null && templateStrokesUV.Count > 0));
         if (legMaskPolys.Count == 0 && !canUseDrawnStrokes)
         {
@@ -3673,8 +3674,8 @@ public static class TrajectoryEvaluationEngine
         if (flat2DMode)
             flatY = GetHighestGarmentSurfaceY(ctrl, plyLoader, flatY);
 
-        var openStrokeTargets = new List<(List<Vector2> stroke, List<List<Vector2>> masks)>();
-        if (p2Cfg.regionScope == P2RegionScopeMode.FromTemplateRegion)
+        var openStrokeTargets = new List<(List<Vector2> stroke, float widthMm, List<List<Vector2>> masks)>();
+        if (usePatternScope)
         {
             if (drawnRegionPolys != null)
                 targetPolysXZ.AddRange(drawnRegionPolys);
@@ -3685,9 +3686,12 @@ public static class TrajectoryEvaluationEngine
             {
                 if (!IsClosedHandDrawnStroke(stroke))
                 {
-                    float bandRadiusM = Mathf.Clamp(p2Cfg.openStrokeSprayWidthMm * 0.5f, 6f, 60f) * 0.001f;
-                    var masks = BuildMaskPolygonsFromOpenStrokes2D(new List<List<Vector2>> { stroke }, bandRadiusM, 0.003f);
-                    openStrokeTargets.Add((stroke, masks));
+                    float widthMm = ctrl.GetStrokeBrushWidthMm(stroke, p2Cfg.openStrokeSprayWidthMm);
+                    float bandRadiusM = widthMm * 0.0005f;
+                    var masks = widthMm >= 16f
+                        ? BuildMaskPolygonsFromOpenStrokes2D(new List<List<Vector2>> { stroke }, bandRadiusM, 0.003f)
+                        : new List<List<Vector2>>();
+                    openStrokeTargets.Add((stroke, widthMm, masks));
                     continue;
                 }
                 if (MatchesRegionOutline(stroke, targetPolysXZ)) continue;
@@ -3733,7 +3737,8 @@ public static class TrajectoryEvaluationEngine
             (isFullMaskMode || targetPolysXZ.Count > 0); attempt++)
         {
             float activeMargin = marginAttempts[attempt];
-            List<Vector3> activeContour = (attempt < 2) ? ctrl.garmentContourWorld : null;
+            List<Vector3> activeContour = (!isFullMaskMode || attempt < 2) ? ctrl.garmentContourWorld : null;
+            List<Vector3> keepOutLandmarks = isFullMaskMode ? ctrl.landmarksWorldPos : null;
             float marginM = activeMargin * 0.001f;
             p2Exec.leftLegPassCount = 0;
             p2Exec.rightLegPassCount = 0;
@@ -3776,7 +3781,7 @@ public static class TrajectoryEvaluationEngine
 
                             Vector2 ptXZ = centerPt + normalVec * offsetMeters;
                             bool inMask = IsPointInPolygonXZ(ptXZ, legMaskPoly);
-                            bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, ctrl.landmarksWorldPos, activeMargin, out _));
+                            bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, keepOutLandmarks, activeMargin, out _));
                             if (inSafe)
                             {
                                 currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
@@ -3825,7 +3830,7 @@ public static class TrajectoryEvaluationEngine
 
                                 Vector2 ptXZ = centerPt + normalVec * offsetMeters;
                                 bool inMask = IsPointInPolygonXZ(ptXZ, legMaskPoly);
-                                bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, ctrl.landmarksWorldPos, activeMargin, out _));
+                                bool inSafe = inMask && (activeContour == null || IsInsideValidSprayZone(ptXZ.x, ptXZ.y, activeContour, keepOutLandmarks, activeMargin, out _));
                                 if (inSafe)
                                 {
                                     currentSeg.Add(new Vector3(ptXZ.x, 0.02f, ptXZ.y));
@@ -3893,97 +3898,74 @@ public static class TrajectoryEvaluationEngine
             }
         }
 
-        // A pass along the entire leg can miss a small or isolated painted target.
-        // Cover each missed target independently of the others.
-        bool HasSprayedPass(List<Vector2> polygon)
+        // The leg skeleton stops short of the pocket. Complete any part of the authored
+        // target that the existing passes do not reach, using the fabric outline as the limit.
+        int legPassCount = strokesWorld.Count;
+
+        void AddUncoveredP2Segments(List<Vector3> path, float radiusM)
         {
-            for (int s = 0; s < strokesWorld.Count; s++)
+            float radiusSq = radiusM * radiusM;
+            var uncovered = new List<Vector3>();
+            bool IsCovered(Vector3 point)
             {
-                var path = strokesWorld[s];
-                for (int p = 1; p < path.Count; p++)
+                var q = new Vector2(point.x, point.z);
+                for (int s = 0; s < legPassCount; s++)
                 {
-                    if (!perPassSprayFlags[s][p]) continue;
-                    Vector3 mid = (path[p - 1] + path[p]) * 0.5f;
-                    if (IsPointInPolygonXZ(new Vector2(mid.x, mid.z), polygon)) return true;
-                }
-            }
-            return false;
-        }
-
-        void AddLocalP2Pass(List<Vector3> path)
-        {
-            var safePath = new List<Vector3>();
-            foreach (Vector3 point in path)
-            {
-                if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
-                    safePath.Add(point);
-                else
-                {
-                    AddSegment(safePath);
-                    safePath = new List<Vector3>();
-                }
-            }
-            AddSegment(safePath);
-        }
-
-        void AddSegment(List<Vector3> path)
-        {
-            if (path.Count < 2) return;
-            var flags = new List<bool>(path.Count) { false };
-            for (int p = 1; p < path.Count; p++) flags.Add(true);
-            strokesWorld.Add(path);
-            perPassSprayFlags.Add(flags);
-        }
-
-        foreach (var polygon in closedTargets)
-        {
-            if (HasSprayedPass(polygon)) continue;
-            foreach (var pass in BuildSimpleFillPassesInsidePolygon2D(polygon, stepSM))
-                AddLocalP2Pass(pass);
-        }
-        foreach (var open in openStrokeTargets)
-        {
-            if (!open.masks.Exists(HasSprayedPass))
-            {
-                AddLocalP2Pass(BuildWorldStroke(open.stroke));
-                continue;
-            }
-
-            // A full-leg pass can cross the band once and still miss most of a curved stroke.
-            float coverageRadius = Mathf.Min(stepSM, p2Cfg.openStrokeSprayWidthMm * 0.001f) * 0.5f;
-            float radiusSquared = coverageRadius * coverageRadius;
-            int existingPassCount = strokesWorld.Count;
-            bool PointIsCovered(Vector3 point)
-            {
-                Vector2 xz = new Vector2(point.x, point.z);
-                for (int s = 0; s < existingPassCount; s++)
-                {
-                    var pass = strokesWorld[s];
+                    List<Vector3> pass = strokesWorld[s];
                     for (int p = 1; p < pass.Count; p++)
                     {
                         if (!perPassSprayFlags[s][p]) continue;
-                        Vector2 a = new Vector2(pass[p - 1].x, pass[p - 1].z);
-                        Vector2 b = new Vector2(pass[p].x, pass[p].z);
-                        if (PointSegmentDistanceSquared(xz, a, b) <= radiusSquared) return true;
+                        var a = new Vector2(pass[p - 1].x, pass[p - 1].z);
+                        var b = new Vector2(pass[p].x, pass[p].z);
+                        if (PointSegmentDistanceSquared(q, a, b) <= radiusSq) return true;
                     }
                 }
                 return false;
             }
 
-            var center = BuildWorldStroke(open.stroke);
-            var uncovered = new List<Vector3>();
-            for (int p = 1; p < center.Count; p++)
+            void Flush()
             {
-                if (PointIsCovered((center[p - 1] + center[p]) * 0.5f))
+                if (uncovered.Count >= 2)
                 {
-                    AddLocalP2Pass(uncovered);
-                    uncovered = new List<Vector3>();
+                    var flags = new List<bool>(uncovered.Count) { false };
+                    for (int p = 1; p < uncovered.Count; p++) flags.Add(true);
+                    strokesWorld.Add(uncovered);
+                    perPassSprayFlags.Add(flags);
+                }
+                uncovered = new List<Vector3>();
+            }
+
+            for (int p = 1; p < path.Count; p++)
+            {
+                Vector3 a = path[p - 1];
+                Vector3 b = path[p];
+                Vector3 mid = (a + b) * 0.5f;
+                if (!IsInsidePatternFabric(a.x, a.z, ctrl.garmentContourWorld, 0f, out _) ||
+                    !IsInsidePatternFabric(b.x, b.z, ctrl.garmentContourWorld, 0f, out _) ||
+                    !IsInsidePatternFabric(mid.x, mid.z, ctrl.garmentContourWorld, 0f, out _) ||
+                    IsCovered(mid))
+                {
+                    if (uncovered.Count > 0) Flush();
                     continue;
                 }
-                if (uncovered.Count == 0) uncovered.Add(center[p - 1]);
-                uncovered.Add(center[p]);
+
+                if (uncovered.Count == 0) uncovered.Add(a);
+                uncovered.Add(b);
             }
-            AddLocalP2Pass(uncovered);
+            Flush();
+        }
+
+        foreach (var polygon in closedTargets)
+            foreach (var pass in BuildSimpleFillPassesInsidePolygon2D(polygon, stepSM))
+                AddUncoveredP2Segments(pass, stepSM * 0.5f);
+
+        foreach (var open in openStrokeTargets)
+        {
+            var brushPaths = new List<List<Vector3>>();
+            AppendRoundedBrushPasses(open.stroke, open.widthMm, stepSM, true, brushPaths);
+            float coverageRadius = Mathf.Min(stepSM * 0.5f, open.widthMm * 0.00025f);
+            foreach (var path in brushPaths)
+                AddUncoveredP2Segments(path, coverageRadius);
         }
 
         // Bước 7 & 8: Gán tọa độ Z, hướng súng, bật/tắt súng theo từng đoạn và kiểm tra quỹ đạo
@@ -3991,7 +3973,9 @@ public static class TrajectoryEvaluationEngine
 
         var wps = BuildSprayWaypointsFromWorldStrokes(
             strokesWorld, ctrl, plyLoader, tech,
-            p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel ? "P2_SKELETON" : "P2_OFFSET",
+            isFullMaskMode
+                ? (p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel ? "P2_SKELETON" : "P2_OFFSET")
+                : (p2Cfg.geometryMode == P2GeometryMode.SkeletonParallel ? "P2_PATTERN_SKELETON" : "P2_PATTERN_OFFSET"),
             useFixedVerticalNormal: useFixedVert,
             useFlatPlaneZ: flat2DMode,
             flatPlaneWorldY: flatY,
@@ -4574,46 +4558,31 @@ public static class TrajectoryEvaluationEngine
                 var projected = new List<Vector2>();
                 foreach (Vector2 uv in ResampleUV(stroke, stepUV))
                     projected.Add(WarpPointBarycentric12(uv, src12, dst12XZ));
-                if (projected.Count >= 2) handStrokes.Add(projected);
+                if (projected.Count >= 2) handStrokes.Add(ctrl.CopyCanvasStrokeWithBrushWidth(stroke, projected));
             }
         }
 
+        var brushPasses = new List<List<Vector3>>();
+        for (int i = 0; i < handStrokes.Count; i++)
+        {
+            if (MatchesRegionOutline(handStrokes[i], regionPolysForOverlay)) continue;
+            AppendRoundedBrushPasses(handStrokes[i], ctrl.GetStrokeBrushWidthMm(handStrokes[i]), fillStepM, p3Cfg.fillClosedDrawnRegions, brushPasses);
+        }
+        strokesWorld.AddRange(brushPasses);
         int totalCandidatePts = 0;
         int insideGarmentPts = 0;
-        float marginMm = Mathf.Clamp(p3Cfg.borderMarginEMm, 0f, 35f);
         foreach (var path in strokesWorld)
         {
             foreach (Vector3 point in path)
             {
                 totalCandidatePts++;
-                if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, 0f, out _))
+                if (IsInsidePatternFabric(point.x, point.z, ctrl.garmentContourWorld, 0f, out _))
                     insideGarmentPts++;
             }
         }
-        foreach (var stroke in handStrokes)
-        {
-            if (MatchesRegionOutline(stroke, regionPolysForOverlay)) continue;
-            var path = BuildWorldStroke(stroke);
-            var validSegments = new List<List<Vector3>>();
-            var segment = new List<Vector3>();
-            foreach (Vector3 point in path)
-            {
-                totalCandidatePts++;
-                bool inside = IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm * 0.5f, out _);
-                if (inside) insideGarmentPts++;
-                if (inside || !p3Cfg.clipToGarmentContour)
-                {
-                    segment.Add(point);
-                }
-                else
-                {
-                    if (segment.Count >= 2) validSegments.Add(segment);
-                    segment = new List<Vector3>();
-                }
-            }
-            if (segment.Count >= 2) validSegments.Add(segment);
-            if (validSegments.Count > 0) strokesWorld.AddRange(validSegments);
-        }
+        if (p3Cfg.clipToGarmentContour)
+            strokesWorld = ClipDrawnPathsToFabric(strokesWorld, ctrl.garmentContourWorld,
+                Mathf.Clamp(p3Cfg.borderMarginEMm, 0f, 35f) * 0.5f);
 
         for (int i = 0; i < regionPolysForOverlay.Count; i++)
             p3Exec.targetRegionPolygonsWorld.Add(LiftPolygon2DToWorldSurface(regionPolysForOverlay[i], ctrl, plyLoader, flat2D, flatY));
@@ -4717,6 +4686,136 @@ public static class TrajectoryEvaluationEngine
             }
         }
         return passes;
+    }
+
+    private static void AppendRoundedBrushPasses(
+        List<Vector2> strokeXZ, float brushWidthMm, float spacingM, bool fillBrush,
+        List<List<Vector3>> output)
+    {
+        if (strokeXZ == null || strokeXZ.Count < 2) return;
+        if (!fillBrush || brushWidthMm <= 8f)
+        {
+            output.Add(BuildWorldStroke(strokeXZ));
+            return;
+        }
+
+        // The mask is the union of the segment strips and the round caps.
+        // Intersect each row with that union so bends and holes stay open.
+        float radius = brushWidthMm * 0.0005f;
+        ComputePcaAxes2D(strokeXZ, Vector2.up, out Vector2 origin, out Vector2 major, out Vector2 minor);
+        var points = new List<Vector2>(strokeXZ.Count);
+        var strips = new List<List<Vector2>>(strokeXZ.Count - 1);
+        float minV = float.PositiveInfinity;
+        float maxV = float.NegativeInfinity;
+        foreach (Vector2 point in strokeXZ)
+        {
+            Vector2 delta = point - origin;
+            var uv = new Vector2(Vector2.Dot(delta, major), Vector2.Dot(delta, minor));
+            minV = Mathf.Min(minV, uv.y);
+            maxV = Mathf.Max(maxV, uv.y);
+            if (points.Count > 0)
+            {
+                Vector2 from = points[points.Count - 1];
+                Vector2 edge = uv - from;
+                if (edge.sqrMagnitude > 1e-10f)
+                {
+                    Vector2 normal = new Vector2(-edge.y, edge.x).normalized * radius;
+                    strips.Add(new List<Vector2> { from + normal, uv + normal, uv - normal, from - normal });
+                }
+            }
+            points.Add(uv);
+        }
+
+        minV -= radius;
+        maxV += radius;
+        float rowSpacing = Mathf.Clamp(Mathf.Min(spacingM, radius), 0.0025f, 0.035f);
+        int rowCount = Mathf.Max(1, Mathf.CeilToInt((maxV - minV) / rowSpacing));
+        var spans = new List<Vector2>();
+        for (int row = 0; row < rowCount; row++)
+        {
+            float v = Mathf.Lerp(minV, maxV, (row + 0.5f) / rowCount);
+            spans.Clear();
+            foreach (List<Vector2> strip in strips)
+                spans.AddRange(IntersectPolygonWithScanlineUV(strip, v, minSpanM: 0f));
+
+            foreach (Vector2 center in points)
+            {
+                float dv = v - center.y;
+                float halfSpanSq = radius * radius - dv * dv;
+                if (halfSpanSq <= 0f) continue;
+                float halfSpan = Mathf.Sqrt(halfSpanSq);
+                spans.Add(new Vector2(center.x - halfSpan, center.x + halfSpan));
+            }
+            if (spans.Count == 0) continue;
+
+            spans.Sort((a, b) => a.x.CompareTo(b.x));
+            int spanCount = 1;
+            for (int i = 1; i < spans.Count; i++)
+            {
+                Vector2 last = spans[spanCount - 1];
+                Vector2 next = spans[i];
+                if (next.x <= last.y + 1e-6f)
+                    spans[spanCount - 1] = new Vector2(last.x, Mathf.Max(last.y, next.y));
+                else
+                    spans[spanCount++] = next;
+            }
+
+            bool reverse = (row & 1) != 0;
+            for (int i = 0; i < spanCount; i++)
+            {
+                Vector2 span = spans[reverse ? spanCount - 1 - i : i];
+                if (span.y - span.x < 0.001f) continue;
+                float from = reverse ? span.y : span.x;
+                float to = reverse ? span.x : span.y;
+                int steps = Mathf.CeilToInt((span.y - span.x) / 0.004f);
+                var pass = new List<Vector3>(steps + 1);
+                for (int p = 0; p <= steps; p++)
+                {
+                    Vector2 xz = origin + major * Mathf.Lerp(from, to, (float)p / steps) + minor * v;
+                    pass.Add(new Vector3(xz.x, 0.02f, xz.y));
+                }
+                output.Add(pass);
+            }
+        }
+    }
+
+    internal static bool IsInsidePatternFabric(float x, float z, List<Vector3> contour, float marginMm, out string reason)
+    {
+        // An authored pattern can include pockets or cuffs. Still enforce the detected fabric boundary.
+        return IsInsideValidSprayZone(x, z, contour, null, marginMm, out reason);
+    }
+
+    internal static bool IsDrawnPatternSegment(string segmentName)
+    {
+        return !string.IsNullOrEmpty(segmentName) &&
+            (segmentName.StartsWith("P2_PATTERN_", StringComparison.Ordinal) ||
+             segmentName.StartsWith("P3_BARYCENTRIC12_S", StringComparison.Ordinal) ||
+             segmentName.StartsWith("P4_CURRENT_SURFACE_S", StringComparison.Ordinal) ||
+             segmentName.StartsWith("P4_ICP", StringComparison.Ordinal));
+    }
+
+    private static List<List<Vector3>> ClipDrawnPathsToFabric(
+        List<List<Vector3>> strokes, List<Vector3> contour, float marginMm)
+    {
+        var clipped = new List<List<Vector3>>();
+        foreach (List<Vector3> path in strokes)
+        {
+            var segment = new List<Vector3>();
+            foreach (Vector3 point in path)
+            {
+                if (IsInsidePatternFabric(point.x, point.z, contour, marginMm, out _))
+                {
+                    segment.Add(point);
+                }
+                else if (segment.Count > 0)
+                {
+                    if (segment.Count >= 2) clipped.Add(segment);
+                    segment = new List<Vector3>();
+                }
+            }
+            if (segment.Count >= 2) clipped.Add(segment);
+        }
+        return clipped;
     }
 
     private static void ComputeSprayAndTravelLengths(List<DobotCR10AIKController.WaypointData> wps, out float sprayMm, out float travelMm)
@@ -5536,30 +5635,14 @@ public static class TrajectoryEvaluationEngine
                 }
                 foreach (var stroke in directStrokes)
                     if (!MatchesRegionOutline(stroke, directRegions))
-                        strokesWorld.Add(BuildWorldStroke(stroke));
+                        AppendRoundedBrushPasses(stroke, ctrl.GetStrokeBrushWidthMm(stroke), spacingM,
+                            p4Cfg.fillClosedDrawnRegions, strokesWorld);
 
                 if (p4Cfg.clipToGarmentContour)
                 {
-                    var clippedStrokes = new List<List<Vector3>>();
-                    float marginMm = tech != null ? tech.borderMarginMm * 0.5f : 8f;
-                    foreach (var path in strokesWorld)
-                    {
-                        var segment = new List<Vector3>();
-                        foreach (Vector3 point in path)
-                        {
-                            if (IsInsideValidSprayZone(point.x, point.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, marginMm, out _))
-                                segment.Add(point);
-                            else
-                            {
-                                if (segment.Count >= 2) clippedStrokes.Add(segment);
-                                segment = new List<Vector3>();
-                            }
-                        }
-                        if (segment.Count >= 2) clippedStrokes.Add(segment);
-                    }
-                    strokesWorld = clippedStrokes;
+                    strokesWorld = ClipDrawnPathsToFabric(strokesWorld, ctrl.garmentContourWorld, tech != null ? tech.borderMarginMm * 0.5f : 8f);
                     if (strokesWorld.Count == 0)
-                        p4Exec.warningMessage = "P4 không còn đoạn vẽ hợp lệ sau khi cắt theo biên và vùng cấm.";
+                        p4Exec.warningMessage = "P4 không còn đoạn vẽ trong đường bao phôi.";
                 }
 
                 // Drawing and target already share a frame. Sample height at the drawn XZ.
@@ -5767,9 +5850,9 @@ public static class TrajectoryEvaluationEngine
                     {
                         Vector3 snapped = huggedPts[p];
                         Vector3 nrm = huggedNorms[p];
-                        bool keep = (!p4Cfg.clipToGarmentContour || attempt == 1)
-                            ? true
-                            : IsInsideValidSprayZone(snapped.x, snapped.z, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech != null ? tech.borderMarginMm * 0.5f : 8f, out _);
+                        float marginMm = attempt == 0 ? (tech != null ? tech.borderMarginMm * 0.5f : 8f) : 0f;
+                        bool keep = !p4Cfg.clipToGarmentContour ||
+                            IsInsidePatternFabric(snapped.x, snapped.z, ctrl.garmentContourWorld, marginMm, out _);
                         if (keep)
                         {
                             curSurf.Add(snapped);
@@ -6043,7 +6126,7 @@ public static class TrajectoryEvaluationEngine
                 var raw = templateStrokesUV[s];
                 if (raw == null || raw.Count < 2) continue;
                 var resampled = ResampleUV(raw, 0.018f);
-                List<Vector3> worldStroke = new List<Vector3>();
+                var warpedStrokeXZ = new List<Vector2>(resampled.Count);
 
                 for (int p = 0; p < resampled.Count; p++)
                 {
@@ -6058,27 +6141,15 @@ public static class TrajectoryEvaluationEngine
                         qWarped = qP3 + (qWarped - qP3).normalized * 0.032f;
                     }
 
-                    bool keep = p4Cfg.clipToGarmentContour
-                        ? IsInsideValidSprayZone(qWarped.x, qWarped.y, ctrl.garmentContourWorld, ctrl.landmarksWorldPos, tech.borderMarginMm * 0.5f, out _)
-                        : true;
-                    if (keep)
-                    {
-                        worldStroke.Add(new Vector3(qWarped.x, 0.02f, qWarped.y));
-                    }
-                    else if (worldStroke.Count >= 2)
-                    {
-                        strokesWorld.Add(worldStroke);
-                        worldStroke = new List<Vector3>();
-                    }
-                    else
-                    {
-                        worldStroke.Clear();
-                    }
+                    warpedStrokeXZ.Add(qWarped);
                 }
-                if (worldStroke.Count >= 2) strokesWorld.Add(worldStroke);
+                AppendRoundedBrushPasses(warpedStrokeXZ, ctrl.GetStrokeBrushWidthMm(raw),
+                    ctrl.ComputeEffectiveRegionFillSpacingMm() * 0.001f, p4Cfg.fillClosedDrawnRegions, strokesWorld);
             }
         }
 
+        if (p4Cfg.clipToGarmentContour)
+            strokesWorld = ClipDrawnPathsToFabric(strokesWorld, ctrl.garmentContourWorld, tech != null ? tech.borderMarginMm * 0.5f : 8f);
 
         // Nhánh dự phòng vẫn sử dụng BÁM MẶT 3D THẬT (Nearest 3D + Chia mịn cung 3D + Pháp tuyến PCA 3D) để không bị chiếu thẳng đứng!
         List<Vector3> denseFallbackCloud3D = (plyLoader != null && !flat2D)
@@ -6697,18 +6768,18 @@ public static class TrajectoryEvaluationEngine
         eTPercent = 100f;
         coveragePercent = 0f;
         oversprayPercent = 0f;
-        if (waypoints == null || waypoints.Count < 2 || ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12)
-            return;
+        if (waypoints == null || waypoints.Count < 2 || ctrl == null ||
+            ctrl.landmarksWorldPos == null || ctrl.landmarksWorldPos.Count < 12) return;
 
         // Xác định vùng lưới mô phỏng bao quanh quần + lề 6cm để đo cả lượng tràn ngoài R (Overspray O)
         float minX = float.MaxValue, maxX = float.MinValue;
         float minZ = float.MaxValue, maxZ = float.MinValue;
-        for (int i = 0; i < ctrl.landmarksWorldPos.Count; i++)
+        foreach (Vector3 point in ctrl.landmarksWorldPos)
         {
-            minX = Mathf.Min(minX, ctrl.landmarksWorldPos[i].x);
-            maxX = Mathf.Max(maxX, ctrl.landmarksWorldPos[i].x);
-            minZ = Mathf.Min(minZ, ctrl.landmarksWorldPos[i].z);
-            maxZ = Mathf.Max(maxZ, ctrl.landmarksWorldPos[i].z);
+            minX = Mathf.Min(minX, point.x);
+            maxX = Mathf.Max(maxX, point.x);
+            minZ = Mathf.Min(minZ, point.z);
+            maxZ = Mathf.Max(maxZ, point.z);
         }
         minX -= 0.06f; maxX += 0.06f; minZ -= 0.06f; maxZ += 0.06f;
 
@@ -6722,10 +6793,15 @@ public static class TrajectoryEvaluationEngine
         float dz = (maxZ - minZ) / (nz - 1);
 
         // Bản đồ mật độ mục tiêu T*(x): giữa đùi->gối 2 ống đậm (1.0), đánh nhã mượt ra biên theo hàm Gauss
-        Vector2 thighL = new Vector2(ctrl.landmarksWorldPos[4].x, ctrl.landmarksWorldPos[4].z);
-        Vector2 kneeL = new Vector2(ctrl.landmarksWorldPos[6].x, ctrl.landmarksWorldPos[6].z);
-        Vector2 thighR = new Vector2(ctrl.landmarksWorldPos[5].x, ctrl.landmarksWorldPos[5].z);
-        Vector2 kneeR = new Vector2(ctrl.landmarksWorldPos[7].x, ctrl.landmarksWorldPos[7].z);
+        Vector2 LandmarkXZ(int index)
+        {
+            Vector3 point = ctrl.landmarksWorldPos[index];
+            return new Vector2(point.x, point.z);
+        }
+        Vector2 thighL = LandmarkXZ(4);
+        Vector2 kneeL = LandmarkXZ(6);
+        Vector2 thighR = LandmarkXZ(5);
+        Vector2 kneeR = LandmarkXZ(7);
         float targetSigmaM = 0.075f;
 
         for (int ix = 0; ix < nx; ix++)
