@@ -44,7 +44,7 @@ Mô phỏng bằng quỹ đạo mẫu chỉ cần Unity. Để dùng nhận di�
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install ultralytics opencv-python numpy scipy scikit-learn
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Kiểm tra môi trường đã nhập được các thư viện và tìm thấy cả hai trọng số.
